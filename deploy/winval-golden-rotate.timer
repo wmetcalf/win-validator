@@ -1,0 +1,11 @@
+# Roll the golden weekly (freshness re-bake + a fresh rollback backup). Adjust OnCalendar to taste.
+[Unit]
+Description=Weekly win-validator golden refresh + rotation
+
+[Timer]
+OnCalendar=Sun 04:00
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

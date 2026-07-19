@@ -1,0 +1,40 @@
+# win-validator POOL-MANAGER — the privileged dispatcher (host systemd unit).
+#
+# Runs on the libvirt host (it needs virsh + iptables for the VM pool + rooter egress + tunnel
+# kill-switch). It is NEVER client-facing: it only claims queued jobs from the same Postgres the
+# ingress container writes to, reads their spooled inputs from the shared job_root, validates them
+# in a warm VM worker, and writes the verdict back. Install:
+#     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
+#     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
+[Unit]
+Description=win-validator pool-manager (libvirt VM worker dispatcher)
+After=network-online.target libvirtd.service docker.service
+Wants=network-online.target
+Requires=libvirtd.service
+
+[Service]
+Type=simple
+# Needs libvirt + iptables. Run as root (simplest) or a user in the libvirt group with passwordless
+# sudo for virsh/iptables — LibvirtVmConfig.sudo prefixes those, so root makes the sudo a no-op.
+User=root
+WorkingDirectory=/home/coz/winval
+Environment=PYTHONPATH=/home/coz/winval
+# MUST match the ingress: same JobStore (the Postgres published by the compose) + same job_root path.
+Environment=BLASTBOX_DATABASE_URL=postgresql://winval:winval@127.0.0.1:5433/winval
+Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
+Environment=AUTHENTICODE_POOL_SIZE=2
+Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
+# Smoke gate: validate this benign sample == Valid BEFORE taking the clean snapshot AND after every
+# recycle — so a booted-but-broken golden/worker never serves a job.
+Environment=AUTHENTICODE_SMOKE_SAMPLE=/home/coz/winval/samples/whoami.exe
+# Recycle cadence ("clear the job"): snapshot-revert wipes the per-job contamination. Default 25
+# (the engine's parse-only risk×cost). Set to 1 to clear after EVERY job (max isolation, ~6-8s/job).
+# Environment=AUTHENTICODE_JOBS_PER_RECYCLE=1
+ExecStart=/home/coz/winval/.venv/bin/python -m winval_blastbox.pool_manager
+Restart=on-failure
+RestartSec=5
+# /dev/shm holds the RAM-backed golden + worker overlays; don't let systemd sandbox it away.
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+# Declarative win-validator VM worker — the "docker-compose for libvirt/kvm/qemu" (blastbox
+# vm_compose). `VmWorkerSpec.from_dict` builds the WarmPool from this; `build_image()` runs the
+# reproducible golden bake. The OS-install base (autounattend WS2025) is produced once and lives at
+# image.base_qcow2; golden_build.py layers the worker value-add on top, gated + promoted.
+workers:
+  authenticode:
+    image:
+      golden: /dev/shm/golden-base.qcow2                                # what workers boot (overlay COW)
+      base_qcow2: /var/lib/libvirt/images/winserver2025-base.qcow2      # post-OS-install WS2025
+      builder: qemu
+      provisioners:
+        # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups)
+        - "python3 /home/coz/winval/golden_build.py build-and-promote"
+
+    # domain shape
+    mem_mb: 4096
+    vcpus: 2
+    network: default
+    disk_bus: sata
+    nic_model: e1000
+    overlay_dir: /dev/shm
+    agent_port: 8765
+
+    # pool / reuse policy (jobs_per_recycle overridable at runtime via AUTHENTICODE_JOBS_PER_RECYCLE)
+    warm_size: 2
+    jobs_per_recycle: 25
+    max_jobs_per_slot: 0
+
+    # egress (rooter model). exit: direct | openvpn | wireguard | tor | inetsim.
+    # egress_ports composes onto any exit; unset = all traffic over the exit. tor blocks non-TCP.
+    egress:
+      exit: direct
+      # egress_ports: [53, 80, 443, 8080]
+      # block_internal: true
+      # vpn_table: vpn
+      # vpn_tun: tun0

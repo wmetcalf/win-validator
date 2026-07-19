@@ -1,0 +1,10 @@
+# Optional: copy to variables.auto.pkvars.hcl to persist settings (Packer auto-loads *.auto.pkvars.hcl).
+# You can also pass any of these via `./build.sh -var 'name=value'` or the ADMIN_PASSWORD / ISO_PATH env.
+iso_path       = "iso/windows.iso"   # drop your WS2025 ISO here (or set ISO_PATH)
+# iso_checksum = "sha256:<hex>"      # optional integrity check; "none" (default) skips it
+# admin_password = "Set#Me!2026"     # optional — build.sh AUTO-GENERATES a strong random one
+                                     # (saved to keys/admin_password.txt); only set to force a specific pw
+disk_size_mb   = 61440               # 60 GB
+memory_mb      = 4096
+cpus           = 2
+# headless     = false               # uncomment to watch the install in a QEMU window

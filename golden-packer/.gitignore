@@ -1,0 +1,15 @@
+# large inputs — you drop these in
+iso/*
+!iso/.gitkeep
+# throwaway per-build key + build output + rendered answer
+keys/
+output/
+output-*/
+answer/Autounattend.xml
+answer/Autounattend.xml.orig
+# packer + qemu artifacts
+*.log
+*.qcow2
+.packer_cache/
+crash.log
+packer_cache/

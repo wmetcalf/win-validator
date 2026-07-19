@@ -1,0 +1,56 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- VM images / installers / guest tools (large; build-time inputs, fetched not committed) ---
+*.qcow2
+*.qcow2.*
+*.img
+*.vhd
+*.vhdx
+*.iso
+ga/
+*.msi
+virtio-win*
+qemu-ga*
+
+# --- LIVE MALWARE / sample corpora — NEVER commit ---
+corpus/
+samples/
+smoke/
+cab/
+parity/
+results*.jsonl
+*.sample
+
+# --- Secrets / keys / infra credentials ---
+*.pem
+*.key
+*.pfx
+*.p12
+*_key
+id_rsa*
+id_ed25519*
+*.ovpn
+*.env
+.env*
+secrets*
+*.secret
+fakenet/                 # CAPE FakeNet CA material (cert + config)
+golden-packer/keys/      # generated Administrator password + build ssh key
+golden-packer/iso/       # operator-supplied Windows ISOs
+golden-packer/output/    # built golden qcow2
+
+# --- Local internal planning docs (contain infra IPs — not for the public repo) ---
+2026-06-20-windows-authenticode-ember-validation-design.md
+2026-06-20-p1-packer-golden-plan.md
+
+# --- Build / runtime output ---
+output/
+*.log

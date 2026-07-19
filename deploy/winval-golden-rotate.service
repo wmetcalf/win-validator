@@ -1,0 +1,25 @@
+# win-validator golden rotation — one gated refresh+rotate cycle (driven by the .timer).
+# Rebakes the golden's trust state (disallowed kill-list / CRL cache / roots via myatg --refresh),
+# validates the candidate (benign==Valid + revoked==Revoked), and promotes it ONLY if it passes,
+# keeping the last N goldens as rollback backups. A failing gate keeps the current golden + exits
+# non-zero (surfaced by systemd). Restarts the pool-manager on success to re-warm off the new base.
+[Unit]
+Description=win-validator golden refresh + validation-gated rotation
+After=libvirtd.service winval-pool-manager.service
+Requires=libvirtd.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/coz/winval
+Environment=PYTHONPATH=/home/coz/winval
+Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
+Environment=GOLDEN_BASE=/dev/shm/golden-base.qcow2
+Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
+Environment=GOLDEN_BACKUP_DIR=/var/lib/libvirt/images/golden-backups
+Environment=GOLDEN_KEEP_N=5
+Environment=GOLDEN_BENIGN_SAMPLE=/home/coz/winval/samples/whoami.exe
+# Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
+# Environment=GOLDEN_REVOKED_SAMPLE=/home/coz/winval/samples/revoked.dll
+Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
+ExecStart=/home/coz/winval/.venv/bin/python /home/coz/winval/golden_rotate.py refresh-and-rotate

@@ -1,0 +1,23 @@
+# win-validator INGRESS image — the unprivileged, client-facing tier.
+# Holds NO privilege: it only needs the JobStore (Postgres/Redis) + the shared job_root volume.
+# No libvirt, no iptables, no docker socket, no worker-network access. Runs read-only as non-root.
+FROM python:3.12-slim
+
+# JobStore (released blastbox — the JobStore is stable core, the libvirt primitive is host-only) +
+# FastAPI + the Postgres driver. NO blastbox.host.runtime libvirt deps are imported by the ingress.
+RUN pip install --no-cache-dir \
+        "blastbox>=0.1.19" \
+        "fastapi" "uvicorn[standard]" "python-multipart" \
+        "psycopg[binary,pool]" "redis"
+        # ^ blastbox.host.jobs.__init__ eagerly imports the redis store even for a Postgres URL,
+        #   so `redis` is required to import the JobStore at all (psycopg is the actual PG driver).
+
+RUN useradd -u 10001 -m winval
+WORKDIR /app
+# Whole package is copied, but the lazy __init__ means importing winval_blastbox.ingress never pulls
+# in engine/pool/host_runner (libvirt) — those modules ship inert and are never imported here.
+COPY winval_blastbox/ /app/winval_blastbox/
+
+USER 10001
+EXPOSE 8099
+CMD ["uvicorn", "winval_blastbox.ingress:app", "--host", "0.0.0.0", "--port", "8099"]
