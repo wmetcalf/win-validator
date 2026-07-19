@@ -25,23 +25,22 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/home/coz/winval")
-import golden_rotate as gr  # libvirt/SSH helpers + validate_golden + rotate
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)  # import the sibling golden_rotate (libvirt/SSH helpers + gate + rotate)
+import golden_rotate as gr
 
 logger = logging.getLogger("winval.golden_build")
 
 BASE_QCOW2 = os.environ.get("GOLDEN_BUILD_BASE", "/var/lib/libvirt/images/winserver2025-base.qcow2")
 AGENT_DIR = "C:\\agent"
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
-# Host files staged into the guest before the steps run (scp). The provisioner .ps1 + myatg sources
-# live on the host; the build copies them in so the recipe is self-contained.
-STAGE = [
-    ("/home/coz/winval/myatg.cs", f"{AGENT_DIR}/myatg.cs"),
-    ("/home/coz/winval/rdp_validate.cs", f"{AGENT_DIR}/rdp_validate.cs"),
-    # native HTTP serve mode (replaces the PowerShell guest-agent-myatg.ps1 shim)
-    ("/home/coz/winval/http_serve.cs", f"{AGENT_DIR}/http_serve.cs"),
-    ("/home/coz/winval/service.cs", f"{AGENT_DIR}/service.cs"),
-]
+# The myatg validator sources compiled in-guest. Point MYATG_SRC at a myatg checkout
+# (github.com/wmetcalf/myatg); defaults to a sibling `../myatg` clone next to this repo.
+MYATG_SRC = os.environ.get("MYATG_SRC", os.path.join(os.path.dirname(_HERE), "myatg"))
+_MYATG_FILES = ["myatg.cs", "rdp_validate.cs", "http_serve.cs", "service.cs"]
+# Host files staged into the guest before the steps run (scp): the myatg sources compiled in-guest
+# (native HTTP serve mode — `myatg --serve-http`, superseding the old PowerShell agent shim).
+STAGE = [(os.path.join(MYATG_SRC, f), f"{AGENT_DIR}/{f}") for f in _MYATG_FILES]
 
 # Ordered, idempotent in-guest provisioner steps. Each: (name, powershell). The powershell should be
 # safe to re-run (check-then-act). The heavy OS hardening / cert-store / graveyard-pull steps are in
@@ -86,6 +85,11 @@ STEPS: list[tuple[str, str]] = [
 
 def build(base: str = BASE_QCOW2) -> str:
     """Boot ``base`` as an overlay, stage files, run the STEPS in order, flatten -> candidate qcow2."""
+    missing = [f for f in _MYATG_FILES if not Path(os.path.join(MYATG_SRC, f)).exists()]
+    if missing:
+        raise SystemExit(
+            f"myatg sources not found in MYATG_SRC={MYATG_SRC!r}: {missing}. "
+            "Set MYATG_SRC to a myatg checkout (github.com/wmetcalf/myatg) or clone it as ../myatg.")
     ts = gr._run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
     dom = f"golden-build-{ts}"
     overlay = f"/dev/shm/{dom}.qcow2"

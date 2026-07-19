@@ -184,23 +184,30 @@ class AuthenticodeEngine:
         get_pool()
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
+        # Per-job myatg overrides come in via the blastbox allowlist as AUTHENTICODE_* env.
+        # rev/scripts are per-REQUEST (forwarded as ?rev=/?scripts= on the agent HTTP call);
+        # gv (graveyard) is server-global — baked into the golden's --serve-http startup, so it
+        # can't be applied per job — and TIER isn't a myatg parameter. Forward what we can and be
+        # honest about what we can't.
+        req_params = {}
+        if os.environ.get("AUTHENTICODE_REV"):
+            req_params["rev"] = os.environ["AUTHENTICODE_REV"]
+        if os.environ.get("AUTHENTICODE_SCRIPTS"):
+            req_params["scripts"] = os.environ["AUTHENTICODE_SCRIPTS"]
+
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
-        verdict = get_pool().validate(str(input))
+        verdict = get_pool().validate(str(input), params=req_params or None)
 
         warnings: list[BbWarning] = []
-        # Per-job param forwarding to the in-guest agent is not wired yet: the
-        # agent transport is [filename][bytes] only, so myatg runs with the
-        # operator-baked guest defaults. Surface any client-requested override so
-        # the result is honest about what was (not) applied.
-        requested = {k: os.environ[k] for k in PARAM_KEYS if os.environ.get(k)}
-        if requested:
+        unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if os.environ.get(k))
+        if unforwardable:
             warnings.append(
                 BbWarning(
                     code="param_not_forwarded",
                     message=(
-                        "per-job myatg params not yet plumbed to the guest agent; "
-                        "used guest defaults: " + ",".join(sorted(requested))
+                        "--gv is server-global (baked into the golden's serve startup) and TIER is "
+                        "not a myatg parameter; not applied per-job: " + ",".join(unforwardable)
                     ),
                 )
             )

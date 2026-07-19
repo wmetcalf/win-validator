@@ -25,15 +25,28 @@ from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
 
 
-def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0) -> dict:
+# Per-job myatg overrides that are safe to vary per REQUEST (myatg exposes them as query params on
+# --serve-http). `gv` (graveyard) and `max-size` are server-global — baked into the golden's serve
+# startup — so they are NOT here; a per-job gv/tier can't be applied and the engine says so.
+_PER_REQUEST_PARAMS = ("rev", "scripts")
+
+
+def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
+                   params: dict | None = None) -> dict:
     """Validate a file via the myatg guest agent's HTTP API:
-    ``POST http://<ip>:<port>/validate?name=<filename>`` with the raw file bytes as the body,
-    returning the verdict JSON. The filename is passed for extension-based routing (.rdp / script
-    SIP type) only — myatg verdicts are content-hashed, so the base name is irrelevant."""
+    ``POST http://<ip>:<port>/validate?name=<filename>[&rev=..&scripts=..]`` with the raw file bytes
+    as the body, returning the verdict JSON. The filename is passed for extension-based routing
+    (.rdp / script SIP type) only — myatg verdicts are content-hashed, so the base name is irrelevant.
+    ``params`` carries per-request myatg overrides (``rev`` / ``scripts``); myatg validates the values
+    itself and falls back to its startup defaults on an unknown one."""
     host, port = endpoint
     with open(path, "rb") as fh:
         data = fh.read()
-    url = f"http://{host}:{port}/validate?name=" + urllib.parse.quote(os.path.basename(path))
+    q = {"name": os.path.basename(path)}
+    for k in _PER_REQUEST_PARAMS:
+        if params and params.get(k):
+            q[k] = str(params[k])
+    url = f"http://{host}:{port}/validate?" + urllib.parse.urlencode(q)
     req = urllib.request.Request(
         url, data=data, method="POST", headers={"Content-Type": "application/octet-stream"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -153,12 +166,12 @@ class WarmVmPool:
             time.sleep(2)
         raise RuntimeError("WarmVmPool: no worker became warm within timeout")
 
-    def validate(self, path: str) -> dict:
+    def validate(self, path: str, params: dict | None = None) -> dict:
         slot = self._pool.claim(timeout_s=self._claim_timeout_s)
         if slot is None:
             raise RuntimeError("no warm VM worker available")
         try:
-            return agent_validate(slot.endpoint, path)  # type: ignore[attr-defined]
+            return agent_validate(slot.endpoint, path, params=params)  # type: ignore[attr-defined]
         finally:
             self._pool.release(slot)
 

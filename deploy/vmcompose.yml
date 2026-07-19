@@ -9,8 +9,10 @@ workers:
       base_qcow2: /var/lib/libvirt/images/winserver2025-base.qcow2      # post-OS-install WS2025
       builder: qemu
       provisioners:
-        # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups)
-        - "python3 /home/coz/winval/golden_build.py build-and-promote"
+        # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups).
+        # Run from the win-validator checkout (cwd), or set an absolute path to golden_build.py.
+        # Point MYATG_SRC at a myatg checkout (defaults to ../myatg beside this repo).
+        - "python3 golden_build.py build-and-promote"
 
     # domain shape
     mem_mb: 4096

@@ -48,10 +48,10 @@ flowchart TB
     end
 
     subgraph vm["inside the worker = the sandbox"]
-        agent["guest-agent-myatg.ps1<br/>NETWORK SERVICE · LIMITED"] --> myatg["<b>myatg.exe</b>"]
+        agent["myatg.exe --serve-http (ONSTART agent)<br/>NETWORK SERVICE · LIMITED"]
     end
 
-    pm <-->|"TCP :8765 — [filename][bytes] → verdict JSON"| agent
+    pm <-->|"HTTP :8765 — POST /validate?name=..[&rev=..&scripts=..] → verdict JSON"| agent
     w -.->|"egress: VPN/SOCKS/tor · web-only 53/80/443 · block RFC1918"| resp(["revocation responders<br/>(AIA / CRL / OCSP / RFC3161)"])
 ```
 
@@ -62,14 +62,15 @@ flowchart TB
    `authenticode` engine, which hands the file to a **warm Windows worker** from the pool.
 3. The worker is a **libvirt qcow2 overlay clone** off the golden base with an internal `clean`
    snapshot. A baked-in guest agent (`myatg.exe`, running as **NETWORK SERVICE, unprivileged**)
-   validates the file over a length-prefixed TCP protocol and returns myatg's JSON verdict.
+   validates the file over an HTTP `POST /validate` call and returns myatg's JSON verdict
+   (per-job `?rev=`/`?scripts=` overrides ride along on that request).
 4. blastbox **re-seals** that output from disk (recomputing every hash/size, confining paths)
    before a byte of it is trusted, and writes it back as the job result. The client polls
    `GET /scan/{id}`.
 
 Why the worker is a *VM* and not a container like blastbox's other engines: the validator needs
 **real Windows** WinVerifyTrust / catalog / X509 semantics, so the disposable unit is a full-OS
-libvirt VM and the engine runs **host-side**, driving it over TCP — the VM *is* the sandbox.
+libvirt VM and the engine runs **host-side**, driving it over HTTP — the VM *is* the sandbox.
 
 ## Disposable workers — the recycle model
 
@@ -126,7 +127,7 @@ just yields `revocation_checked="unknown"`.
 
 ```
 winval_blastbox/   the authenticode blastbox Engine + host runner + VM pool + FastAPI orchestrator
-                   (engine.py · host_runner.py · pool.py · orchestrator.py · guest-agent-myatg.ps1)
+                   (engine.py · host_runner.py · vm_pool.py · orchestrator.py)
 golden-packer/     Packer (QEMU) builder for the WS2025-Core golden qcow2 (provisioners, autounattend)
 golden_build.py    reproducible in-guest bake pipeline (ngen · qemu-ga · compile myatg · refresh trust)
 golden_rotate.py   rolling freshness re-bake + gate + rollback backups
