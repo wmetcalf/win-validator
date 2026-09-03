@@ -6,7 +6,7 @@ FROM python:3.12-slim
 # JobStore (released blastbox — the JobStore is stable core, the libvirt primitive is host-only) +
 # FastAPI + the Postgres driver. NO blastbox.host.runtime libvirt deps are imported by the ingress.
 RUN pip install --no-cache-dir \
-        "blastbox>=0.1.19" \
+        "blastbox>=0.1.32" \
         "fastapi" "uvicorn[standard]" "python-multipart" \
         "psycopg[binary,pool]" "redis"
         # ^ blastbox.host.jobs.__init__ eagerly imports the redis store even for a Postgres URL,
