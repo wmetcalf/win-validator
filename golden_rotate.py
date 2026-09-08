@@ -180,28 +180,50 @@ def rotate(candidate: str) -> None:
         logger.info("backing up current golden -> %s", bak)
         _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 600)
     logger.info("promoting candidate -> %s (+ %s)", GOLDEN_BASE_DISK, GOLDEN_BASE)
-    # EVERY COPY IS CHECKED BEFORE IT IS PUBLISHED. _run() swallows a timeout into rc=124 and
-    # a cp that hit ENOSPC returns 1; an unchecked mv would then promote a truncated golden —
-    # and mirror it into RAM, where the pool-manager's own size check would accept it (both
-    # copies come from the same truncated source). A promotion that cannot complete raises.
+    # ALL OR NOTHING. Both copies land under temporary names and are CHECKED (rc and size —
+    # _run() swallows a timeout into rc=124, ENOSPC is rc=1) before either is published; then
+    # two renames, disk first. A copy that fails removes both temporaries and raises with
+    # nothing published. The one remaining gap — the RAM rename failing after the disk
+    # rename — is rolled back from the backup taken above, and reported as what it is.
     want = Path(candidate).stat().st_size
-    def _copy_checked(src: str, dst_tmp: str, dst: str) -> None:
-        r = _run(["sudo", "cp", "--reflink=auto", src, dst_tmp], 3600)
-        got = Path(dst_tmp).stat().st_size if Path(dst_tmp).exists() else -1
-        if r.returncode != 0 or got != want:
-            _run(["sudo", "rm", "-f", dst_tmp])
-            raise RuntimeError(f"promotion copy {src} -> {dst} failed (rc={r.returncode}, {got} of {want} bytes); golden NOT promoted")
-        r = _run(["sudo", "mv", dst_tmp, dst])
-        if r.returncode != 0:
-            raise RuntimeError(f"promotion mv {dst_tmp} -> {dst} failed (rc={r.returncode}); golden NOT promoted")
-    _copy_checked(candidate, GOLDEN_BASE_DISK + ".new", GOLDEN_BASE_DISK)
-    _copy_checked(GOLDEN_BASE_DISK, GOLDEN_BASE + ".new", GOLDEN_BASE)
+    tmps = (GOLDEN_BASE_DISK + ".new", GOLDEN_BASE + ".new")
+    def _cleanup_tmps() -> None:
+        for t in tmps:
+            _run(["sudo", "rm", "-f", t])
+    try:
+        for dst_tmp in tmps:
+            r = _run(["sudo", "cp", "--reflink=auto", candidate, dst_tmp], 3600)
+            got = Path(dst_tmp).stat().st_size if Path(dst_tmp).exists() else -1
+            if r.returncode != 0 or got != want:
+                raise RuntimeError(f"promotion copy -> {dst_tmp} failed (rc={r.returncode}, {got} of {want} bytes); "
+                                   f"golden NOT promoted (nothing published)")
+    except BaseException:
+        _cleanup_tmps()
+        raise
+    r = _run(["sudo", "mv", tmps[0], GOLDEN_BASE_DISK])
+    if r.returncode != 0:
+        _cleanup_tmps()
+        raise RuntimeError(f"promotion rename -> {GOLDEN_BASE_DISK} failed (rc={r.returncode}); golden NOT promoted (nothing published)")
+    r = _run(["sudo", "mv", tmps[1], GOLDEN_BASE])
+    if r.returncode != 0:
+        _cleanup_tmps()
+        bak_ok = Path(GOLDEN_BASE_DISK).exists() and 'bak' in locals() and Path(str(bak)).exists()
+        if bak_ok:
+            rb = _run(["sudo", "cp", "--reflink=auto", str(bak), GOLDEN_BASE_DISK + ".rollback"], 3600)
+            if rb.returncode == 0 and Path(GOLDEN_BASE_DISK + ".rollback").stat().st_size == Path(str(bak)).stat().st_size:
+                _run(["sudo", "mv", GOLDEN_BASE_DISK + ".rollback", GOLDEN_BASE_DISK])
+                raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}); the disk golden was ROLLED BACK "
+                                   f"from {bak}; golden NOT promoted")
+            _run(["sudo", "rm", "-f", GOLDEN_BASE_DISK + ".rollback"])
+        raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
+                           f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden, and no backup to roll back from. "
+                           f"Restart winval-pool-manager after clearing /dev/shm to enact, or restore the disk twin by hand.")
     _run(["sudo", "chmod", "644", GOLDEN_BASE_DISK, GOLDEN_BASE])
     _prune_backups()
 
 
 def _prune_backups() -> None:
-    baks = sorted(BACKUP_DIR.glob("golden-base.*.qcow2"))
+    baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if ".candidate-" not in b.name)   # never a candidate
     excess = baks[:-KEEP_N] if KEEP_N > 0 else []
     for b in excess:
         logger.info("pruning old backup %s", b.name)
@@ -217,8 +239,12 @@ def refresh_and_rotate() -> int:
                      GOLDEN_BASE_DISK, candidate)
         _run(["sudo", "rm", "-f", candidate])
         return 1
-    rotate(candidate)
-    _run(["sudo", "rm", "-f", candidate])
+    try:
+        rotate(candidate)
+    finally:
+        # the candidate lives in the backup dir: a leaked one would sort after every real
+        # backup and survive the prune while the goldens it replaced were deleted
+        _run(["sudo", "rm", "-f", candidate])
     svc = os.environ.get("GOLDEN_RESTART_SERVICE")
     if svc:  # re-warm the pool off the freshly promoted golden (old warm workers ran the old base)
         logger.info("restarting %s to warm off the refreshed golden", svc)

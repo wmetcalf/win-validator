@@ -43,11 +43,15 @@ sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # th
 # be recovered later.
 PW=$(openssl rand -hex 16)
 echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-WINVAL_PG_PASSWORD=$PW docker compose -f deploy/docker-compose.yml up --build -d
+echo "WINVAL_PG_PASSWORD=$PW" | sudo tee /etc/winval/compose.env >/dev/null && sudo chmod 0600 /etc/winval/compose.env
+# every compose invocation from now on carries the env file, or a later `up` would recreate the
+# ingress with the 'winval' fallback password against a volume that holds the real one
+sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
 
 # the smoke gates (boot/recycle for the pool, benign==Valid for the rotation) validate a benign
 # SIGNED sample — any small Microsoft-signed binary. winval.env.example points both gates at
-# this path; without a sample there, readiness is port-open only.
+# this path. Set the two variables in winval.env ONLY once the sample is in place: a set path that
+# does not exist fails the pool-manager at start, by name. Without them, readiness is port-open only.
 sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.exe /var/lib/winval/samples/whoami.exe
 
 # privileged tier on the host (libvirt)

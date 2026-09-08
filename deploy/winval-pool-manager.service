@@ -47,9 +47,11 @@ EnvironmentFile=-/etc/winval/winval.env
 # ATOMIC: the copy lands under a temporary name and is renamed into place only when its size
 # matches the source, so an interrupted copy (a start timeout, a reboot mid-copy) never becomes
 # the base — the next start finds no base and copies again. The source is checked BEFORE
-# anything is written; nothing existing is ever deleted.
+# anything is written; nothing existing is ever deleted. A present base must be OWNED by this unit's
+# user (root): /dev/shm is world-writable, and a file another local user planted there is refused,
+# never booted.
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
-ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; [ -f "$b" ] && exit 0; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; rm -f "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
+ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; rm -f "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
 # The copy runs inside the start job: an 18 GB image at a cold cache on a slow or contended store
 # can outlive the 90 s default, and a start timeout is exactly the interrupted copy above.
 TimeoutStartSec=20min

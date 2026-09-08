@@ -148,7 +148,13 @@ class WarmVmPool:
     def __init__(self, *, jobs_per_recycle: int = 1, claim_timeout_s: float = 180.0) -> None:
         # smoke + CRL-warm are opt-in via env; clock-sync (on_ready) is always on — a stale clock at
         # boot or after revert would corrupt validity/revocation verdicts.
-        health_check = _smoke if os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") else None
+        smoke_sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
+        if smoke_sample and not os.path.exists(smoke_sample):
+            # fail FAST and NAME THE CAUSE: with the variable set and the file missing, every
+            # worker would fail the smoke gate and the pool would report only "no worker became
+            # warm" — the error would never say why
+            raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} does not exist; put a benign signed sample there or unset it")
+        health_check = _smoke if smoke_sample else None
         pre_snapshot = _warm_crl if os.environ.get("AUTHENTICODE_WARM_DIR") else None
         self._pool = authenticode_spec().build_pool(
             jobs_per_recycle=jobs_per_recycle, health_check=health_check,
