@@ -4,12 +4,16 @@
 # kill-switch). It is NEVER client-facing: it only claims queued jobs from the same Postgres the
 # ingress container writes to, reads their spooled inputs from the shared job_root, validates them
 # in a warm VM worker, and writes the verdict back. Install:
-#     sudo ln -sfn /path/to/your/checkout /opt/win-validator      # or clone there
+#     sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator   # ROOT-owned: this unit runs as root
 #     sudo mkdir -p /etc/winval && sudo cp deploy/winval.env.example /etc/winval/winval.env  # then edit
 #     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 #     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 [Unit]
 Description=win-validator pool-manager (libvirt VM worker dispatcher)
+# Restart=on-failure below would otherwise retry an 18 GB copy forever against a wedged store:
+# three failed starts in two hours latch the unit `failed` so monitoring has something to see.
+StartLimitIntervalSec=2h
+StartLimitBurst=3
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 Requires=libvirtd.service
@@ -30,25 +34,22 @@ Environment=AUTHENTICODE_POOL_SIZE=2
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 EnvironmentFile=-/etc/winval/winval.env
-# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it before every start when
-# it is missing — so a rebooted host comes back on its own instead of failing every job until
-# someone remembers the cp.
+# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it before a start ONLY WHEN
+# IT IS MISSING — a base that is present is the pool's, whoever put it there (a rotation, a hand
+# bake, golden_build.py), and this unit never second-guesses it: comparing it against anything
+# would replace a working golden with an older image on a plain restart.
 #
 # FROM THE PROMOTED GOLDEN, NOT THE PACKER MASTER. golden_rotate.rotate() promotes each gated
 # candidate to GOLDEN_BASE_DISK (the durable on-disk twin) AND to the RAM base; GOLDEN_MASTER is
-# the frozen rung-0 image and is never refreshed. Restoring from the master would silently revert
-# every rotation on the next reboot (stale disallowed list / CRL cache / roots, no agent if the
-# golden was built by golden_build.py). The master is the source only when no golden has ever
-# been promoted.
+# the frozen rung-0 image and is never refreshed. The master is the source only when no golden
+# has ever been promoted.
 #
-# ATOMIC, AND SIZE-CHECKED AGAINST ITS OWN SOURCE: a copy interrupted half-way (a start timeout,
-# a reboot mid-copy) leaves a truncated file that `test -f` accepts — and every worker would boot
-# off garbage. The copy lands under a temporary name and is renamed into place only when its
-# size matches the source; an existing base whose size differs from the source is rebuilt. The
-# comparison is against GOLDEN_BASE_DISK, so the restart rotate() triggers right after promoting
-# keeps the just-promoted base (rotate wrote both copies from the same candidate).
+# ATOMIC: the copy lands under a temporary name and is renamed into place only when its size
+# matches the source, so an interrupted copy (a start timeout, a reboot mid-copy) never becomes
+# the base — the next start finds no base and copies again. The source is checked BEFORE
+# anything is written; nothing existing is ever deleted.
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
-ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; if [ -f "$b" ] && [ "$(stat -c %%s "$b")" = "$(stat -c %%s "$src")" ]; then exit 0; fi; echo "materialising RAM base from $src"; rm -f "$b" "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
+ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; [ -f "$b" ] && exit 0; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; rm -f "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
 # The copy runs inside the start job: an 18 GB image at a cold cache on a slow or contended store
 # can outlive the 90 s default, and a start timeout is exactly the interrupted copy above.
 TimeoutStartSec=20min

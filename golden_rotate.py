@@ -36,7 +36,7 @@ BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/g
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
-BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/tmp/whoami.exe")
+BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
 REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set
 WARM_DIR = os.environ.get("GOLDEN_WARM_DIR", "")        # optional in-guest dir of certs to re-warm
 
@@ -180,10 +180,22 @@ def rotate(candidate: str) -> None:
         logger.info("backing up current golden -> %s", bak)
         _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 600)
     logger.info("promoting candidate -> %s (+ %s)", GOLDEN_BASE_DISK, GOLDEN_BASE)
-    _run(["sudo", "cp", "--reflink=auto", candidate, GOLDEN_BASE_DISK + ".new"], 600)
-    _run(["sudo", "mv", GOLDEN_BASE_DISK + ".new", GOLDEN_BASE_DISK])
-    _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, GOLDEN_BASE + ".new"], 600)
-    _run(["sudo", "mv", GOLDEN_BASE + ".new", GOLDEN_BASE])
+    # EVERY COPY IS CHECKED BEFORE IT IS PUBLISHED. _run() swallows a timeout into rc=124 and
+    # a cp that hit ENOSPC returns 1; an unchecked mv would then promote a truncated golden —
+    # and mirror it into RAM, where the pool-manager's own size check would accept it (both
+    # copies come from the same truncated source). A promotion that cannot complete raises.
+    want = Path(candidate).stat().st_size
+    def _copy_checked(src: str, dst_tmp: str, dst: str) -> None:
+        r = _run(["sudo", "cp", "--reflink=auto", src, dst_tmp], 3600)
+        got = Path(dst_tmp).stat().st_size if Path(dst_tmp).exists() else -1
+        if r.returncode != 0 or got != want:
+            _run(["sudo", "rm", "-f", dst_tmp])
+            raise RuntimeError(f"promotion copy {src} -> {dst} failed (rc={r.returncode}, {got} of {want} bytes); golden NOT promoted")
+        r = _run(["sudo", "mv", dst_tmp, dst])
+        if r.returncode != 0:
+            raise RuntimeError(f"promotion mv {dst_tmp} -> {dst} failed (rc={r.returncode}); golden NOT promoted")
+    _copy_checked(candidate, GOLDEN_BASE_DISK + ".new", GOLDEN_BASE_DISK)
+    _copy_checked(GOLDEN_BASE_DISK, GOLDEN_BASE + ".new", GOLDEN_BASE)
     _run(["sudo", "chmod", "644", GOLDEN_BASE_DISK, GOLDEN_BASE])
     _prune_backups()
 

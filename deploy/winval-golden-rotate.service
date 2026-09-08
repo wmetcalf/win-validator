@@ -24,4 +24,6 @@ Environment=GOLDEN_KEEP_N=5
 #   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
 EnvironmentFile=-/etc/winval/winval.env
+# the gate samples live under /var/lib/winval/samples (root-owned), never /tmp
+PrivateTmp=true
 ExecStart=/opt/win-validator/.venv/bin/python /opt/win-validator/golden_rotate.py refresh-and-rotate

@@ -21,41 +21,48 @@ is Postgres + that one directory.
 ## Bring up
 
 ```sh
-# the checkout at its canonical path (a symlink is fine) + a venv that can see the SYSTEM
-# libvirt bindings (libvirt-python is not pip-installable without libvirt-dev; the distro
-# package is) — prometheus_client is a blastbox import that is not in its base deps
-sudo ln -sfn "$PWD" /opt/win-validator
-python3 -m venv --system-site-packages /opt/win-validator/.venv
-/opt/win-validator/.venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+# the checkout at its canonical path, ROOT-OWNED: the pool-manager runs as root with libvirt and
+# iptables, so its interpreter and code must not live in a user-writable tree. The venv needs
+# --system-site-packages for the SYSTEM libvirt bindings (libvirt-python is not pip-installable
+# without libvirt-dev); prometheus_client is a blastbox import outside its base deps.
+sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator
+sudo python3 -m venv --system-site-packages /opt/win-validator/.venv
+sudo /opt/win-validator/.venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+cd /opt/win-validator
 
 # shared job_root (writable by the ingress container's uid + readable by the host pool-manager)
 sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs
 
-# unprivileged tiers: ingress + Postgres
-WINVAL_PG_PASSWORD=$(openssl rand -hex 16) \
-  docker compose -f deploy/docker-compose.yml up --build -d
-
-# privileged tier on the host (libvirt). BOTH units read /etc/winval/winval.env — the Postgres
-# password (BLASTBOX_DATABASE_URL, port 5433 as published above), pool size, egress, and the
-# smoke samples go there. The golden's ssh key and the env file are secrets: root-only.
+# secrets, root-only: the env file BOTH units read, and the golden's ssh key
 sudo install -d -m 0700 /etc/winval
 sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env      # then edit
 sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # the key the golden was built with
+
+# unprivileged tiers: ingress + Postgres. The password is minted ONCE and written into the env
+# file the pool-manager reads — it is baked into the Postgres volume at first start and cannot
+# be recovered later.
+PW=$(openssl rand -hex 16)
+echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
+WINVAL_PG_PASSWORD=$PW docker compose -f deploy/docker-compose.yml up --build -d
+
 # the smoke gates (boot/recycle for the pool, benign==Valid for the rotation) validate a benign
-# SIGNED sample — any small Microsoft-signed binary; without it readiness is port-open only
+# SIGNED sample — any small Microsoft-signed binary. winval.env.example points both gates at
+# this path; without a sample there, readiness is port-open only.
 sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.exe /var/lib/winval/samples/whoami.exe
-#   then set AUTHENTICODE_SMOKE_SAMPLE and GOLDEN_BENIGN_SAMPLE in winval.env
+
+# privileged tier on the host (libvirt)
 sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 ```
 
 The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
-`ExecStartPre` whenever it is missing — `/dev/shm` empties on reboot, so a rebooted host comes
-back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores). The source
-is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes into, so a reboot never
-reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any golden has
-been promoted. The copy is atomic and size-checked, so an interrupted copy is rebuilt, never
-booted from.
+`ExecStartPre` only when it is MISSING — `/dev/shm` empties on reboot, so a rebooted host comes
+back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores and latches
+`failed` after three failed starts in two hours). A base that is present is never touched. The
+source is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes into, so a reboot
+never reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any
+golden has been promoted. The copy is atomic and size-checked, so an interrupted copy never
+becomes the base, and `rotate()` checks every copy before publishing a golden.
 
 UI + API at <http://localhost:8099/>.
 
