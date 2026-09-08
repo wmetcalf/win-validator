@@ -30,7 +30,11 @@ logger = logging.getLogger("winval.golden_rotate")
 
 MASTER_DOMAIN = os.environ.get("GOLDEN_MASTER_DOMAIN", "winserver2025-core")
 MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserver2025-core.qcow2")
-GOLDEN_BASE = os.environ.get("GOLDEN_BASE", "/dev/shm/golden-base.qcow2")
+# ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
+# AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
+# would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
+GOLDEN_BASE = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or os.environ.get("GOLDEN_BASE")
+               or "/dev/shm/golden-base.qcow2")
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
@@ -198,13 +202,26 @@ def rotate(candidate: str) -> None:
             raise RuntimeError(f"backup of the current golden -> {bak} failed (rc={rb0.returncode}, {got_bak} of {want_bak} bytes); "
                                f"golden NOT promoted (nothing published, no backup kept)")
     logger.info("promoting candidate -> %s (+ %s)", GOLDEN_BASE_DISK, GOLDEN_BASE)
-    # ALL OR NOTHING. Both copies land under temporary names and are CHECKED (rc and size —
+    # ALL OR NOTHING. Both copies land in mktemp temporaries and are CHECKED (rc and size —
     # _run() swallows a timeout into rc=124, ENOSPC is rc=1) before either is published; then
-    # two renames, disk first. A copy that fails removes both temporaries and raises with
+    # two renames (mv -T), disk first. A copy that fails removes both temporaries and raises with
     # nothing published. The one remaining gap — the RAM rename failing after the disk
     # rename — is rolled back from the backup taken above, and reported as what it is.
     want = Path(candidate).stat().st_size
-    tmps = (GOLDEN_BASE_DISK + ".new", GOLDEN_BASE + ".new")
+    # /dev/shm IS WORLD-WRITABLE (sticky): a fixed temp name there is a symlink another local user
+    # can plant for root's cp to write through. Every temporary is created by mktemp as root
+    # (O_EXCL — never a symlink; the sticky bit stops anyone else replacing it), and each rename
+    # is mv -T, so a directory or symlink someone left at a base path is a FAILURE, never a
+    # destination. The same refusal the pool-manager's ExecStartPre applies.
+    for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
+        if Path(base).is_symlink() or Path(base).is_dir():
+            raise RuntimeError(f"refusing to promote: {base} is a symlink or a directory, not a regular file; golden NOT promoted")
+    def _mktemp(beside: str) -> str:
+        r = _run(["sudo", "mktemp", f"{beside}.XXXXXX"])
+        if r.returncode != 0 or not r.stdout.strip():
+            raise RuntimeError(f"could not create a temporary beside {beside} (rc={r.returncode}); golden NOT promoted (nothing published)")
+        return r.stdout.strip()
+    tmps = (_mktemp(GOLDEN_BASE_DISK), _mktemp(GOLDEN_BASE))
     def _cleanup_tmps() -> None:
         for t in tmps:
             _run(["sudo", "rm", "-f", t])
@@ -218,21 +235,22 @@ def rotate(candidate: str) -> None:
     except BaseException:
         _cleanup_tmps()
         raise
-    r = _run(["sudo", "mv", tmps[0], GOLDEN_BASE_DISK])
+    r = _run(["sudo", "mv", "-fT", tmps[0], GOLDEN_BASE_DISK])
     if r.returncode != 0:
         _cleanup_tmps()
         raise RuntimeError(f"promotion rename -> {GOLDEN_BASE_DISK} failed (rc={r.returncode}); golden NOT promoted (nothing published)")
-    r = _run(["sudo", "mv", tmps[1], GOLDEN_BASE])
+    r = _run(["sudo", "mv", "-fT", tmps[1], GOLDEN_BASE])
     if r.returncode != 0:
         _cleanup_tmps()
         bak_ok = Path(GOLDEN_BASE_DISK).exists() and 'bak' in locals() and Path(str(bak)).exists()
         if bak_ok:
-            rb = _run(["sudo", "cp", "--reflink=auto", str(bak), GOLDEN_BASE_DISK + ".rollback"], 3600)
-            if rb.returncode == 0 and Path(GOLDEN_BASE_DISK + ".rollback").stat().st_size == Path(str(bak)).stat().st_size:
-                _run(["sudo", "mv", GOLDEN_BASE_DISK + ".rollback", GOLDEN_BASE_DISK])
+            rbt = _mktemp(GOLDEN_BASE_DISK)
+            rb = _run(["sudo", "cp", "--reflink=auto", str(bak), rbt], 3600)
+            if rb.returncode == 0 and Path(rbt).stat().st_size == Path(str(bak)).stat().st_size \
+                    and _run(["sudo", "mv", "-fT", rbt, GOLDEN_BASE_DISK]).returncode == 0:
                 raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}); the disk golden was ROLLED BACK "
                                    f"from {bak}; golden NOT promoted")
-            _run(["sudo", "rm", "-f", GOLDEN_BASE_DISK + ".rollback"])
+            _run(["sudo", "rm", "-f", rbt])
             how = (f"the automatic rollback from {bak} FAILED (rc={rb.returncode}; the backup itself is intact) — "
                    f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
         else:

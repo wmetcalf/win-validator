@@ -40,10 +40,15 @@ sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # th
 
 # unprivileged tiers: ingress + Postgres. The password is minted ONCE and written into the env
 # file the pool-manager reads — it is baked into the Postgres volume at first start and cannot
-# be recovered later.
-PW=$(openssl rand -hex 16)
-echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-echo "WINVAL_PG_PASSWORD=$PW" | sudo tee /etc/winval/compose.env >/dev/null && sudo chmod 0600 /etc/winval/compose.env
+# be recovered later. Re-running this block is safe: an existing password is kept (a fresh one
+# would lock both tiers out of the `pgdata` volume that holds the first). To start over:
+# `sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml down -v`
+# and delete the BLASTBOX_DATABASE_URL line from winval.env.
+if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
+  PW=$(openssl rand -hex 16)
+  echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
+  echo "WINVAL_PG_PASSWORD=$PW" | sudo tee /etc/winval/compose.env >/dev/null && sudo chmod 0600 /etc/winval/compose.env
+fi
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
 # ingress with the 'winval' fallback password against a volume that holds the real one
 sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
@@ -69,8 +74,10 @@ source is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes
 never reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any
 golden has been promoted. The copy is atomic and size-checked, so an interrupted copy never
 becomes the base, and it is symlink-safe on world-writable `/dev/shm` (mktemp + `mv -T`; a
-planted symlink or directory at the base path is refused). `rotate()` checks every copy — the
-backup included — before publishing a golden, and a failed build leaves no candidate behind.
+planted symlink or directory at the base path is refused). `rotate()` publishes the same way
+(mktemp temporaries, `mv -T`, the same refusal), checks every copy — the backup included — before
+publishing a golden, and a failed build leaves no candidate behind. The RAM base has ONE name,
+`AUTHENTICODE_GOLDEN_BASE`, read by the pool, both units and the rotator.
 
 UI + API at <http://localhost:8099/>.
 

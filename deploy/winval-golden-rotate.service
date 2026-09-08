@@ -14,7 +14,8 @@ User=root
 WorkingDirectory=/opt/win-validator
 Environment=PYTHONPATH=/opt/win-validator
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
-Environment=GOLDEN_BASE=/dev/shm/golden-base.qcow2
+# the SAME name the pool-manager unit and vm_pool.py read: one path, promoted to and booted from
+Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 Environment=GOLDEN_BACKUP_DIR=/var/lib/libvirt/images/golden-backups
 Environment=GOLDEN_KEEP_N=5
