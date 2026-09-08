@@ -10,10 +10,15 @@
 #     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 [Unit]
 Description=win-validator pool-manager (libvirt VM worker dispatcher)
-# Restart=on-failure below would otherwise retry an 18 GB copy forever against a wedged store:
-# three failed starts in two hours latch the unit `failed` so monitoring has something to see.
-StartLimitIntervalSec=2h
-StartLimitBurst=3
+# The start limit is for FAST failures — Postgres not yet accepting connections after a reboot
+# (PoolManager gives up after BLASTBOX_DB_POOL_TIMEOUT, 10 s), a bad winval.env, a missing venv:
+# eight starts 30 s apart cover a Postgres container that takes minutes to come up, and only a
+# fault that outlives those ~4 minutes latches the unit `failed` (recover with
+# `systemctl reset-failed winval-pool-manager` once fixed). A start that dies in the 20-minute
+# copy is one start per window and never latches: retrying a wedged store every 20 minutes is
+# the intended behaviour, not a loop to cap.
+StartLimitIntervalSec=10min
+StartLimitBurst=8
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 Requires=libvirtd.service
@@ -44,14 +49,17 @@ EnvironmentFile=-/etc/winval/winval.env
 # the frozen rung-0 image and is never refreshed. The master is the source only when no golden
 # has ever been promoted.
 #
-# ATOMIC: the copy lands under a temporary name and is renamed into place only when its size
-# matches the source, so an interrupted copy (a start timeout, a reboot mid-copy) never becomes
-# the base — the next start finds no base and copies again. The source is checked BEFORE
-# anything is written; nothing existing is ever deleted. A present base must be OWNED by this unit's
-# user (root): /dev/shm is world-writable, and a file another local user planted there is refused,
-# never booted.
+# ATOMIC: the copy lands in a temporary file and is renamed over the base (mv -T: a directory at
+# the base path is a failure, never a destination) only when its size matches the source, so an
+# interrupted copy (a start timeout, a reboot mid-copy) never becomes the base — the next start
+# finds no base and copies again (a temporary a start-timeout kill left behind is swept first —
+# only this unit's own regular files, so RAM is reclaimed and nothing else is ever deleted). The
+# source is checked BEFORE anything is written. /dev/shm is WORLD-WRITABLE (sticky), so every path this unit touches
+# there is defended: the temporary is created by mktemp (O_EXCL, root-owned — never a symlink
+# another local user planted for root to write through, and the sticky bit stops them replacing
+# it), and a present base is refused unless it is a regular file OWNED by this unit's user.
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
-ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; rm -f "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
+ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -L "$b" ] || [ -d "$b" ]; then echo "refusing RAM base $b: a symlink or a directory, not a regular file (/dev/shm is world-writable)" >&2; exit 1; fi; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; for f in "$b".??????; do [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %%u "$f")" = "$(id -u)" ] && rm -f "$f"; done; t="$(mktemp "$b.XXXXXX")" || exit 1; cp "$src" "$t" && [ "$(stat -c %%s "$t")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$t" && mv -fT "$t" "$b" || { rm -f "$t"; exit 1; }'
 # The copy runs inside the start job: an 18 GB image at a cold cache on a slow or contended store
 # can outlive the 90 s default, and a start timeout is exactly the interrupted copy above.
 TimeoutStartSec=20min
@@ -65,7 +73,7 @@ TimeoutStartSec=20min
 #   AUTHENTICODE_JOBS_PER_RECYCLE=1
 ExecStart=/opt/win-validator/.venv/bin/python -m winval_blastbox.pool_manager
 Restart=on-failure
-RestartSec=5
+RestartSec=30
 # /dev/shm holds the RAM-backed golden + worker overlays; don't let systemd sandbox it away.
 PrivateTmp=false
 

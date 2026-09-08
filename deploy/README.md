@@ -61,12 +61,16 @@ sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 
 The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
 `ExecStartPre` only when it is MISSING — `/dev/shm` empties on reboot, so a rebooted host comes
-back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores and latches
-`failed` after three failed starts in two hours). A base that is present is never touched. The
+back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores). Fast
+failures — Postgres not up yet, a bad `winval.env` — are retried every 30 s for eight starts, then the
+unit latches `failed`: fix the cause and `sudo systemctl reset-failed winval-pool-manager && sudo
+systemctl start winval-pool-manager`. A base that is present is never touched. The
 source is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes into, so a reboot
 never reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any
 golden has been promoted. The copy is atomic and size-checked, so an interrupted copy never
-becomes the base, and `rotate()` checks every copy before publishing a golden.
+becomes the base, and it is symlink-safe on world-writable `/dev/shm` (mktemp + `mv -T`; a
+planted symlink or directory at the base path is refused). `rotate()` checks every copy — the
+backup included — before publishing a golden, and a failed build leaves no candidate behind.
 
 UI + API at <http://localhost:8099/>.
 

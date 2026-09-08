@@ -109,6 +109,7 @@ def build_candidate() -> str:
     Path(xml_path).write_text(rt._domain_xml(dom, overlay))
     assert _virsh("define", xml_path).returncode == 0, "define failed"
     assert _virsh("start", dom).returncode == 0, "start failed"
+    built = False
     try:
         mac = _mac(dom)
         ip, dl = None, time.time() + 240
@@ -131,10 +132,16 @@ def build_candidate() -> str:
         logger.info("flattening overlay -> candidate %s", candidate)
         assert _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], 900).returncode == 0
         _run(["sudo", "chmod", "644", candidate])
+        built = True
     finally:
         _virsh("destroy", dom)
         _virsh("undefine", dom, "--snapshots-metadata")
         _run(["sudo", "rm", "-f", overlay, xml_path])
+        if not built:
+            # a convert that failed or timed out leaves a full-size partial candidate in the
+            # backup dir; _prune_backups deliberately never touches candidates, so nothing else
+            # would ever reclaim it and each failed nightly rebake would keep one image of space
+            _run(["sudo", "rm", "-f", candidate])
     return candidate
 
 
@@ -178,7 +185,18 @@ def rotate(candidate: str) -> None:
     if Path(GOLDEN_BASE_DISK).exists():
         bak = BACKUP_DIR / f"golden-base.{ts}.qcow2"
         logger.info("backing up current golden -> %s", bak)
-        _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 600)
+        # CHECKED like every promotion copy: this backup is what a rollback restores from, what
+        # _prune_backups keeps as a known-good golden, and what the pool-manager's ExecStartPre
+        # copies into RAM after a reboot — a truncated backup (a timeout, ENOSPC) would pass all
+        # three because each only compares against the backup itself. Fail closed: no backup,
+        # no promotion.
+        want_bak = Path(GOLDEN_BASE_DISK).stat().st_size
+        rb0 = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 3600)
+        got_bak = bak.stat().st_size if bak.exists() else -1
+        if rb0.returncode != 0 or got_bak != want_bak:
+            _run(["sudo", "rm", "-f", str(bak)])
+            raise RuntimeError(f"backup of the current golden -> {bak} failed (rc={rb0.returncode}, {got_bak} of {want_bak} bytes); "
+                               f"golden NOT promoted (nothing published, no backup kept)")
     logger.info("promoting candidate -> %s (+ %s)", GOLDEN_BASE_DISK, GOLDEN_BASE)
     # ALL OR NOTHING. Both copies land under temporary names and are CHECKED (rc and size —
     # _run() swallows a timeout into rc=124, ENOSPC is rc=1) before either is published; then
@@ -215,9 +233,13 @@ def rotate(candidate: str) -> None:
                 raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}); the disk golden was ROLLED BACK "
                                    f"from {bak}; golden NOT promoted")
             _run(["sudo", "rm", "-f", GOLDEN_BASE_DISK + ".rollback"])
+            how = (f"the automatic rollback from {bak} FAILED (rc={rb.returncode}; the backup itself is intact) — "
+                   f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
+        else:
+            how = "no backup exists to roll back from (nothing was backed up: no golden was on disk before)"
         raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
-                           f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden, and no backup to roll back from. "
-                           f"Restart winval-pool-manager after clearing /dev/shm to enact, or restore the disk twin by hand.")
+                           f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden; {how}. "
+                           f"Restart winval-pool-manager after clearing /dev/shm to enact the new golden instead.")
     _run(["sudo", "chmod", "644", GOLDEN_BASE_DISK, GOLDEN_BASE])
     _prune_backups()
 
