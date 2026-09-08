@@ -50,7 +50,14 @@ if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
 fi
 # compose.env carries the SAME password (the URL in winval.env is the source of truth — also when
 # you wrote that line yourself); written 0600 from the first byte, never tee-then-chmod
-sudo test -e /etc/winval/compose.env || sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([^@]*\)@.*|WINVAL_PG_PASSWORD=\1|p' /etc/winval/winval.env | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
+if ! sudo test -e /etc/winval/compose.env; then
+  PWLINE=$(sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([^@]*\)@.*|WINVAL_PG_PASSWORD=\1|p' /etc/winval/winval.env)
+  if [ -n "$PWLINE" ]; then
+    echo "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
+  else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
+    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write WINVAL_PG_PASSWORD=<that password> to /etc/winval/compose.env by hand before the compose up" >&2
+  fi
+fi
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
 # ingress with the 'winval' fallback password against a volume that holds the real one
 sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
