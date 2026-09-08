@@ -35,7 +35,7 @@ sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/job
 
 # secrets, root-only: the env file BOTH units read, and the golden's ssh key
 sudo install -d -m 0700 /etc/winval
-sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env      # then edit
+[ -e /etc/winval/winval.env ] || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env   # first time only; then edit
 sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # the key the golden was built with
 
 # unprivileged tiers: ingress + Postgres. The password is minted ONCE and written into the env

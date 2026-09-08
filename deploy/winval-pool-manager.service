@@ -53,7 +53,8 @@ EnvironmentFile=-/etc/winval/winval.env
 # the base path is a failure, never a destination) only when its size matches the source, so an
 # interrupted copy (a start timeout, a reboot mid-copy) never becomes the base — the next start
 # finds no base and copies again (a temporary a start-timeout kill left behind is swept first —
-# only this unit's own regular files, so RAM is reclaimed and nothing else is ever deleted). The
+# only this unit's own <base>.XXXXXX files; golden_rotate's temporaries are <base>.rot.XXXXXX,
+# a name the sweep never matches, so a start during a rotation cannot unlink a copy in flight). The
 # source is checked BEFORE anything is written. /dev/shm is WORLD-WRITABLE (sticky), so every path this unit touches
 # there is defended: the temporary is created by mktemp (O_EXCL, root-owned — never a symlink
 # another local user planted for root to write through, and the sticky bit stops them replacing

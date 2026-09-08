@@ -98,6 +98,7 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
     assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base, "-F", "qcow2", overlay], 120).returncode == 0
+    built = False
     gr._run(["sudo", "chmod", "644", overlay])
     from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
     rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
@@ -127,9 +128,12 @@ def build(base: str = BASE_QCOW2) -> str:
         logger.info("flattening -> %s", candidate)
         assert gr._run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], 900).returncode == 0
         gr._run(["sudo", "chmod", "644", candidate])
+        built = True
     finally:
         gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
         gr._run(["sudo", "rm", "-f", overlay, xml])
+        if not built:
+            gr._run(["sudo", "rm", "-f", candidate])   # a failed/timed-out convert leaves a full-size partial
     return candidate
 
 
@@ -139,8 +143,10 @@ def build_and_promote() -> int:
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)
         gr._run(["sudo", "rm", "-f", candidate])
         return 1
-    gr.rotate(candidate)
-    gr._run(["sudo", "rm", "-f", candidate])
+    try:
+        gr.rotate(candidate)
+    finally:
+        gr._run(["sudo", "rm", "-f", candidate])   # rotate() raises from several places: never leave the image behind
     logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
     return 0
 
