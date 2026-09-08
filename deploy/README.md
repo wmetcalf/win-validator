@@ -21,6 +21,13 @@ is Postgres + that one directory.
 ## Bring up
 
 ```sh
+# the checkout at its canonical path (a symlink is fine) + a venv that can see the SYSTEM
+# libvirt bindings (libvirt-python is not pip-installable without libvirt-dev; the distro
+# package is) — prometheus_client is a blastbox import that is not in its base deps
+sudo ln -sfn "$PWD" /opt/win-validator
+python3 -m venv --system-site-packages /opt/win-validator/.venv
+/opt/win-validator/.venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+
 # shared job_root (writable by the ingress container's uid + readable by the host pool-manager)
 sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs
 
@@ -28,10 +35,16 @@ sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/job
 WINVAL_PG_PASSWORD=$(openssl rand -hex 16) \
   docker compose -f deploy/docker-compose.yml up --build -d
 
-# privileged tier on the host (libvirt). Edit the unit's BLASTBOX_DATABASE_URL password to match.
+# privileged tier on the host (libvirt). The unit reads /etc/winval/winval.env — put the
+# Postgres password (BLASTBOX_DATABASE_URL), pool size, ssh key and egress settings there.
+sudo mkdir -p /etc/winval && sudo cp deploy/winval.env.example /etc/winval/winval.env   # then edit
 sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 ```
+
+The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) from
+`GOLDEN_MASTER` in `ExecStartPre` whenever it is missing — `/dev/shm` empties on reboot, so a
+rebooted host comes back on its own (an 18 GB copy takes ~20 s).
 
 UI + API at <http://localhost:8099/>.
 

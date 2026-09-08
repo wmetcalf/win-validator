@@ -4,6 +4,8 @@
 # kill-switch). It is NEVER client-facing: it only claims queued jobs from the same Postgres the
 # ingress container writes to, reads their spooled inputs from the shared job_root, validates them
 # in a warm VM worker, and writes the verdict back. Install:
+#     sudo ln -sfn /path/to/your/checkout /opt/win-validator      # or clone there
+#     sudo mkdir -p /etc/winval && sudo cp deploy/winval.env.example /etc/winval/winval.env  # then edit
 #     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 #     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 [Unit]
@@ -17,20 +19,28 @@ Type=simple
 # Needs libvirt + iptables. Run as root (simplest) or a user in the libvirt group with passwordless
 # sudo for virsh/iptables — LibvirtVmConfig.sudo prefixes those, so root makes the sudo a no-op.
 User=root
-WorkingDirectory=/home/coz/winval
-Environment=PYTHONPATH=/home/coz/winval
-# MUST match the ingress: same JobStore (the Postgres published by the compose) + same job_root path.
+# The checkout (or a symlink to it) at a canonical path — nothing host-specific in this unit.
+WorkingDirectory=/opt/win-validator
+Environment=PYTHONPATH=/opt/win-validator
+# Defaults; /etc/winval/winval.env (deploy/winval.env.example) overrides any of them and is the
+# place for the Postgres password, the pool size, the ssh key, egress and smoke settings.
 Environment=BLASTBOX_DATABASE_URL=postgresql://winval:winval@127.0.0.1:5433/winval
 Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
 Environment=AUTHENTICODE_POOL_SIZE=2
+Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
-# Smoke gate: validate this benign sample == Valid BEFORE taking the clean snapshot AND after every
-# recycle — so a booted-but-broken golden/worker never serves a job.
-Environment=AUTHENTICODE_SMOKE_SAMPLE=/home/coz/winval/samples/whoami.exe
+EnvironmentFile=-/etc/winval/winval.env
+# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it from the golden master
+# before every start when it is missing (a copy, ~20 s for 18 GB) — so a rebooted host comes back
+# on its own instead of failing every job until someone remembers the cp.
+ExecStartPre=/bin/sh -c 'test -f "$AUTHENTICODE_GOLDEN_BASE" || { echo "materialising RAM base from $GOLDEN_MASTER"; install -m 0644 "$GOLDEN_MASTER" "$AUTHENTICODE_GOLDEN_BASE"; }'
+# Smoke gate (opt-in, set in winval.env): validate a benign signed sample == Valid BEFORE taking the
+# clean snapshot AND after every recycle — so a booted-but-broken golden/worker never serves a job.
+#   AUTHENTICODE_SMOKE_SAMPLE=/var/lib/winval/samples/whoami.exe
 # Recycle cadence ("clear the job"): snapshot-revert wipes the per-job contamination. Default 25
 # (the engine's parse-only risk×cost). Set to 1 to clear after EVERY job (max isolation, ~6-8s/job).
-# Environment=AUTHENTICODE_JOBS_PER_RECYCLE=1
-ExecStart=/home/coz/winval/.venv/bin/python -m winval_blastbox.pool_manager
+#   AUTHENTICODE_JOBS_PER_RECYCLE=1
+ExecStart=/opt/win-validator/.venv/bin/python -m winval_blastbox.pool_manager
 Restart=on-failure
 RestartSec=5
 # /dev/shm holds the RAM-backed golden + worker overlays; don't let systemd sandbox it away.
