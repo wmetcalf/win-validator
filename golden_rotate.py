@@ -183,8 +183,29 @@ def validate_golden(qcow2: str) -> bool:
         rt.reap(slot)
 
 
+ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/lock/winval-golden-rotate.lock")
+
+
 def rotate(candidate: str) -> None:
-    """Back up the current live golden (keep the last N), then promote ``candidate`` into place."""
+    """Back up the current live golden (keep the last N), then promote ``candidate`` into place.
+
+    ONE rotation at a time: the timer's rotate and a manual ``golden_build.py build-and-promote``
+    (or two manual runs) must not overlap — two promotions would race on the same bases and
+    _sweep_own_temps would unlink the other's copy in flight. A held lock fails FAST, it never
+    queues: the second caller reports and exits, the first finishes."""
+    import fcntl
+    lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise RuntimeError(f"another rotation is in progress (lock {ROTATE_LOCK} held); golden NOT promoted (nothing published)") from e
+        _rotate_locked(candidate)
+    finally:
+        os.close(lock_fd)   # releases the lock with the descriptor
+
+
+def _rotate_locked(candidate: str) -> None:
     _ensure_backup_dir()
     ts = _run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
     if Path(GOLDEN_BASE_DISK).exists():

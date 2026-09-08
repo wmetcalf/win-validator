@@ -47,7 +47,7 @@ sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # th
 if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
   PW=$(openssl rand -hex 16)
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-  echo "WINVAL_PG_PASSWORD=$PW" | sudo tee /etc/winval/compose.env >/dev/null && sudo chmod 0600 /etc/winval/compose.env
+  echo "WINVAL_PG_PASSWORD=$PW" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # 0600 from the first byte, never tee-then-chmod
 fi
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
 # ingress with the 'winval' fallback password against a volume that holds the real one
