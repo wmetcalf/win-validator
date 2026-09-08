@@ -47,8 +47,10 @@ sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # th
 if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
   PW=$(openssl rand -hex 16)
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-  echo "WINVAL_PG_PASSWORD=$PW" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # 0600 from the first byte, never tee-then-chmod
 fi
+# compose.env carries the SAME password (the URL in winval.env is the source of truth — also when
+# you wrote that line yourself); written 0600 from the first byte, never tee-then-chmod
+sudo test -e /etc/winval/compose.env || sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([^@]*\)@.*|WINVAL_PG_PASSWORD=\1|p' /etc/winval/winval.env | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
 # ingress with the 'winval' fallback password against a volume that holds the real one
 sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
@@ -105,6 +107,13 @@ build_candidate()  master --overlay clone--> refresh trust state (myatg --refres
                    kill-list + CRL cache + roots/CTL) --> flatten --> candidate.qcow2
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
+
+Run both scripts AS ROOT (`sudo python3 …`): the rotation lock lives in /run and every publish
+step is privileged — a preflight refuses before the build otherwise. Promotion keeps a full
+temporary copy beside EACH base until the rename, so size `/dev/shm` for the golden plus one
+more image plus the worker overlays; the preflight checks that space too. A rotation that could
+not start (lock held, no space) keeps its gated candidate for `golden_rotate.py rotate <candidate>`;
+stale candidates are reclaimed after GOLDEN_CANDIDATE_KEEP_DAYS (7).
 ```
 
 A candidate is promoted **only if it passes the gate**; a broken/regressed bake (the WU-wedge /

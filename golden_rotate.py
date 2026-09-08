@@ -19,6 +19,8 @@ CLI:
 from __future__ import annotations
 
 import base64
+import json
+import shutil
 import logging
 import os
 import re
@@ -39,6 +41,7 @@ GOLDEN_BASE = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or os.environ.get("GOL
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
+CANDIDATE_KEEP_DAYS = int(os.environ.get("GOLDEN_CANDIDATE_KEEP_DAYS", "7"))
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
@@ -71,29 +74,68 @@ def _ssh_ps(ip: str, ps: str, t: float = 300, check: bool = False) -> str:
     return r.stdout.strip()
 
 
-_REFRESH_RE = re.compile(r"disallowed=(\d+) roots=(\d+)")
+class NothingPublished(RuntimeError):
+    """A rotation that changed NOTHING (lock held, not root, no space, a copy failed before any
+    rename): the candidate is still good and `golden_rotate.py rotate <candidate>` can retry it."""
 
 
 def refresh_ps(gv: str = "", warm: str = "") -> str:
-    """The in-guest trust refresh as PowerShell that FAILS HARD: a non-zero myatg exit, JSON that
-    does not parse, or JSON without the two counts all end the script non-zero (so _ssh_ps
-    check=True raises) instead of printing the literal 'disallowed= roots=' that an empty
-    result renders — the string a naive substring check mistakes for success."""
+    """The in-guest trust refresh as PowerShell that FAILS HARD (a non-zero myatg exit, JSON that
+    does not parse) and then prints myatg's JSON itself, for refresh_result() to judge — never a
+    formatted line whose literals an empty result would still render."""
     return ("$ErrorActionPreference = 'Stop'; "
             f"$raw = & C:\\agent\\myatg.exe --refresh {gv}; "
             "if ($LASTEXITCODE -ne 0) { Write-Error (\"myatg --refresh exited $LASTEXITCODE\"); exit 3 }; "
-            "$j = ($raw -join [Environment]::NewLine) | ConvertFrom-Json; "
-            "if ($null -eq $j.disallowed_store_count -or $null -eq $j.roots_synced) { Write-Error (\"refresh JSON lacks the counts: \" + $raw); exit 4 }; "
+            "$txt = ($raw -join [Environment]::NewLine); "
+            "$j = $txt | ConvertFrom-Json; "
             f"{warm} "
-            "\"disallowed=\" + $j.disallowed_store_count + \" roots=\" + $j.roots_synced")
+            "$txt")
 
 
-def refresh_counts(out: str) -> tuple[int, int]:
-    """Parse the refresh result line; anything but two integers is a failed refresh."""
-    m = _REFRESH_RE.search(out or "")
-    if not m:
-        raise RuntimeError(f"in-guest refresh produced no counts (got {out!r}); candidate discarded, golden unchanged")
-    return int(m.group(1)), int(m.group(2))
+def refresh_result(out: str) -> dict:
+    """Judge myatg --refresh by the fields that report SUCCESS (myatg.cs RefreshTrust): roots_synced
+    (certutil -syncWithWU completed) and disallowed_kill_list_installed (the fetched kill list was
+    added to the Disallowed store) are booleans; disallowed_store_count is a census of the store
+    and only proves it is non-empty. Anything else is a failed refresh — the base's stale trust
+    state would validate the benign sample just as well, so the gate cannot catch it later."""
+    try:
+        j = json.loads(out or "")
+    except ValueError as e:
+        raise RuntimeError(f"in-guest refresh printed no JSON ({e}); candidate discarded, golden unchanged") from e
+    if not isinstance(j, dict):
+        raise RuntimeError(f"in-guest refresh printed {type(j).__name__}, not an object; candidate discarded, golden unchanged")
+    problems = []
+    if j.get("roots_synced") is not True:
+        problems.append("roots_synced is not true (certutil -syncWithWU did not complete)")
+    if j.get("disallowed_kill_list_installed") is not True:
+        problems.append("disallowed_kill_list_installed is not true (no kill list was fetched/installed)")
+    if not isinstance(j.get("disallowed_store_count"), int) or j["disallowed_store_count"] < 1:
+        problems.append(f"disallowed_store_count={j.get('disallowed_store_count')!r}")
+    if problems:
+        raise RuntimeError("in-guest refresh FAILED: " + "; ".join(problems) + "; candidate discarded, golden unchanged")
+    return j
+
+
+def _free_beside(path: str) -> int:
+    return shutil.disk_usage(Path(path).parent).free
+
+
+def rotation_preflight(estimate_bytes: int | None = None) -> None:
+    """Everything rotate() will need, checked BEFORE the hour-long build and gate: root (the
+    lock lives in root-owned /run and every publish step is sudo), a usable lock, and room for
+    a full extra image beside EACH base (the all-or-nothing promotion keeps a temporary copy
+    next to the live base until the rename). Raises NothingPublished."""
+    if os.geteuid() != 0:
+        raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
+    try:
+        fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
+    os.close(fd)
+    need = estimate_bytes if estimate_bytes is not None else (Path(GOLDEN_BASE_DISK).stat().st_size if Path(GOLDEN_BASE_DISK).exists() else 0)
+    for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
+        if Path(base).parent.exists() and _free_beside(base) < need:
+            raise NothingPublished(f"not enough space beside {base}: {_free_beside(base)} free, a full image ({need} bytes) must fit next to the live base during promotion")
 
 
 def _mac(domain: str) -> str | None:
@@ -158,10 +200,9 @@ def build_candidate() -> str:
         gv = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""
         warm = f'C:\\agent\\myatg.exe --warm-cache "{WARM_DIR}" {gv} | Out-Null;' if WARM_DIR else ""
         out = _ssh_ps(ip, refresh_ps(gv, warm), 600, check=True)
-        logger.info("refresh result: %s", out)
-        # the whole point of the rebake is FRESH trust state: the counts must be real numbers
-        # (an empty result renders the literals 'disallowed= roots=', which is a failure)
-        refresh_counts(out)
+        j = refresh_result(out)   # the whole point of the rebake is FRESH trust state
+        logger.info("refresh result: roots_synced=%s kill_list_installed=%s disallowed_store_count=%s",
+                    j.get("roots_synced"), j.get("disallowed_kill_list_installed"), j.get("disallowed_store_count"))
         _ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
         while time.time() < dl and "shut off" not in _virsh("domstate", dom).stdout:
@@ -235,15 +276,15 @@ def rotate(candidate: str) -> None:
     try:
         lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError as e:
-        raise RuntimeError(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror}); golden NOT promoted (nothing published)") from e
+        raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror}); golden NOT promoted (nothing published)") from e
     try:
         st = os.fstat(lock_fd)
         if st.st_uid != os.geteuid():
-            raise RuntimeError(f"rotation lock {ROTATE_LOCK} is owned by uid {st.st_uid}, not by this process; refusing to rotate")
+            raise NothingPublished(f"rotation lock {ROTATE_LOCK} is owned by uid {st.st_uid}, not by this process; refusing to rotate")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
-            raise RuntimeError(f"another rotation is in progress (lock {ROTATE_LOCK} held); golden NOT promoted (nothing published)") from e
+            raise NothingPublished(f"another rotation is in progress (lock {ROTATE_LOCK} held); golden NOT promoted (nothing published)") from e
         _rotate_locked(candidate)
     finally:
         os.close(lock_fd)   # releases the lock with the descriptor
@@ -328,6 +369,9 @@ def _promote(candidate: str, bak: str | None) -> None:
         if Path(base).is_symlink() or Path(base).is_dir():
             raise RuntimeError(f"refusing to promote: {base} is a symlink or a directory, not a regular file; golden NOT promoted")
     _sweep_own_temps()
+    for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
+        if _free_beside(base) < want:
+            raise NothingPublished(f"not enough space beside {base}: {_free_beside(base)} free, {want} needed for the temporary copy; golden NOT promoted (nothing published)")
     tmps: list[str] = []
     def _cleanup_tmps() -> None:
         for t in tmps:
@@ -338,11 +382,11 @@ def _promote(candidate: str, bak: str | None) -> None:
             _checked_copy(candidate, tmps[-1], want, "promotion copy")
     except BaseException as e:
         _cleanup_tmps()
-        raise RuntimeError(f"{e}; golden NOT promoted (nothing published)") from e
+        raise NothingPublished(f"{e}; golden NOT promoted (nothing published)") from e
     r = _run(["sudo", "mv", "-fT", tmps[0], GOLDEN_BASE_DISK])
     if r.returncode != 0:
         _cleanup_tmps()
-        raise RuntimeError(f"promotion rename -> {GOLDEN_BASE_DISK} failed (rc={r.returncode}); golden NOT promoted (nothing published)")
+        raise NothingPublished(f"promotion rename -> {GOLDEN_BASE_DISK} failed (rc={r.returncode}); golden NOT promoted (nothing published)")
     r = _run(["sudo", "mv", "-fT", tmps[1], GOLDEN_BASE])
     if r.returncode == 0:
         return
@@ -384,6 +428,12 @@ def _prune_backups() -> None:
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one
+    # a candidate kept for a retry (NothingPublished) is reclaimed after CANDIDATE_KEEP_DAYS
+    cutoff = time.time() - CANDIDATE_KEEP_DAYS * 86400
+    for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
+        if (".candidate-" in c.name or ".built-" in c.name) and c.stat().st_mtime < cutoff:
+            logger.info("pruning stale candidate %s", c.name)
+            _run(["sudo", "rm", "-f", str(c)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else []
     for b in excess:
@@ -394,6 +444,7 @@ def _prune_backups() -> None:
 def refresh_and_rotate() -> int:
     """The full gated cycle: build a refreshed candidate, validate it, and ONLY promote if it passes.
     A failing gate keeps the current golden and returns non-zero (surfaced to the cron/alert)."""
+    rotation_preflight()   # root, lock, space — BEFORE the hour-long build and gate
     candidate = build_candidate()
     if not validate_golden(candidate):
         logger.error("REBAKE REJECTED: keeping current golden %s; candidate %s discarded",
@@ -402,10 +453,15 @@ def refresh_and_rotate() -> int:
         return 1
     try:
         rotate(candidate)
-    finally:
-        # the candidate lives in the backup dir: a leaked one would sort after every real
-        # backup and survive the prune while the goldens it replaced were deleted
+    except NothingPublished as e:
+        # nothing changed and the candidate is still gated-good: keep it for a retry instead of
+        # throwing away the build and the gate boot (it is reclaimed after CANDIDATE_KEEP_DAYS)
+        logger.error("%s — candidate KEPT at %s; retry with: golden_rotate.py rotate %s", e, candidate, candidate)
+        return 1
+    except BaseException:
         _run(["sudo", "rm", "-f", candidate])
+        raise
+    _run(["sudo", "rm", "-f", candidate])
     svc = os.environ.get("GOLDEN_RESTART_SERVICE")
     if svc:  # re-warm the pool off the freshly promoted golden (old warm workers ran the old base)
         logger.info("restarting %s to warm off the refreshed golden", svc)

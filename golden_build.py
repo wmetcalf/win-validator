@@ -57,7 +57,8 @@ STEPS: list[tuple[str, str]] = [
             $iso = Get-ChildItem 'D:\','E:\' -Filter 'virtio-win-guest-tools.exe' -ErrorAction SilentlyContinue | Select -First 1
             if ($iso) { Start-Process $iso.FullName -ArgumentList '/install','/quiet','/norestart' -Wait }
         }
-        'qemu-ga ' + [bool](Get-Service QEMU-GA -ErrorAction SilentlyContinue)"""),
+        if (-not (Get-Service QEMU-GA -ErrorAction SilentlyContinue)) { throw 'qemu-ga is not installed (no virtio-win-guest-tools.exe on D:/E:)' }
+        'qemu-ga True'"""),
     ("compile-myatg", f"""
         & '{_CSC}' /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:{AGENT_DIR}\\myatg.exe {AGENT_DIR}\\myatg.cs {AGENT_DIR}\\rdp_validate.cs {AGENT_DIR}\\http_serve.cs {AGENT_DIR}\\service.cs 2>&1 | Out-File {AGENT_DIR}\\build.log
         if (-not (Test-Path {AGENT_DIR}\\myatg.exe)) {{ throw 'myatg compile failed' }}
@@ -119,10 +120,12 @@ def build(base: str = BASE_QCOW2) -> str:
             logger.info("step %s …", name)
             # EVERY step is checked: a throw, a native failure or a timeout raises with the
             # guest's stderr, so a build never flattens an image a step failed to prepare
-            out = gr._ssh_ps(ip, ps, 600, check=True)
+            # every step under Stop: a failing cmdlet is a terminating error and a non-zero exit
+            # (a native command's failure is still only $LASTEXITCODE — steps that run one test it)
+            out = gr._ssh_ps(ip, "$ErrorActionPreference = 'Stop'; " + ps, 600, check=True)
             logger.info("  %s -> %s", name, out.replace("\n", " ")[:120])
             if name == "refresh-trust":
-                gr.refresh_counts(out)
+                gr.refresh_result(out)
         gr._ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
         while time.time() < dl and "shut off" not in gr._virsh("domstate", dom).stdout:
@@ -140,6 +143,7 @@ def build(base: str = BASE_QCOW2) -> str:
 
 
 def build_and_promote() -> int:
+    gr.rotation_preflight()   # root, lock, space — BEFORE the build and the gate
     candidate = build()
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)
@@ -147,8 +151,13 @@ def build_and_promote() -> int:
         return 1
     try:
         gr.rotate(candidate)
-    finally:
-        gr._run(["sudo", "rm", "-f", candidate])   # rotate() raises from several places: never leave the image behind
+    except gr.NothingPublished as e:
+        logger.error("%s — candidate KEPT at %s; retry with: golden_rotate.py rotate %s", e, candidate, candidate)
+        return 1
+    except BaseException:
+        gr._run(["sudo", "rm", "-f", candidate])
+        raise
+    gr._run(["sudo", "rm", "-f", candidate])
     logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
     return 0
 
