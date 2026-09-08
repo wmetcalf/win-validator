@@ -60,10 +60,15 @@ def _virsh(*a: str, t: float = 120) -> subprocess.CompletedProcess:
     return _run(["sudo", "virsh", *a], t)
 
 
-def _ssh_ps(ip: str, ps: str, t: float = 300) -> str:
+def _ssh_ps(ip: str, ps: str, t: float = 300, check: bool = False) -> str:
+    """Run PowerShell in the guest; with ``check`` a non-zero exit (or a timeout) RAISES with the
+    guest's stderr — a step whose failure must not be mistaken for success."""
     enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-    return _run(["ssh", "-n", *_SSH, f"Administrator@{ip}",
-                 "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + enc], t).stdout.strip()
+    r = _run(["ssh", "-n", *_SSH, f"Administrator@{ip}",
+              "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + enc], t)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"in-guest step failed (rc={r.returncode}): {r.stderr.strip()[-500:] or r.stdout.strip()[-500:]}")
+    return r.stdout.strip()
 
 
 def _mac(domain: str) -> str | None:
@@ -112,10 +117,10 @@ def build_candidate() -> str:
     rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=MASTER_QCOW2))
     xml_path = f"/tmp/{dom}.xml"
     Path(xml_path).write_text(rt._domain_xml(dom, overlay))
-    assert _virsh("define", xml_path).returncode == 0, "define failed"
-    assert _virsh("start", dom).returncode == 0, "start failed"
     built = False
-    try:
+    try:   # from here every exit — a failed define/start included — destroys the domain + overlay
+        assert _virsh("define", xml_path).returncode == 0, "define failed"
+        assert _virsh("start", dom).returncode == 0, "start failed"
         mac = _mac(dom)
         ip, dl = None, time.time() + 240
         while time.time() < dl:
@@ -128,8 +133,12 @@ def build_candidate() -> str:
         gv = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""
         warm = f'C:\\agent\\myatg.exe --warm-cache "{WARM_DIR}" {gv} | Out-Null;' if WARM_DIR else ""
         out = _ssh_ps(ip, f'$j = C:\\agent\\myatg.exe --refresh {gv} | ConvertFrom-Json; {warm} '
-                          '"disallowed=" + $j.disallowed_store_count + " roots=" + $j.roots_synced', 600)
+                          '"disallowed=" + $j.disallowed_store_count + " roots=" + $j.roots_synced', 600, check=True)
         logger.info("refresh result: %s", out)
+        # the whole point of the rebake is FRESH trust state: a refresh that produced nothing
+        # would otherwise flatten and pass a gate the stale master also passes
+        if "disallowed=" not in out or "roots=" not in out:
+            raise RuntimeError(f"in-guest refresh produced no result (got {out!r}); candidate discarded, golden unchanged")
         _ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
         while time.time() < dl and "shut off" not in _virsh("domstate", dom).stdout:

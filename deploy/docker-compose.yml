@@ -9,8 +9,11 @@
 # HOST (it needs libvirt + iptables) as a systemd unit and connects to the Postgres published below
 # + reads the same job_root host path. Bring up:
 #     mkdir -p /var/lib/winval/jobs && chown 10001:10001 /var/lib/winval/jobs
-#     docker compose -f deploy/docker-compose.yml up --build -d
+#     sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
 #     sudo systemctl start winval-pool-manager
+# ALWAYS with --env-file (deploy/README.md mints WINVAL_PG_PASSWORD into it): a bare `up` resolves
+# ${WINVAL_PG_PASSWORD:-winval} to the fallback and recreates the ingress locked out of a Postgres
+# volume that holds the real password.
 services:
   postgres:
     image: postgres:16-alpine

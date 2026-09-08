@@ -5,7 +5,7 @@
 # ingress container writes to, reads their spooled inputs from the shared job_root, validates them
 # in a warm VM worker, and writes the verdict back. Install:
 #     sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator   # ROOT-owned: this unit runs as root
-#     sudo install -d -m 0700 /etc/winval && sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env  # ROOT-ONLY (DB password); then edit
+#     sudo install -d -m 0700 /etc/winval && sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env  # ROOT-ONLY (DB password); first time only, then edit
 #     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 #     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 [Unit]

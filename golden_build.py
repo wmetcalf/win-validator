@@ -103,9 +103,9 @@ def build(base: str = BASE_QCOW2) -> str:
     from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
     rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
     xml = f"/tmp/{dom}.xml"; Path(xml).write_text(rt._domain_xml(dom, overlay))
-    assert gr._virsh("define", xml).returncode == 0
-    assert gr._virsh("start", dom).returncode == 0
-    try:
+    try:   # from here every exit — a failed define/start included — destroys the domain + overlay
+        assert gr._virsh("define", xml).returncode == 0
+        assert gr._virsh("start", dom).returncode == 0
         mac = gr._mac(dom); ip = None; dl = time.time() + 240
         while time.time() < dl:
             ip = gr._ip_for_mac(mac) if mac else None
