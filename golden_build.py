@@ -143,7 +143,9 @@ def build(base: str = BASE_QCOW2) -> str:
 
 
 def build_and_promote() -> int:
-    gr.rotation_preflight()   # root, lock, space — BEFORE the build and the gate
+    # root, lock, samples, space — BEFORE the build and the gate; sized by THIS entry point's base
+    # (on a first-run host there is no golden and no master to estimate from)
+    gr.rotation_preflight(estimate_bytes=Path(BASE_QCOW2).stat().st_size if Path(BASE_QCOW2).exists() else None)
     candidate = build()
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)

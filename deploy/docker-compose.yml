@@ -37,7 +37,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.ingress
     environment:
-      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD:-winval}@postgres:5432/winval
+      # the URL form needs the PERCENT-ENCODED password (deploy/README.md writes both into
+      # compose.env); POSTGRES_PASSWORD above takes the literal one
+      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD_URLENC:-${WINVAL_PG_PASSWORD:-winval}}@postgres:5432/winval
       WINVAL_JOB_ROOT: /var/lib/winval/jobs
       AUTHENTICODE_MAX_UPLOAD_MB: "1024"
     volumes:

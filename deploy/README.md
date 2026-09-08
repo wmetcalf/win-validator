@@ -53,7 +53,9 @@ fi
 if ! sudo test -e /etc/winval/compose.env; then
   # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
   # Postgres must be initialised with; both clients decode it the same way)
-  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote; u = urlsplit(sys.stdin.read().strip()); print("WINVAL_PG_PASSWORD=" + unquote(u.password)) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None')
+  # two forms: the literal password (Postgres initialises with it) and the percent-encoded one
+  # (the ingress embeds it in a URL — a literal '@' or '#' there would split the URL)
+  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; print("WINVAL_PG_PASSWORD=" + pw + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
   if [ -n "$PWLINE" ]; then
     echo "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
   else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
@@ -118,7 +120,10 @@ validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND r
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
 
 Run both scripts AS ROOT and with the venv's interpreter (`sudo /opt/win-validator/.venv/bin/python
-golden_rotate.py …` — the system python3 has no blastbox): the rotation lock lives in /run and every publish
+golden_rotate.py …` — the system python3 has no blastbox). They read `/etc/winval/winval.env` themselves
+(`WINVAL_ENV_FILE` to point elsewhere) for any GOLDEN_*/AUTHENTICODE_* value not already in the
+environment, so a hand-run rotation uses the same paths as the timer's even though sudo strips exported
+variables. The rotation lock lives in /run and every publish
 step is privileged — a preflight refuses before the build otherwise. Promotion keeps a full
 temporary copy beside EACH base until the rename, so size `/dev/shm` for the golden plus one
 more image plus the worker overlays; the preflight checks that space too. A rotation that could

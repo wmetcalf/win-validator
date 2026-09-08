@@ -31,6 +31,30 @@ from pathlib import Path
 
 logger = logging.getLogger("winval.golden_rotate")
 
+def _load_env_file(path: str) -> None:
+    """Read the units' EnvironmentFile the way systemd does (KEY=VALUE, # comments, optional
+    quotes) and apply it to any variable NOT already in the environment — so a hand-run
+    `sudo … golden_rotate.py` (sudo's env_reset strips every exported GOLDEN_*/AUTHENTICODE_*
+    override) sees the SAME paths the timer's rotation used, instead of the defaults."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_env_file(os.environ.get("WINVAL_ENV_FILE", "/etc/winval/winval.env"))
+
 MASTER_DOMAIN = os.environ.get("GOLDEN_MASTER_DOMAIN", "winserver2025-core")
 MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserver2025-core.qcow2")
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
@@ -120,14 +144,23 @@ def _free_beside(path: str) -> int:
     return shutil.disk_usage(Path(path).parent).free
 
 
+def _existing_ancestor(path: str) -> Path:
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return p
+
+
 def rotation_preflight(estimate_bytes: int | None = None) -> None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
-    samples, and space — a full image beside EACH base (the all-or-nothing promotion keeps a
-    temporary copy next to the live base until the rename) and TWO in the backup dir (the
-    candidate the build writes there plus the backup of the current golden). The estimate is
-    the larger of the current golden and the master (a candidate is never smaller than its
-    base; there is no golden yet on the first rotation). Raises NothingPublished."""
+    samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
+    a temporary copy beside EACH base (staged until the rename) and the backup of the current
+    golden, all alive at once. Requirements are summed PER FILESYSTEM (the disk base and the
+    backup dir normally share one), so the shipped defaults need 3x the image there, not 2x.
+    The estimate is the larger of the current golden and the master, or the caller's (the
+    build entry point passes its own base); with nothing to estimate from, refuse rather than
+    pass a full disk. Raises NothingPublished."""
     if os.geteuid() != 0:
         raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     try:
@@ -135,17 +168,31 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
     os.close(fd)
-    for sample, what in ((BENIGN, "GOLDEN_BENIGN_SAMPLE"), (REVOKED, "GOLDEN_REVOKED_SAMPLE")):
-        if sample and not Path(sample).is_file():
-            raise NothingPublished(f"{what}={sample} does not exist: the gate could not run, so the build would be wasted")
+    if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
+        raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
+    if REVOKED and not Path(REVOKED).is_file():
+        raise NothingPublished(f"GOLDEN_REVOKED_SAMPLE={REVOKED} does not exist: the gate could not run, so the build would be wasted")
     if estimate_bytes is None:
         estimate_bytes = max((Path(p).stat().st_size for p in (GOLDEN_BASE_DISK, MASTER_QCOW2) if Path(p).exists()), default=0)
+    if estimate_bytes <= 0:
+        raise NothingPublished(f"cannot size the run: neither {GOLDEN_BASE_DISK} nor {MASTER_QCOW2} exists (set GOLDEN_MASTER, or pass the base's size)")
     need = estimate_bytes
-    for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
-        if Path(base).parent.exists() and _free_beside(base) < need:
-            raise NothingPublished(f"not enough space beside {base}: {_free_beside(base)} free, a full image ({need} bytes) must fit next to the live base during promotion")
-    if BACKUP_DIR.exists() and shutil.disk_usage(BACKUP_DIR).free < 2 * need:
-        raise NothingPublished(f"not enough space in {BACKUP_DIR}: {shutil.disk_usage(BACKUP_DIR).free} free, the candidate plus a backup of the current golden ({2 * need} bytes) must fit")
+    # peak per filesystem: candidate + backup in BACKUP_DIR, one temporary beside each base
+    demands = [(str(BACKUP_DIR), 2 * need, "candidate + backup in the backup dir"),
+               (str(Path(GOLDEN_BASE_DISK).parent), need, "temporary beside the disk base"),
+               (str(Path(GOLDEN_BASE).parent), need, "temporary beside the RAM base")]
+    per_fs: dict = {}
+    for path, amount, what in demands:
+        anc = _existing_ancestor(path)
+        dev = os.stat(anc).st_dev
+        entry = per_fs.setdefault(dev, {"anc": anc, "need": 0, "what": []})
+        entry["need"] += amount
+        entry["what"].append(what)
+    for dev, entry in per_fs.items():
+        free = shutil.disk_usage(entry["anc"]).free
+        if free < entry["need"]:
+            raise NothingPublished(f"not enough space on the filesystem of {entry['anc']}: {free} free, {entry['need']} needed at the run's peak "
+                                   f"({' + '.join(entry['what'])}; image estimate {need} bytes)")
 
 
 def _mac(domain: str) -> str | None:
@@ -424,8 +471,12 @@ def _promote(candidate: str) -> None:
             except BaseException:
                 _run(["sudo", "rm", "-f", rbt])
                 raise
-            raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}); the disk golden was ROLLED BACK "
-                               f"from {bak}; golden NOT promoted")
+            # rolled back = nothing changed: the candidate is still good (NothingPublished keeps it),
+            # and the backup is now a byte-for-byte duplicate of the live golden — drop it, or it
+            # would evict a genuinely older rollback generation in the prune
+            _run(["sudo", "rm", "-f", bak])
+            raise NothingPublished(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}); the disk golden was ROLLED BACK "
+                                   f"from {bak}; golden NOT promoted (nothing published)")
         except RuntimeError as e:
             if "ROLLED BACK" in str(e):
                 raise
