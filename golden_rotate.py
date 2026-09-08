@@ -71,6 +71,31 @@ def _ssh_ps(ip: str, ps: str, t: float = 300, check: bool = False) -> str:
     return r.stdout.strip()
 
 
+_REFRESH_RE = re.compile(r"disallowed=(\d+) roots=(\d+)")
+
+
+def refresh_ps(gv: str = "", warm: str = "") -> str:
+    """The in-guest trust refresh as PowerShell that FAILS HARD: a non-zero myatg exit, JSON that
+    does not parse, or JSON without the two counts all end the script non-zero (so _ssh_ps
+    check=True raises) instead of printing the literal 'disallowed= roots=' that an empty
+    result renders — the string a naive substring check mistakes for success."""
+    return ("$ErrorActionPreference = 'Stop'; "
+            f"$raw = & C:\\agent\\myatg.exe --refresh {gv}; "
+            "if ($LASTEXITCODE -ne 0) { Write-Error (\"myatg --refresh exited $LASTEXITCODE\"); exit 3 }; "
+            "$j = ($raw -join [Environment]::NewLine) | ConvertFrom-Json; "
+            "if ($null -eq $j.disallowed_store_count -or $null -eq $j.roots_synced) { Write-Error (\"refresh JSON lacks the counts: \" + $raw); exit 4 }; "
+            f"{warm} "
+            "\"disallowed=\" + $j.disallowed_store_count + \" roots=\" + $j.roots_synced")
+
+
+def refresh_counts(out: str) -> tuple[int, int]:
+    """Parse the refresh result line; anything but two integers is a failed refresh."""
+    m = _REFRESH_RE.search(out or "")
+    if not m:
+        raise RuntimeError(f"in-guest refresh produced no counts (got {out!r}); candidate discarded, golden unchanged")
+    return int(m.group(1)), int(m.group(2))
+
+
 def _mac(domain: str) -> str | None:
     for line in _virsh("domiflist", domain).stdout.splitlines():
         p = line.split()
@@ -132,13 +157,11 @@ def build_candidate() -> str:
         logger.info("refreshing trust state in %s (myatg --refresh)…", ip)
         gv = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""
         warm = f'C:\\agent\\myatg.exe --warm-cache "{WARM_DIR}" {gv} | Out-Null;' if WARM_DIR else ""
-        out = _ssh_ps(ip, f'$j = C:\\agent\\myatg.exe --refresh {gv} | ConvertFrom-Json; {warm} '
-                          '"disallowed=" + $j.disallowed_store_count + " roots=" + $j.roots_synced', 600, check=True)
+        out = _ssh_ps(ip, refresh_ps(gv, warm), 600, check=True)
         logger.info("refresh result: %s", out)
-        # the whole point of the rebake is FRESH trust state: a refresh that produced nothing
-        # would otherwise flatten and pass a gate the stale master also passes
-        if "disallowed=" not in out or "roots=" not in out:
-            raise RuntimeError(f"in-guest refresh produced no result (got {out!r}); candidate discarded, golden unchanged")
+        # the whole point of the rebake is FRESH trust state: the counts must be real numbers
+        # (an empty result renders the literals 'disallowed= roots=', which is a failure)
+        refresh_counts(out)
         _ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
         while time.time() < dl and "shut off" not in _virsh("domstate", dom).stdout:
@@ -192,7 +215,10 @@ def validate_golden(qcow2: str) -> bool:
         rt.reap(slot)
 
 
-ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/lock/winval-golden-rotate.lock")
+# under /run (root-owned 0755), NOT /run/lock (1777, sticky): a lock file any local user can
+# create is a lock any local user can hold forever, blocking every rotation with a message
+# that blames a concurrent run — and with fs.protected_regular root cannot even open it
+ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
 
 
 def rotate(candidate: str) -> None:
@@ -203,8 +229,17 @@ def rotate(candidate: str) -> None:
     _sweep_own_temps would unlink the other's copy in flight. A held lock fails FAST, it never
     queues: the second caller reports and exits, the first finishes."""
     import fcntl
-    lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    c = Path(candidate)
+    if c.is_symlink() or not c.is_file():   # BEFORE the lock and before an hour-long backup copy
+        raise RuntimeError(f"candidate {candidate} is not a regular file; golden NOT promoted (nothing published, no backup taken)")
     try:
+        lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        raise RuntimeError(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror}); golden NOT promoted (nothing published)") from e
+    try:
+        st = os.fstat(lock_fd)
+        if st.st_uid != os.geteuid():
+            raise RuntimeError(f"rotation lock {ROTATE_LOCK} is owned by uid {st.st_uid}, not by this process; refusing to rotate")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
