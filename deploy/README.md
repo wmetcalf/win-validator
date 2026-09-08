@@ -51,7 +51,9 @@ fi
 # compose.env carries the SAME password (the URL in winval.env is the source of truth — also when
 # you wrote that line yourself); written 0600 from the first byte, never tee-then-chmod
 if ! sudo test -e /etc/winval/compose.env; then
-  PWLINE=$(sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([^@]*\)@.*|WINVAL_PG_PASSWORD=\1|p' /etc/winval/winval.env)
+  # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
+  # Postgres must be initialised with; both clients decode it the same way)
+  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote; u = urlsplit(sys.stdin.read().strip()); print("WINVAL_PG_PASSWORD=" + unquote(u.password)) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None')
   if [ -n "$PWLINE" ]; then
     echo "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
   else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
@@ -115,11 +117,12 @@ build_candidate()  master --overlay clone--> refresh trust state (myatg --refres
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
 
-Run both scripts AS ROOT (`sudo python3 …`): the rotation lock lives in /run and every publish
+Run both scripts AS ROOT and with the venv's interpreter (`sudo /opt/win-validator/.venv/bin/python
+golden_rotate.py …` — the system python3 has no blastbox): the rotation lock lives in /run and every publish
 step is privileged — a preflight refuses before the build otherwise. Promotion keeps a full
 temporary copy beside EACH base until the rename, so size `/dev/shm` for the golden plus one
 more image plus the worker overlays; the preflight checks that space too. A rotation that could
-not start (lock held, no space) keeps its gated candidate for `golden_rotate.py rotate <candidate>`;
+not start (lock held, no space, a failed backup) keeps its gated candidate and logs the exact retry command;
 stale candidates are reclaimed after GOLDEN_CANDIDATE_KEEP_DAYS (7).
 ```
 

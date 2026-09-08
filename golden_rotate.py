@@ -121,10 +121,13 @@ def _free_beside(path: str) -> int:
 
 
 def rotation_preflight(estimate_bytes: int | None = None) -> None:
-    """Everything rotate() will need, checked BEFORE the hour-long build and gate: root (the
-    lock lives in root-owned /run and every publish step is sudo), a usable lock, and room for
-    a full extra image beside EACH base (the all-or-nothing promotion keeps a temporary copy
-    next to the live base until the rename). Raises NothingPublished."""
+    """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
+    lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
+    samples, and space — a full image beside EACH base (the all-or-nothing promotion keeps a
+    temporary copy next to the live base until the rename) and TWO in the backup dir (the
+    candidate the build writes there plus the backup of the current golden). The estimate is
+    the larger of the current golden and the master (a candidate is never smaller than its
+    base; there is no golden yet on the first rotation). Raises NothingPublished."""
     if os.geteuid() != 0:
         raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     try:
@@ -132,10 +135,17 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
     os.close(fd)
-    need = estimate_bytes if estimate_bytes is not None else (Path(GOLDEN_BASE_DISK).stat().st_size if Path(GOLDEN_BASE_DISK).exists() else 0)
+    for sample, what in ((BENIGN, "GOLDEN_BENIGN_SAMPLE"), (REVOKED, "GOLDEN_REVOKED_SAMPLE")):
+        if sample and not Path(sample).is_file():
+            raise NothingPublished(f"{what}={sample} does not exist: the gate could not run, so the build would be wasted")
+    if estimate_bytes is None:
+        estimate_bytes = max((Path(p).stat().st_size for p in (GOLDEN_BASE_DISK, MASTER_QCOW2) if Path(p).exists()), default=0)
+    need = estimate_bytes
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
         if Path(base).parent.exists() and _free_beside(base) < need:
             raise NothingPublished(f"not enough space beside {base}: {_free_beside(base)} free, a full image ({need} bytes) must fit next to the live base during promotion")
+    if BACKUP_DIR.exists() and shutil.disk_usage(BACKUP_DIR).free < 2 * need:
+        raise NothingPublished(f"not enough space in {BACKUP_DIR}: {shutil.disk_usage(BACKUP_DIR).free} free, the candidate plus a backup of the current golden ({2 * need} bytes) must fit")
 
 
 def _mac(domain: str) -> str | None:
@@ -292,29 +302,32 @@ def rotate(candidate: str) -> None:
 
 def _rotate_locked(candidate: str) -> None:
     _ensure_backup_dir()
-    ts = _run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
-    if Path(GOLDEN_BASE_DISK).exists():
-        bak = BACKUP_DIR / f"golden-base.{ts}.qcow2"
-        logger.info("backing up current golden -> %s", bak)
-        # CHECKED like every promotion copy: this backup is what a rollback restores from, what
-        # _prune_backups keeps as a known-good golden, and what the pool-manager's ExecStartPre
-        # copies into RAM after a reboot — a truncated backup (a timeout, ENOSPC) would pass all
-        # three because each only compares against the backup itself. Fail closed: no backup,
-        # no promotion.
-        want_bak = Path(GOLDEN_BASE_DISK).stat().st_size
-        rb0 = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 3600)
-        got_bak = bak.stat().st_size if bak.exists() else -1
-        if rb0.returncode != 0 or got_bak != want_bak:
-            _run(["sudo", "rm", "-f", str(bak)])
-            raise RuntimeError(f"backup of the current golden -> {bak} failed (rc={rb0.returncode}, {got_bak} of {want_bak} bytes); "
-                               f"golden NOT promoted (nothing published, no backup kept)")
-    bak_path = str(bak) if 'bak' in locals() else None
     try:
-        _promote(candidate, bak_path)
+        _promote(candidate)
     finally:
-        # on EVERY outcome: a rotation that keeps failing has still written one full-size
-        # backup per run above, and nothing else ever reclaims them
-        _prune_backups()
+        _prune_backups()   # on EVERY outcome
+
+
+def _backup_current() -> str | None:
+    """A CHECKED copy of the live golden into the backup dir (None when there is no golden yet).
+    Taken only once a promotion is about to publish — a rotation that publishes nothing must not
+    add a full-size copy of the unchanged golden that then evicts a genuinely older rollback
+    backup. This backup is what a rollback restores from, what _prune_backups keeps as a
+    known-good golden, and what the pool-manager's ExecStartPre copies into RAM after a reboot —
+    a truncated one (a timeout, ENOSPC) would pass all three, so rc AND size are checked."""
+    if not Path(GOLDEN_BASE_DISK).exists():
+        return None
+    ts = _run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
+    bak = BACKUP_DIR / f"golden-base.{ts}.qcow2"
+    logger.info("backing up current golden -> %s", bak)
+    want = Path(GOLDEN_BASE_DISK).stat().st_size
+    r = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 3600)
+    got = bak.stat().st_size if bak.exists() else -1
+    if r.returncode != 0 or got != want:
+        _run(["sudo", "rm", "-f", str(bak)])
+        raise NothingPublished(f"backup of the current golden -> {bak} failed (rc={r.returncode}, {got} of {want} bytes); "
+                               f"golden NOT promoted (nothing published, no backup kept)")
+    return str(bak)
 
 
 TMP_TAG = ".rot."   # rotator temporaries: <base>.rot.XXXXXX — a namespace the pool-manager unit's
@@ -351,7 +364,7 @@ def _checked_copy(src: str, dst_tmp: str, want: int, what: str) -> None:
         raise RuntimeError(f"{what} -> {dst_tmp}: could not set mode 0644 (rc={c.returncode})")
 
 
-def _promote(candidate: str, bak: str | None) -> None:
+def _promote(candidate: str) -> None:
     logger.info("promoting candidate -> %s (+ %s)", GOLDEN_BASE_DISK, GOLDEN_BASE)
     # ALL OR NOTHING. Both copies land in mktemp temporaries and are CHECKED (rc, size, mode —
     # _run() swallows a timeout into rc=124, ENOSPC is rc=1) before either is published; then
@@ -383,6 +396,11 @@ def _promote(candidate: str, bak: str | None) -> None:
     except BaseException as e:
         _cleanup_tmps()
         raise NothingPublished(f"{e}; golden NOT promoted (nothing published)") from e
+    try:
+        bak = _backup_current()   # only now: both copies are in place and the publish is next
+    except BaseException:
+        _cleanup_tmps()
+        raise
     r = _run(["sudo", "mv", "-fT", tmps[0], GOLDEN_BASE_DISK])
     if r.returncode != 0:
         _cleanup_tmps()
@@ -456,7 +474,7 @@ def refresh_and_rotate() -> int:
     except NothingPublished as e:
         # nothing changed and the candidate is still gated-good: keep it for a retry instead of
         # throwing away the build and the gate boot (it is reclaimed after CANDIDATE_KEEP_DAYS)
-        logger.error("%s — candidate KEPT at %s; retry with: golden_rotate.py rotate %s", e, candidate, candidate)
+        logger.error("%s — candidate KEPT at %s; retry with: sudo %s %s rotate %s", e, candidate, sys.executable, Path(__file__).resolve(), candidate)
         return 1
     except BaseException:
         _run(["sudo", "rm", "-f", candidate])

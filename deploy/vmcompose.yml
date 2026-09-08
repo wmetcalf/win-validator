@@ -12,7 +12,7 @@ workers:
         # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups).
         # Run from the win-validator checkout (cwd), or set an absolute path to golden_build.py.
         # Point MYATG_SRC at a myatg checkout (defaults to ../myatg beside this repo).
-        - "python3 golden_build.py build-and-promote"
+        - "sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote"
 
     # domain shape
     mem_mb: 4096

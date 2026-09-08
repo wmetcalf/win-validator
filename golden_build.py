@@ -152,7 +152,7 @@ def build_and_promote() -> int:
     try:
         gr.rotate(candidate)
     except gr.NothingPublished as e:
-        logger.error("%s — candidate KEPT at %s; retry with: golden_rotate.py rotate %s", e, candidate, candidate)
+        logger.error("%s — candidate KEPT at %s; retry with: sudo %s %s rotate %s", e, candidate, sys.executable, Path(gr.__file__).resolve(), candidate)
         return 1
     except BaseException:
         gr._run(["sudo", "rm", "-f", candidate])
