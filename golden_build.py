@@ -96,13 +96,14 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._ensure_backup_dir()
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
-    assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base, "-F", "qcow2", overlay], 120).returncode == 0
+    xml = f"/tmp/{dom}.xml"
     built = False
-    gr._run(["sudo", "chmod", "644", overlay])
-    from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
-    rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
-    xml = f"/tmp/{dom}.xml"; Path(xml).write_text(rt._domain_xml(dom, overlay))
-    try:   # from here every exit — a failed define/start included — destroys the domain + overlay
+    try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
+        assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base, "-F", "qcow2", overlay], 120).returncode == 0
+        gr._run(["sudo", "chmod", "644", overlay])
+        from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
+        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
+        Path(xml).write_text(rt._domain_xml(dom, overlay))
         assert gr._virsh("define", xml).returncode == 0
         assert gr._virsh("start", dom).returncode == 0
         mac = gr._mac(dom); ip = None; dl = time.time() + 240
@@ -160,6 +161,7 @@ def build_and_promote() -> int:
         gr._run(["sudo", "rm", "-f", candidate])
         raise
     gr._run(["sudo", "rm", "-f", candidate])
+    gr.restart_pool()   # warm workers ran the old golden; without this the build is not "live"
     logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
     return 0
 

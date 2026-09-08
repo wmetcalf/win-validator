@@ -34,6 +34,7 @@ cd /opt/win-validator
 sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs
 
 # secrets, root-only: the env file BOTH units read, and the golden's ssh key
+sudo git clone https://github.com/wmetcalf/myatg /opt/myatg   # the in-guest agent's sources (MYATG_SRC), compiled by golden_build.py
 sudo install -d -m 0700 /etc/winval
 sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env   # first time only (the test runs as root: the dir is 0700); then edit
 sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # the key the golden was built with
@@ -53,11 +54,13 @@ fi
 if ! sudo test -e /etc/winval/compose.env; then
   # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
   # Postgres must be initialised with; both clients decode it the same way)
-  # two forms: the literal password (Postgres initialises with it) and the percent-encoded one
-  # (the ingress embeds it in a URL — a literal '@' or '#' there would split the URL)
-  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; print("WINVAL_PG_PASSWORD=" + pw + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
+  # two forms: the literal password (Postgres initialises with it; written as a JSON/double-quoted
+  # string — compose's env file understands \" and \\ inside double quotes — with '$' as '$$',
+  # because compose interpolates its env file and a bare '$' would truncate the secret) and the
+  # percent-encoded one (the ingress embeds it in a URL)
+  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
   if [ -n "$PWLINE" ]; then
-    echo "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env
+    printf '%s\n' "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # printf, not echo: dash's echo would eat the backslashes
   else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
     echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write WINVAL_PG_PASSWORD=<that password> to /etc/winval/compose.env by hand before the compose up" >&2
   fi
@@ -119,6 +122,8 @@ build_candidate()  master --overlay clone--> refresh trust state (myatg --refres
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
 
+```
+
 Run both scripts AS ROOT and with the venv's interpreter (`sudo /opt/win-validator/.venv/bin/python
 golden_rotate.py …` — the system python3 has no blastbox). They read `/etc/winval/winval.env` themselves
 (`WINVAL_ENV_FILE` to point elsewhere) for any GOLDEN_*/AUTHENTICODE_* value not already in the
@@ -129,7 +134,7 @@ temporary copy beside EACH base until the rename, so size `/dev/shm` for the gol
 more image plus the worker overlays; the preflight checks that space too. A rotation that could
 not start (lock held, no space, a failed backup) keeps its gated candidate and logs the exact retry command;
 stale candidates are reclaimed after GOLDEN_CANDIDATE_KEEP_DAYS (7).
-```
+
 
 A candidate is promoted **only if it passes the gate**; a broken/regressed bake (the WU-wedge /
 corruption scenarios) is rejected and the current golden is kept. Schedule it weekly:

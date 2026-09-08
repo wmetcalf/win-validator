@@ -233,16 +233,16 @@ def build_candidate() -> str:
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
     logger.info("cloning master -> overlay %s", overlay)
-    assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", MASTER_QCOW2, "-F", "qcow2",
-                 overlay], 120).returncode == 0, "overlay create failed"
-    _run(["sudo", "chmod", "644", overlay])
-    # define+boot the overlay domain (reuse the runtime's XML generator for a real worker shape)
-    from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
-    rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=MASTER_QCOW2))
     xml_path = f"/tmp/{dom}.xml"
-    Path(xml_path).write_text(rt._domain_xml(dom, overlay))
     built = False
-    try:   # from here every exit — a failed define/start included — destroys the domain + overlay
+    try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
+        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", MASTER_QCOW2, "-F", "qcow2",
+                     overlay], 120).returncode == 0, "overlay create failed"
+        _run(["sudo", "chmod", "644", overlay])
+        # define+boot the overlay domain (reuse the runtime's XML generator for a real worker shape)
+        from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
+        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=MASTER_QCOW2))
+        Path(xml_path).write_text(rt._domain_xml(dom, overlay))
         assert _virsh("define", xml_path).returncode == 0, "define failed"
         assert _virsh("start", dom).returncode == 0, "start failed"
         mac = _mac(dom)
@@ -510,6 +510,21 @@ def _prune_backups() -> None:
         _run(["sudo", "rm", "-f", str(b)])
 
 
+def restart_pool() -> None:
+    """Re-warm the pool off the freshly promoted golden: warm workers keep the OLD golden's inode
+    open (the promotion is a rename) and are only ever snapshot-reverted, never respawned, so
+    without this nothing puts the new trust state into service. Every promoting entry point
+    calls it. GOLDEN_RESTART_SERVICE unset: say so loudly instead of claiming 'live'."""
+    svc = os.environ.get("GOLDEN_RESTART_SERVICE")
+    if svc:
+        logger.info("restarting %s to warm off the refreshed golden", svc)
+        r = _run(["sudo", "systemctl", "restart", svc], 600)
+        if r.returncode != 0:
+            logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
+    else:
+        logger.warning("GOLDEN_RESTART_SERVICE is unset: the promoted golden is NOT in service until winval-pool-manager is restarted")
+
+
 def refresh_and_rotate() -> int:
     """The full gated cycle: build a refreshed candidate, validate it, and ONLY promote if it passes.
     A failing gate keeps the current golden and returns non-zero (surfaced to the cron/alert)."""
@@ -531,10 +546,7 @@ def refresh_and_rotate() -> int:
         _run(["sudo", "rm", "-f", candidate])
         raise
     _run(["sudo", "rm", "-f", candidate])
-    svc = os.environ.get("GOLDEN_RESTART_SERVICE")
-    if svc:  # re-warm the pool off the freshly promoted golden (old warm workers ran the old base)
-        logger.info("restarting %s to warm off the refreshed golden", svc)
-        _run(["sudo", "systemctl", "restart", svc])
+    restart_pool()
     logger.info("REBAKE PROMOTED: golden refreshed; %d backup(s) retained", KEEP_N)
     return 0
 
