@@ -30,12 +30,32 @@ Environment=AUTHENTICODE_POOL_SIZE=2
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 EnvironmentFile=-/etc/winval/winval.env
-# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it from the golden master
-# before every start when it is missing (a copy, ~20 s for 18 GB) — so a rebooted host comes back
-# on its own instead of failing every job until someone remembers the cp.
-ExecStartPre=/bin/sh -c 'test -f "$AUTHENTICODE_GOLDEN_BASE" || { echo "materialising RAM base from $GOLDEN_MASTER"; install -m 0644 "$GOLDEN_MASTER" "$AUTHENTICODE_GOLDEN_BASE"; }'
-# Smoke gate (opt-in, set in winval.env): validate a benign signed sample == Valid BEFORE taking the
-# clean snapshot AND after every recycle — so a booted-but-broken golden/worker never serves a job.
+# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it before every start when
+# it is missing — so a rebooted host comes back on its own instead of failing every job until
+# someone remembers the cp.
+#
+# FROM THE PROMOTED GOLDEN, NOT THE PACKER MASTER. golden_rotate.rotate() promotes each gated
+# candidate to GOLDEN_BASE_DISK (the durable on-disk twin) AND to the RAM base; GOLDEN_MASTER is
+# the frozen rung-0 image and is never refreshed. Restoring from the master would silently revert
+# every rotation on the next reboot (stale disallowed list / CRL cache / roots, no agent if the
+# golden was built by golden_build.py). The master is the source only when no golden has ever
+# been promoted.
+#
+# ATOMIC, AND SIZE-CHECKED AGAINST ITS OWN SOURCE: a copy interrupted half-way (a start timeout,
+# a reboot mid-copy) leaves a truncated file that `test -f` accepts — and every worker would boot
+# off garbage. The copy lands under a temporary name and is renamed into place only when its
+# size matches the source; an existing base whose size differs from the source is rebuilt. The
+# comparison is against GOLDEN_BASE_DISK, so the restart rotate() triggers right after promoting
+# keeps the just-promoted base (rotate wrote both copies from the same candidate).
+Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
+ExecStartPre=/bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; if [ -f "$b" ] && [ "$(stat -c %%s "$b")" = "$(stat -c %%s "$src")" ]; then exit 0; fi; echo "materialising RAM base from $src"; rm -f "$b" "$b.partial"; cp "$src" "$b.partial" && [ "$(stat -c %%s "$b.partial")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$b.partial" && mv -f "$b.partial" "$b"'
+# The copy runs inside the start job: an 18 GB image at a cold cache on a slow or contended store
+# can outlive the 90 s default, and a start timeout is exactly the interrupted copy above.
+TimeoutStartSec=20min
+# Smoke gate — OPT-IN, and OFF until you set it in winval.env: with AUTHENTICODE_SMOKE_SAMPLE set,
+# a benign signed sample must validate == Valid BEFORE the clean snapshot is taken AND after every
+# recycle, so a booted-but-broken golden/worker never serves a job. Without it, readiness is
+# port-open only. The deploy README tells you where to put the sample; set it.
 #   AUTHENTICODE_SMOKE_SAMPLE=/var/lib/winval/samples/whoami.exe
 # Recycle cadence ("clear the job"): snapshot-revert wipes the per-job contamination. Default 25
 # (the engine's parse-only risk×cost). Set to 1 to clear after EVERY job (max isolation, ~6-8s/job).

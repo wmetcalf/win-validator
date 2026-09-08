@@ -131,7 +131,7 @@ def _sync_clock(slot) -> None:
     # ToLocalTime so Set-Date (which sets LOCAL time) lands the correct UTC for any guest TZ.
     ps = f"Set-Date -Date ([DateTime]::Parse('{utc}').ToLocalTime()) | Out-Null"
     enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-    key = os.environ.get("AUTHENTICODE_SSH_KEY", "/home/coz/.ssh/win_golden")
+    key = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
     try:
         subprocess.run(
             ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",

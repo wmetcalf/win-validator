@@ -34,7 +34,7 @@ GOLDEN_BASE = os.environ.get("GOLDEN_BASE", "/dev/shm/golden-base.qcow2")
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
-SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/home/coz/.ssh/win_golden")
+SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/tmp/whoami.exe")
 REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set

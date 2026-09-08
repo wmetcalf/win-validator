@@ -35,16 +35,27 @@ sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/job
 WINVAL_PG_PASSWORD=$(openssl rand -hex 16) \
   docker compose -f deploy/docker-compose.yml up --build -d
 
-# privileged tier on the host (libvirt). The unit reads /etc/winval/winval.env — put the
-# Postgres password (BLASTBOX_DATABASE_URL), pool size, ssh key and egress settings there.
-sudo mkdir -p /etc/winval && sudo cp deploy/winval.env.example /etc/winval/winval.env   # then edit
+# privileged tier on the host (libvirt). BOTH units read /etc/winval/winval.env — the Postgres
+# password (BLASTBOX_DATABASE_URL, port 5433 as published above), pool size, egress, and the
+# smoke samples go there. The golden's ssh key and the env file are secrets: root-only.
+sudo install -d -m 0700 /etc/winval
+sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env      # then edit
+sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # the key the golden was built with
+# the smoke gates (boot/recycle for the pool, benign==Valid for the rotation) validate a benign
+# SIGNED sample — any small Microsoft-signed binary; without it readiness is port-open only
+sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.exe /var/lib/winval/samples/whoami.exe
+#   then set AUTHENTICODE_SMOKE_SAMPLE and GOLDEN_BENIGN_SAMPLE in winval.env
 sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
 ```
 
-The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) from
-`GOLDEN_MASTER` in `ExecStartPre` whenever it is missing — `/dev/shm` empties on reboot, so a
-rebooted host comes back on its own (an 18 GB copy takes ~20 s).
+The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
+`ExecStartPre` whenever it is missing — `/dev/shm` empties on reboot, so a rebooted host comes
+back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores). The source
+is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes into, so a reboot never
+reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any golden has
+been promoted. The copy is atomic and size-checked, so an interrupted copy is rebuilt, never
+booted from.
 
 UI + API at <http://localhost:8099/>.
 

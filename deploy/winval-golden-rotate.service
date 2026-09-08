@@ -11,15 +11,17 @@ Requires=libvirtd.service
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/home/coz/winval
-Environment=PYTHONPATH=/home/coz/winval
+WorkingDirectory=/opt/win-validator
+Environment=PYTHONPATH=/opt/win-validator
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=GOLDEN_BASE=/dev/shm/golden-base.qcow2
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 Environment=GOLDEN_BACKUP_DIR=/var/lib/libvirt/images/golden-backups
 Environment=GOLDEN_KEEP_N=5
-Environment=GOLDEN_BENIGN_SAMPLE=/home/coz/winval/samples/whoami.exe
+# The benign signed sample the rotation gate validates (benign==Valid, and revoked==Revoked when
+# GOLDEN_REVOKED_SAMPLE is set): set both in /etc/winval/winval.env (see the deploy README).
 # Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
-# Environment=GOLDEN_REVOKED_SAMPLE=/home/coz/winval/samples/revoked.dll
+#   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
-ExecStart=/home/coz/winval/.venv/bin/python /home/coz/winval/golden_rotate.py refresh-and-rotate
+EnvironmentFile=-/etc/winval/winval.env
+ExecStart=/opt/win-validator/.venv/bin/python /opt/win-validator/golden_rotate.py refresh-and-rotate
