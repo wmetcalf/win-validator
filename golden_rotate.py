@@ -73,13 +73,13 @@ def _chain_file() -> Path:
 
 
 def chain_length() -> int:
-    """The promoted golden's rebake depth. A golden WITHOUT a readable record (never recorded,
-    or the record could not be written) is unknown provenance: MAX_CHAIN, so the next rebake
-    starts from the master — 0 would pin the counter and disable the reset forever."""
+    """The promoted golden's rebake depth; 0 when there is no record yet (a golden that predates
+    the chain keeps rebaking from itself until MAX_CHAIN, exactly as before this branch)."""
     try:
         return int(_chain_file().read_text().strip() or "0")
     except (OSError, ValueError):
-        return MAX_CHAIN if Path(GOLDEN_BASE_DISK).exists() else 0
+        return 0   # no record (a golden that predates the chain, or a fresh host): the count starts here — the
+                   # preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
 
 
 def rebake_source() -> str:
@@ -138,7 +138,7 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
         src = rebake_source()
     _ensure_backup_dir()
     _sweep_stranded_sources()
-    copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}.qcow2")
+    copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}-{os.getpid()}.qcow2")   # both builders call this: the second alone is not unique
     fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         # bounded like the preflight's wait (a pool-manager start holds the lock for minutes; a
@@ -170,11 +170,12 @@ GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/g
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
 CANDIDATE_KEEP_DAYS = int(os.environ.get("GOLDEN_CANDIDATE_KEEP_DAYS", "7"))
+CONVERT_TIMEOUT_S = int(os.environ.get("GOLDEN_CONVERT_TIMEOUT_S", "3600"))   # the flatten writes a whole image: the same budget as every whole-image copy
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
 REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set
-WARM_DIR = os.environ.get("AUTHENTICODE_WARM_DIR") or os.environ.get("GOLDEN_WARM_DIR", "")        # optional in-guest dir of certs to re-warm
+WARM_DIR = os.environ.get("GOLDEN_WARM_DIR", "")   # a GUEST directory (C:\...) of signed binaries for myatg --warm-cache; NOT AUTHENTICODE_WARM_DIR, which is a HOST corpus the pool posts to the agent        # optional in-guest dir of certs to re-warm
 
 _SSH = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=15", "-i", SSH_KEY]
@@ -292,6 +293,11 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
     if BACKUP_DIR.exists():
         _sweep_stranded_sources()   # BEFORE the space check below, which a stranded copy would fail forever
+    if Path(GOLDEN_BASE_DISK).exists() and not _chain_file().exists():
+        # the chain record must be WRITABLE, or the MAX_CHAIN reset could never fire (a counter that
+        # cannot be recorded stays 0 forever): prove it now, at the cost of one tiny file
+        if not _write_small(str(_chain_file()), str(chain_length())):
+            raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if REVOKED and not Path(REVOKED).is_file():
@@ -396,7 +402,8 @@ def build_candidate() -> str:
         while time.time() < dl and "shut off" not in _virsh("domstate", dom).stdout:
             time.sleep(3)
         logger.info("flattening overlay -> candidate %s", candidate)
-        assert _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], 900).returncode == 0
+        rc = _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], CONVERT_TIMEOUT_S).returncode
+        assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
         _run(["sudo", "chmod", "644", candidate])
         _write_small(str(candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
         built = True

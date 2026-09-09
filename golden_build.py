@@ -49,7 +49,7 @@ STAGE = [(os.path.join(MYATG_SRC, f), f"{AGENT_DIR}/{f}") for f in _MYATG_FILES]
 _CSC = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
 GV_ARG = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""          # the in-guest refresh (quoted; absent when disabled, as in golden_rotate)
 WARM_PS = f'{AGENT_DIR}\\myatg.exe --warm-cache "{gr.WARM_DIR}" {GV_ARG} | Out-Null;' if gr.WARM_DIR else ""   # same CRL warm-up as the rotator's rebake
-GV_TASK = f'--gv \\"{GRAVEYARD}\\"' if GRAVEYARD else ""   # quoted inside the /tr string, absent when disabled (a bare path with a space silently emptied the graveyard)
+GV_TASK = f'--gv \\"{GRAVEYARD}\\"' if GRAVEYARD else ""   # for the --% (stop-parsing) schtasks line below: schtasks' own argv parser reads \" as a literal quote inside /tr, the documented idiom for a quoted path in a task action; absent when disabled (a bare path with a space silently emptied the graveyard)
 
 LENIENT_STEPS = {"ngen", "compile-myatg"}   # they redirect native stderr (2>&1) and check their result themselves
 
@@ -85,7 +85,11 @@ STEPS: list[tuple[str, str]] = [
         'http-acl ok'"""),
     ("onstart-agent", fr"""
         schtasks /delete /tn valagent /f 2>$null | Out-Null
-        schtasks /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port 8765 --allow-insecure {GV_TASK}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f | Out-Null
+        # --% hands the rest of the line to schtasks VERBATIM: PowerShell 5.1 neither escapes nor preserves quotes
+        # embedded in a native argument (a `" inside "..." reaches schtasks unescaped and splits /tr), so the line
+        # is written in schtasks' own syntax — /tr "... --gv \"path\"" — with no PowerShell string in between
+        schtasks --% /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port 8765 --allow-insecure {GV_TASK}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f
+        if ($LASTEXITCODE -ne 0) {{ throw "schtasks /create failed ($LASTEXITCODE)" }}
         (schtasks /query /tn valagent /v /fo list | Select-String 'Task To Run')"""),
 ]
 
@@ -165,7 +169,8 @@ def build(base: str = BASE_QCOW2) -> str:
         while time.time() < dl and "shut off" not in gr._virsh("domstate", dom).stdout:
             time.sleep(3)
         logger.info("flattening -> %s", candidate)
-        assert gr._run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], 900).returncode == 0
+        rc = gr._run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], gr.CONVERT_TIMEOUT_S).returncode
+        assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % gr.CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
         gr._run(["sudo", "chmod", "644", candidate])
         built = True
     finally:
