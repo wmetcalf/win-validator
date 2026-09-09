@@ -398,7 +398,13 @@ class PoolManager:
     def run(self) -> int:
         wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
         wrr, jrr = wr.resolve(), jr.resolve()   # lexically AND through links: a job root symlinked into the scratch root is one directory tree
-        if wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr) or wrr == jrr or wrr.is_relative_to(jrr) or jrr.is_relative_to(wrr):
+        same_inode = False
+        try:   # a bind mount is the same directory under two names no path comparison can relate
+            sa, sb = os.stat(wr), os.stat(jr)
+            same_inode = (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+        except OSError:
+            pass   # a root that does not exist yet is created (WORK_ROOT) or refused (JOB_ROOT) below
+        if same_inode or wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr) or wrr == jrr or wrr.is_relative_to(jrr) or jrr.is_relative_to(wrr):
             # the JOB_ROOT sweep would otherwise remove the scratch root as a rowless job dir, and an ingress
             # result_dir could name a directory inside the manager's own scratch tree
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} and WINVAL_JOB_ROOT {JOB_ROOT} must be disjoint")

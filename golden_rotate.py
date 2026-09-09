@@ -197,6 +197,10 @@ def _sweep_stranded_sources() -> None:
     cutoff = time.time() - STRANDED_SOURCE_HOURS * 3600
     for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
         if (_mtime(c) or float("inf")) < cutoff:   # a builder deletes its copy without the lock
+            pid = c.name[:-len(".qcow2")].rsplit("-", 1)[-1]   # the builder's pid is in the name (snapshot_source): a copy is the BACKING file of its build for as long as that runs
+            if pid.isdigit() and Path("/proc", pid).exists():
+                logger.warning("rebake-source copy %s is older than %dh but its builder (pid %s) is still running: left alone", c.name, STRANDED_SOURCE_HOURS, pid)
+                continue
             logger.warning("removing stranded rebake-source copy %s (a killed run left it)", c.name)
             _run(["sudo", "rm", "-f", str(c)])
 
