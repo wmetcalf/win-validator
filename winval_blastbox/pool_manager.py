@@ -142,6 +142,14 @@ class PoolManager:
                 if self._store.update_if_status(job.job_id, JobStatus.RUNNING, status=JobStatus.FAILED,
                                                 finished_at=time.time(), error="orphaned by a pool-manager restart"):
                     logger.warning("job %s was RUNNING at start (abandoned by the previous pool-manager): marked FAILED", job.job_id)
+                    # the spooled input a lost terminal write KEPT (see _process) is consumed here, once the row is terminal
+                    name = Path(job.filename or "").name
+                    rd = Path(job.result_dir or "").resolve()
+                    if name and rd.is_relative_to(JOB_ROOT.resolve()):
+                        try:
+                            (rd / "input" / name).unlink()
+                        except OSError:
+                            pass
             except Exception:  # noqa: BLE001
                 logger.warning("orphan recovery: job %s could not be updated", job.job_id, exc_info=True)
 
