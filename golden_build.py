@@ -259,6 +259,9 @@ def main(argv: list[str]) -> int:
     except gr.NothingPublished as e:
         logger.error("%s", e)
         return 1
+    except gr.SplitState as e:   # the worst outcome must not be the one failure that reaches the journal as a traceback
+        logger.error("SPLIT STATE: %s", e)
+        return 1
 
 
 def _main(argv: list[str]) -> int:

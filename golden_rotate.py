@@ -190,6 +190,15 @@ def rebake_source() -> str:
 STRANDED_SOURCE_HOURS = _env_int("GOLDEN_STRANDED_SOURCE_HOURS", 24, floor=1)
 
 
+def _is_builder(pid: str) -> bool:
+    """A live process whose command line names one of the two builders (a recycled pid number is not one)."""
+    try:
+        argv = Path("/proc", pid, "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return any(a.endswith((b"golden_rotate.py", b"golden_build.py")) for a in argv)
+
+
 def _sweep_stranded_sources() -> None:
     """A rebake-source copy has no value once its run ended; one left by a killed run (OOM, a
     reboot, systemctl stop) is reclaimed here — called from rotation_preflight() BEFORE its space
@@ -198,7 +207,7 @@ def _sweep_stranded_sources() -> None:
     for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
         if (_mtime(c) or float("inf")) < cutoff:   # a builder deletes its copy without the lock
             pid = c.name[:-len(".qcow2")].rsplit("-", 1)[-1]   # the builder's pid is in the name (snapshot_source): a copy is the BACKING file of its build for as long as that runs
-            if pid.isdigit() and Path("/proc", pid).exists():
+            if pid.isdigit() and _is_builder(pid):   # the NUMBER alone is recyclable after a day: it must still be a golden_rotate/golden_build
                 logger.warning("rebake-source copy %s is older than %dh but its builder (pid %s) is still running: left alone", c.name, STRANDED_SOURCE_HOURS, pid)
                 continue
             logger.warning("removing stranded rebake-source copy %s (a killed run left it)", c.name)
@@ -1062,6 +1071,9 @@ def main(argv: list[str]) -> int:
         return _main(cmd, argv)
     except NothingPublished as e:
         logger.error("%s", e)
+        return 1
+    except SplitState as e:   # the branch's worst outcome must not be the one failure that reaches the journal as a traceback at info
+        logger.error("SPLIT STATE: %s", e)
         return 1
 
 

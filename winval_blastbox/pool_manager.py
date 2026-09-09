@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import errno
 import os
 import shutil
 import signal
@@ -152,7 +153,13 @@ def _rm_tree_fd(fd: int) -> None:
     ingress swapped for a link mid-walk made root unlink through it."""
     for e in os.scandir(fd):
         if e.is_dir(follow_symlinks=False):
-            sub = os.open(e.name, _DIR, dir_fd=fd)
+            try:
+                sub = os.open(e.name, _DIR, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):   # swapped for a link (or a file) between the listing and this open: remove the ENTRY, never what it names
+                    os.unlink(e.name, dir_fd=fd)
+                    continue
+                raise
             try:
                 _rm_tree_fd(sub)
             finally:
