@@ -14,10 +14,11 @@ downstream step.
 - **qemu-kvm** with **slirp** (user-mode networking). Packer's qemu builder reaches the guest over an
   SSH port-forward through slirp — no bridge/tap/root needed. Verify:
   ```sh
-  qemu-system-x86_64 -netdev help | grep -w user     # must print "user"
+  printf 'quit\n' | timeout 30 qemu-system-x86_64 -machine none -display none -monitor stdio -netdev user,id=t 2>&1 | grep -i "not compiled"
   ```
-  If it doesn't, your qemu was compiled without `libslirp`; install a slirp-enabled qemu. `build.sh`
-  checks this and fails early with a clear message.
+  prints nothing on a slirp-enabled qemu; "network backend 'user' is not compiled into this binary"
+  means yours was built without `libslirp` — install a slirp-enabled qemu. (`-netdev help` LISTS `user`
+  even when it is compiled out, so it proves nothing.) `build.sh` runs this same probe and fails early.
 - **xorriso** (or `genisoimage`/`mkisofs`) — for the answer CD.
 - **openssh-client** + **python3** — key generation + answer-file rendering.
 - Read/write **`/dev/kvm`** (for acceleration; the build works without it but is very slow).

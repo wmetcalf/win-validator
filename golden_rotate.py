@@ -709,6 +709,8 @@ def _prune_backups(keep: str | None = None) -> None:
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
+        if str(b.resolve()) in keep_paths:   # the rotate CLI restoring a BACKUP passes it as the candidate: never the one being restored
+            continue
         logger.info("pruning old backup %s", b.name)
         _run(["sudo", "rm", "-f", str(b)])
 
