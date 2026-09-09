@@ -182,11 +182,13 @@ def build(base: str = BASE_QCOW2) -> str:
     return candidate
 
 
-def build_and_promote() -> int:
+def build_and_promote(base: str = BASE_QCOW2) -> int:
     # root, lock, samples, space — BEFORE the build and the gate; sized by THIS entry point's base
     # (on a first-run host there is no golden and no master to estimate from)
-    gr.rotation_preflight(estimate_bytes=Path(BASE_QCOW2).stat().st_size if Path(BASE_QCOW2).exists() else None)
-    candidate = build()
+    if not Path(base).is_file():
+        raise gr.NothingPublished(f"build base {base} is not a file: set GOLDEN_BUILD_BASE in winval.env (or pass the path) to the post-OS-install image")
+    gr.rotation_preflight(estimate_bytes=Path(base).stat().st_size)
+    candidate = build(base)
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)
         gr._rm_candidate(candidate)
@@ -229,8 +231,8 @@ def _main(argv: list[str]) -> int:
     if cmd == "build":
         print(build(argv[1] if len(argv) > 1 else BASE_QCOW2))
         return 0
-    if cmd == "build-and-promote":
-        return build_and_promote()
+    if cmd == "build-and-promote":   # optional base path, like `build`; else GOLDEN_BUILD_BASE
+        return build_and_promote(argv[1] if len(argv) > 1 else BASE_QCOW2)
     print(__doc__)
     return 2
 

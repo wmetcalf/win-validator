@@ -89,11 +89,15 @@ def _chain_file() -> Path:
 def chain_length() -> int:
     """The promoted golden's rebake depth; 0 when there is no record yet (a golden that predates
     the chain keeps rebaking from itself until MAX_CHAIN, exactly as before this branch)."""
-    try:
-        return int(_chain_file().read_text().strip() or "0")
-    except (OSError, ValueError):
+    f = _chain_file()
+    if not f.exists():
         return 0   # no record (a golden that predates the chain, or a fresh host): the count starts here — the
                    # preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
+    try:
+        return int(f.read_text().strip())
+    except (OSError, ValueError):
+        return MAX_CHAIN   # a record that exists but cannot be read (empty, garbage): unknown provenance — the
+                          # master rebake next cycle re-establishes it (0 would silently reset the counter)
 
 
 def rebake_source() -> str:
@@ -311,10 +315,15 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
     if BACKUP_DIR.exists():
         _sweep_stranded_sources()   # BEFORE the space check below, which a stranded copy would fail forever
-    if Path(GOLDEN_BASE_DISK).exists() and not _chain_file().exists():
+    if Path(GOLDEN_BASE_DISK).exists():
         # the chain record must be WRITABLE, or the MAX_CHAIN reset could never fire (a counter that
-        # cannot be recorded stays 0 forever): prove it now, at the cost of one tiny file
-        if not _write_small(str(_chain_file()), str(chain_length())):
+        # cannot be recorded stays where it is): prove it EVERY run with a probe file beside the record
+        # (never by rewriting an existing record), and seed a missing record with the depth it reads as
+        probe = str(_chain_file()) + ".probe"
+        if not _write_small(probe, "probe"):
+            raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
+        _run(["sudo", "rm", "-f", probe])
+        if not _chain_file().exists() and not _write_small(str(_chain_file()), str(chain_length())):
             raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
@@ -685,7 +694,10 @@ def _prune_backups() -> None:
 def _write_small(path: str, text: str) -> bool:
     """Root-owned small file next to a root-owned image, written with the arguments QUOTED and
     the result checked (an unquoted redirect truncated at the first space in the path)."""
-    r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2"', "sh", text, path])
+    # ATOMIC: printf into a sibling temp, then mv over the record — a redirect truncates BEFORE it
+    # writes, and a write that then fails (ENOSPC, a store gone read-only) left a 0-byte record that
+    # read as depth 0 and reset the master-rebake counter
+    r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2.tmp" && mv -f "$2.tmp" "$2"', "sh", text, path])
     if r.returncode != 0:
         logger.error("could not write %s (rc=%s): %s", path, r.returncode, r.stderr.strip()[-200:])
         return False

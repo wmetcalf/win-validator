@@ -79,14 +79,21 @@ sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.
 # does not exist fails the pool-manager at start, by name. Without them, readiness is port-open only.
 sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.exe /var/lib/winval/samples/whoami.exe
 
-# privileged tier on the host (libvirt)
+# privileged tier on the host (libvirt): install the unit, then bake the FIRST golden, then start
 sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
+sudo systemctl daemon-reload
+# the golden the pool boots from does not exist yet: the pool-manager refuses to start with neither a
+# golden (GOLDEN_BASE_DISK) nor a master (GOLDEN_MASTER) on disk. Bake it once from the post-OS-install
+# image (the packer/autounattend WS2025 base — GOLDEN_BUILD_BASE in winval.env, or the argument here):
+# build -> gate (the benign sample validates) -> promote; ~30-60 min. It logs "NOT in service" because
+# the pool is not running yet — the next line starts it.
+sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote /var/lib/libvirt/images/winserver2025-base.qcow2
+sudo systemctl enable --now winval-pool-manager
 ```
 
 The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
 `ExecStartPre` only when it is MISSING — `/dev/shm` empties on reboot, so a rebooted host comes
-back on its own (an 18 GB copy takes ~20–30 s; the unit allows 20 min for slow stores). Fast
+back on its own (an 18 GB copy takes ~20–30 s; the unit's start budget is 55 min: up to 30 min behind a rotation's lock plus the copy on a slow store). Fast
 failures — Postgres not up yet, a bad `winval.env` — are retried every 30 s for eight starts, then the
 unit latches `failed`: fix the cause and `sudo systemctl reset-failed winval-pool-manager && sudo
 systemctl start winval-pool-manager`. A base that is present is never touched. The
