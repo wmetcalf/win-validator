@@ -53,7 +53,7 @@ ISO_PATH=/mnt/iso/w2025.iso   ./build.sh          # ISO location
 winserver2025-core.pkr.hcl      Packer template (qemu builder + SSH + provisioners), fully var-driven
 build.sh                        one-shot: prereq checks (incl. slirp) → keygen → render answer → build
 answer/Autounattend.xml.tmpl    unattended-install template; build.sh injects the build pubkey + password
-variables.pkrvars.hcl.example   optional var file (copy to variables.auto.pkvars.hcl to persist settings)
+variables.pkrvars.hcl.example   optional var file (copy to variables.auto.pkrvars.hcl to persist settings)
 scripts/                        ordered PowerShell provisioners (10-openssh … 90-defender)
 iso/                            drop your Windows + (optional) virtio ISOs here  (gitignored)
 keys/                           throwaway per-build ed25519 keypair, auto-generated  (gitignored)

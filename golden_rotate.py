@@ -441,8 +441,11 @@ def build_candidate(src: str | None = None) -> str:
                     j.get("roots_synced"), j.get("disallowed_kill_list_installed"), j.get("disallowed_store_count"))
         _ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
-        while time.time() < dl and "shut off" not in _virsh("domstate", dom).stdout:
+        state = ""
+        while time.time() < dl and "shut off" not in (state := _virsh("domstate", dom).stdout):
             time.sleep(3)
+        if "shut off" not in state:   # a running guest flattened is a crash-inconsistent candidate that the gate can still pass
+            raise NothingPublished(f"guest {dom} did not shut off within 180s (domstate: {state.strip() or 'unknown'}); refusing to flatten a running domain into a candidate")
         logger.info("flattening overlay -> candidate %s", candidate)
         rc = _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], CONVERT_TIMEOUT_S).returncode
         assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
@@ -574,6 +577,15 @@ def _sweep_own_temps() -> None:
             if t.is_file() and not t.is_symlink():
                 logger.info("removing stale temporary %s", t)
                 _run(["sudo", "rm", "-f", str(t)])
+    # ... and the pool-manager unit's own <RAM base>.?????? (six characters: never the rotator's
+    # .rot.XXXXXX, never the base itself): a start killed mid-copy strands one there, and with the
+    # unit stopped or latched nothing else reclaims it — the preflight then refused every rotation
+    # for lack of space on /dev/shm. Safe here: this runs under the rotation lock, which the unit's
+    # copy also holds, so no such copy is in flight.
+    for t in Path(GOLDEN_BASE).parent.glob(Path(GOLDEN_BASE).name + ".??????"):
+        if t.is_file() and not t.is_symlink():
+            logger.info("removing stranded pool-manager temporary %s", t)
+            _run(["sudo", "rm", "-f", str(t)])
 
 
 def _mktemp(beside: str) -> str:

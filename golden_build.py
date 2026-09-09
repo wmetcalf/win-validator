@@ -173,8 +173,11 @@ def build(base: str = BASE_QCOW2) -> str:
                 logger.warning("qemu-ga is not installed in the guest (no virtio-win-guest-tools.exe on D:/E:); the pool will use the SSH clock fallback")
         gr._ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
-        while time.time() < dl and "shut off" not in gr._virsh("domstate", dom).stdout:
+        state = ""
+        while time.time() < dl and "shut off" not in (state := gr._virsh("domstate", dom).stdout):
             time.sleep(3)
+        if "shut off" not in state:   # never flatten a running domain (a crash-inconsistent image the gate may still pass)
+            raise gr.NothingPublished(f"guest {dom} did not shut off within 180s (domstate: {state.strip() or 'unknown'}); refusing to flatten a running domain into a candidate")
         logger.info("flattening -> %s", candidate)
         rc = gr._run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], gr.CONVERT_TIMEOUT_S).returncode
         assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % gr.CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
