@@ -215,7 +215,9 @@ def _run(a: list[str], t: float = 120) -> subprocess.CompletedProcess:
 
 
 def _virsh(*a: str, t: float = 120) -> subprocess.CompletedProcess:
-    return _run(["sudo", "virsh", *a], t)
+    # under the C locale: the builders match virsh's English output ("shut off"), and a hand-run under a
+    # translated locale would see it in that language (sudo's env_reset keeps LC_*, so it is set explicitly)
+    return _run(["sudo", "env", "LC_ALL=C", "LANG=C", "virsh", *a], t)
 
 
 def _ssh_ps(ip: str, ps: str, t: float = 300, check: bool = False) -> str:
