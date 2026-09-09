@@ -128,17 +128,6 @@ def _chain_file() -> Path:
     return Path(GOLDEN_BASE_DISK + ".chain")
 
 
-def _agent_port() -> int:
-    """AUTHENTICODE_AGENT_PORT read tolerantly (the same rule as winval_blastbox.knobs.agent_port; this
-    script runs standalone, so the reader is local)."""
-    raw = os.environ.get("AUTHENTICODE_AGENT_PORT", "").strip()
-    try:
-        return max(1, int(raw)) if raw else 8765
-    except ValueError:
-        logger.warning("AUTHENTICODE_AGENT_PORT=%r is not a whole number: using 8765", raw)
-        return 8765
-
-
 def _mirror_file() -> Path:
     return Path(CHAIN_MIRROR)
 
@@ -469,6 +458,11 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if gate_samples and REVOKED and not Path(REVOKED).is_file():
         raise NothingPublished(f"GOLDEN_REVOKED_SAMPLE={REVOKED} does not exist: the gate could not run, so the build would be wasted")
+    if gate_samples:   # the gate boots under the PRODUCTION spec: a knob blastbox's fail-closed parsers refuse (AUTHENTICODE_BLOCK_INTERNAL=treu) must fail HERE, not as a traceback after the hour-long build
+        try:
+            _gate_spec("/dev/null")
+        except (ValueError, RuntimeError) as exc:
+            raise NothingPublished(f"the worker spec the gate would boot with is invalid ({exc}): fix the AUTHENTICODE_* knobs; the build would be wasted") from exc
     if estimate_bytes is None:
         estimate_bytes = max((Path(p).stat().st_size for p in (GOLDEN_BASE_DISK, MASTER_QCOW2) if Path(p).exists()), default=0)
     if estimate_bytes <= 0:
@@ -605,20 +599,24 @@ def build_candidate(src: str | None = None) -> str:
     return candidate
 
 
+def _gate_spec(qcow2: str):
+    """The PRODUCTION spec (egress policy, exit routing, agent port) with the candidate as its image: the gate
+    must judge the candidate under the network posture the workers will run with, and with the same clock sync
+    at ready (a golden without qemu-ga gets its clock ONLY from that hook — and both verdicts are clock-bound).
+    The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP."""
+    import dataclasses
+    from winval_blastbox.vm_pool import authenticode_spec
+    from blastbox.host.runtime.vm_compose import VmImageSpec
+    return dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
+
+
 def validate_golden(qcow2: str) -> bool:
     """Boot a throwaway worker off ``qcow2`` and assert the validation gate: a benign signed sample
     is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
-    import dataclasses
-    from winval_blastbox.vm_pool import agent_validate, authenticode_spec, _sync_clock
-    from blastbox.host.runtime.vm_compose import VmImageSpec
-    # the PRODUCTION spec (egress policy, exit routing, agent port) with the candidate as its image: the gate must
-    # judge the candidate under the network posture the workers will run with, and with the same clock sync at
-    # ready (a golden without qemu-ga gets its clock ONLY from that hook — and the two verdicts are clock-bound).
-    # The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP.
-    spec = dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
-    rt = spec.runtime(on_ready=_sync_clock)
-    try:
+    from winval_blastbox.vm_pool import agent_validate, _sync_clock
+    try:   # the spec too: a knob blastbox refuses is a GATE FAIL by name, never a traceback (the preflight refuses it earlier still)
+        rt = _gate_spec(qcow2).runtime(on_ready=_sync_clock)
         slot = rt.spawn_ready(timeout_s=240)
     except Exception as exc:
         logger.error("GATE FAIL: candidate %s did not boot a healthy worker: %s", qcow2, exc)

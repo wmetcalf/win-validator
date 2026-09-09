@@ -215,7 +215,11 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     # slow-loris many-concurrent) upload can't be buffered whole into RAM and OOM the service.
     # Clean up the temp file on any failure before the job is queued (only _run unlinks otherwise).
     max_bytes = upload_mb() * 1024 * 1024
-    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + Path(file.filename or "input").name)
+    name = Path(file.filename or "input").name
+    if not name or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="filename has no usable name")
+    # the client's name is only a HINT in the temp name: bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as a 500 (the ingress twin answers 400)
+    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + name.encode("utf-8", "surrogateescape")[:120].decode("utf-8", "ignore"))
     try:
         written = 0
         with os.fdopen(fd, "wb") as f:
