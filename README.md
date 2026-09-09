@@ -63,7 +63,8 @@ flowchart TB
 3. The worker is a **libvirt qcow2 overlay clone** off the golden base with an internal `clean`
    snapshot. A baked-in guest agent (`myatg.exe`, running as **NETWORK SERVICE, unprivileged**)
    validates the file over an HTTP `POST /validate` call and returns myatg's JSON verdict
-   (per-job `?rev=`/`?scripts=` overrides ride along on that request).
+   (the operator-wide `AUTHENTICODE_REV`/`AUTHENTICODE_SCRIPTS` from the engine's environment ride along
+   as `?rev=`/`?scripts=`; nothing on a scan request can change them).
 4. blastbox **re-seals** that output from disk (recomputing every hash/size, confining paths)
    before a byte of it is trusted, and writes it back as the job result. The client polls
    `GET /scan/{id}`.

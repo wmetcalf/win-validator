@@ -77,6 +77,6 @@ engine process puts an honest `param_not_forwarded` warning on every verdict. A 
 
 P2 engine: **built + validated end-to-end on toolz3** (engine → myatg VM pool → sealed
 envelope; 4/4 verdicts match the corpus `results.jsonl` reference). myatg.exe is baked into
-the golden as the `--serve-http` ONSTART agent (no per-boot compile), and per-job `rev`/`scripts`
-are forwarded. Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
+the golden as the `--serve-http` ONSTART agent (no per-boot compile); `rev`/`scripts` are the engine
+process's operator-wide setting (above), never per job. Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
 already fans out to them).
