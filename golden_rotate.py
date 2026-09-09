@@ -169,10 +169,18 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # probe: a rotation in progress is refused NOW, not after the build
-        except OSError as e:
-            raise NothingPublished(f"another rotation is in progress (lock {ROTATE_LOCK} held)") from e
+        # the lock is also held by the pool-manager's ExecStartPre while it materialises the RAM
+        # base (minutes); a rotation holds it for hours. Wait a bounded while so a routine start
+        # does not cost the night's rebake, then refuse.
+        deadline = time.time() + PREFLIGHT_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if time.time() >= deadline:
+                    raise NothingPublished(f"lock {ROTATE_LOCK} still held after {PREFLIGHT_LOCK_WAIT_S}s (a rotation in progress, or a pool-manager start materialising the RAM base)") from e
+                time.sleep(5)
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
@@ -324,6 +332,7 @@ def validate_golden(qcow2: str) -> bool:
 # create is a lock any local user can hold forever, blocking every rotation with a message
 # that blames a concurrent run — and with fs.protected_regular root cannot even open it
 ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
+PREFLIGHT_LOCK_WAIT_S = int(os.environ.get("GOLDEN_PREFLIGHT_LOCK_WAIT_S", "1800"))
 
 
 def rotate(candidate: str) -> None:
@@ -511,25 +520,28 @@ def _prune_backups() -> None:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
-    excess = baks[:-KEEP_N] if KEEP_N > 0 else []
+    excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
         logger.info("pruning old backup %s", b.name)
         _run(["sudo", "rm", "-f", str(b)])
 
 
-def restart_pool() -> None:
+def restart_pool() -> bool:
     """Re-warm the pool off the freshly promoted golden: warm workers keep the OLD golden's inode
     open (the promotion is a rename) and are only ever snapshot-reverted, never respawned, so
     without this nothing puts the new trust state into service. Every promoting entry point
-    calls it. GOLDEN_RESTART_SERVICE unset: say so loudly instead of claiming 'live'."""
-    svc = os.environ.get("GOLDEN_RESTART_SERVICE")
-    if svc:
-        logger.info("restarting %s to warm off the refreshed golden", svc)
-        r = _run(["sudo", "systemctl", "restart", svc], 600)
-        if r.returncode != 0:
-            logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
-    else:
-        logger.warning("GOLDEN_RESTART_SERVICE is unset: the promoted golden is NOT in service until winval-pool-manager is restarted")
+    calls it; the deploy's unit name is the default so a hand-run promotion re-warms too
+    (GOLDEN_RESTART_SERVICE= empty disables it). Returns True only when the restart succeeded."""
+    svc = os.environ.get("GOLDEN_RESTART_SERVICE", "winval-pool-manager")
+    if not svc:
+        logger.warning("GOLDEN_RESTART_SERVICE is empty: the promoted golden is NOT in service until winval-pool-manager is restarted")
+        return False
+    logger.info("restarting %s to warm off the refreshed golden", svc)
+    r = _run(["sudo", "systemctl", "restart", svc], 3600)
+    if r.returncode != 0:
+        logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
+        return False
+    return True
 
 
 def refresh_and_rotate() -> int:
@@ -553,14 +565,24 @@ def refresh_and_rotate() -> int:
         _run(["sudo", "rm", "-f", candidate])
         raise
     _run(["sudo", "rm", "-f", candidate])
-    restart_pool()
-    logger.info("REBAKE PROMOTED: golden refreshed; %d backup(s) retained", KEEP_N)
+    if restart_pool():
+        logger.info("REBAKE PROMOTED: golden refreshed and in service; %d backup(s) retained", KEEP_N)
+    else:
+        logger.warning("REBAKE PROMOTED but NOT in service until winval-pool-manager is restarted; %d backup(s) retained", KEEP_N)
     return 0
 
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cmd = argv[0] if argv else "refresh-and-rotate"
+    try:
+        return _main(cmd, argv)
+    except NothingPublished as e:
+        logger.error("%s", e)
+        return 1
+
+
+def _main(cmd: str, argv: list[str]) -> int:
     if cmd == "refresh-and-rotate":
         return refresh_and_rotate()
     if cmd == "validate" and len(argv) > 1:

@@ -51,7 +51,7 @@ if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
 fi
 # compose.env carries the SAME password (the URL in winval.env is the source of truth — also when
 # you wrote that line yourself); written 0600 from the first byte, never tee-then-chmod
-if ! sudo test -e /etc/winval/compose.env; then
+if ! sudo grep -qs '^WINVAL_PG_PASSWORD_URLENC=' /etc/winval/compose.env; then   # missing, or written before the encoded form existed
   # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
   # Postgres must be initialised with; both clients decode it the same way)
   # two forms: the literal password (Postgres initialises with it; written as a JSON/double-quoted

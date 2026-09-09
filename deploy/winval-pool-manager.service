@@ -67,10 +67,11 @@ Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 # then the present-base check sees what it published. golden_rotate releases the lock before it
 # restarts this unit, so the restart cannot wait on itself.
 Environment=GOLDEN_ROTATE_LOCK=/run/winval-golden-rotate.lock
-ExecStartPre=/usr/bin/flock -w 1200 ${GOLDEN_ROTATE_LOCK} /bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -L "$b" ] || [ -d "$b" ]; then echo "refusing RAM base $b: a symlink or a directory, not a regular file (/dev/shm is world-writable)" >&2; exit 1; fi; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; for f in "$b".??????; do [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %%u "$f")" = "$(id -u)" ] && rm -f "$f"; done; t="$(mktemp "$b.XXXXXX")" || exit 1; cp "$src" "$t" && [ "$(stat -c %%s "$t")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$t" && mv -fT "$t" "$b" || { rm -f "$t"; exit 1; }'
-# The copy runs inside the start job: an 18 GB image at a cold cache on a slow or contended store
-# can outlive the 90 s default, and a start timeout is exactly the interrupted copy above.
-TimeoutStartSec=20min
+ExecStartPre=/usr/bin/flock -w 1800 ${GOLDEN_ROTATE_LOCK} /bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -L "$b" ] || [ -d "$b" ]; then echo "refusing RAM base $b: a symlink or a directory, not a regular file (/dev/shm is world-writable)" >&2; exit 1; fi; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; for f in "$b".??????; do [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %%u "$f")" = "$(id -u)" ] && rm -f "$f"; done; t="$(mktemp "$b.XXXXXX")" || exit 1; cp "$src" "$t" && [ "$(stat -c %%s "$t")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$t" && mv -fT "$t" "$b" || { rm -f "$t"; exit 1; }'
+# The start job = up to 30 min waiting for a rotation to release the lock (flock -w 1800 above)
+# PLUS the copy itself (an 18 GB image at a cold cache on a slow store can take 20 min), so the
+# budget is the sum: a contended start must not be killed mid-copy by its own timeout.
+TimeoutStartSec=55min
 # Smoke gate — OPT-IN, and OFF until you set it in winval.env: with AUTHENTICODE_SMOKE_SAMPLE set,
 # a benign signed sample must validate == Valid BEFORE the clean snapshot is taken AND after every
 # recycle, so a booted-but-broken golden/worker never serves a job. Without it, readiness is

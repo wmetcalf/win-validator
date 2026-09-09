@@ -46,6 +46,8 @@ STAGE = [(os.path.join(MYATG_SRC, f), f"{AGENT_DIR}/{f}") for f in _MYATG_FILES]
 # safe to re-run (check-then-act). The heavy OS hardening / cert-store / graveyard-pull steps are in
 # the BASE image; this layer is the worker value-add (agent runtime, perf, trust freshness).
 _CSC = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
+LENIENT_STEPS = {"ngen", "compile-myatg"}   # they redirect native stderr (2>&1) and check their result themselves
+
 STEPS: list[tuple[str, str]] = [
     ("ngen", f"""
         $ngen='C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\ngen.exe'
@@ -115,8 +117,10 @@ def build(base: str = BASE_QCOW2) -> str:
         assert ip, "guest never reachable"
         for src, dst in STAGE:
             if Path(src).exists():
-                gr._run(["scp", "-i", gr.SSH_KEY, "-o", "StrictHostKeyChecking=no",
-                         "-o", "UserKnownHostsFile=/dev/null", src, f"Administrator@{ip}:{dst}"], 60)
+                r = gr._run(["scp", "-i", gr.SSH_KEY, "-o", "StrictHostKeyChecking=no",
+                             "-o", "UserKnownHostsFile=/dev/null", src, f"Administrator@{ip}:{dst}"], 60)
+                if r.returncode != 0:   # an unchecked upload would compile the base image's stale copy
+                    raise RuntimeError(f"staging {src} -> {dst} failed (rc={r.returncode}): {r.stderr.strip()[-300:]}")
         for name, ps in STEPS:
             logger.info("step %s …", name)
             # EVERY step is checked: a throw, a native failure or a timeout raises with the
@@ -165,8 +169,10 @@ def build_and_promote() -> int:
         gr._run(["sudo", "rm", "-f", candidate])
         raise
     gr._run(["sudo", "rm", "-f", candidate])
-    gr.restart_pool()   # warm workers ran the old golden; without this the build is not "live"
-    logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
+    if gr.restart_pool():   # warm workers ran the old golden; without this the build is not "live"
+        logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
+    else:
+        logger.warning("BUILD PROMOTED but NOT live: restart winval-pool-manager to put it in service")
     return 0
 
 

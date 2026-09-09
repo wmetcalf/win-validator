@@ -41,7 +41,7 @@ services:
       # compose.env); POSTGRES_PASSWORD above takes the literal one
       # NEVER the raw password here: a literal '@' or '#' would split the URL. A hand-written
       # compose.env must carry WINVAL_PG_PASSWORD_URLENC too (deploy/README.md writes both).
-      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD_URLENC:-winval}@postgres:5432/winval
+      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD_URLENC:?set in /etc/winval/compose.env by deploy/README.md (percent-encoded password)}@postgres:5432/winval
       WINVAL_JOB_ROOT: /var/lib/winval/jobs
       AUTHENTICODE_MAX_UPLOAD_MB: "1024"
     volumes:
