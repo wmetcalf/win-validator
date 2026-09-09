@@ -52,7 +52,7 @@ def healthz() -> dict:
 @app.post("/scan", status_code=202)
 async def scan(file: UploadFile = File(...)) -> dict:
     name = Path(file.filename or "input").name
-    if not name or name in (".", ".."):   # '.', '..' and '/' have an empty basename: the spool path would be the input DIRECTORY (an IsADirectoryError 500)
+    if not name or name in (".", "..") or "\x00" in name:   # '.', '..' and '/' have an empty basename (the spool path would be the input DIRECTORY); a NUL made open() raise ValueError as a 500 with a rowless dir left behind
         raise HTTPException(status_code=400, detail="filename has no usable name")
     if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX: the open() would fail with ENAMETOOLONG as a 500, leaving a rowless job dir per request
         raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")

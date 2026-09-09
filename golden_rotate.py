@@ -605,9 +605,11 @@ def _gate_spec(qcow2: str):
     at ready (a golden without qemu-ga gets its clock ONLY from that hook — and both verdicts are clock-bound).
     The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP."""
     import dataclasses
-    from winval_blastbox.vm_pool import authenticode_spec
+    from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
     from blastbox.host.runtime.vm_compose import VmImageSpec
-    return dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
+    spec = dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
+    validate_egress_posture(spec)   # the rooter's spawn-time refusals (an unsupported exit, inetsim without a sink, gateway xor leg), before any build
+    return spec
 
 
 def validate_golden(qcow2: str) -> bool:

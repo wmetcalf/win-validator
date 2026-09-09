@@ -68,6 +68,34 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 
 
 
+def _egress_ports(raw: str | None) -> tuple[int, ...] | None:
+    ports = parse_egress_ports(raw)
+    if ports is None and raw and raw.strip():
+        logger.error("AUTHENTICODE_EGRESS_PORTS=%r parses to no port at all (comma- or space-separated numbers 1..65535): the allowlist is CLOSED, not open", raw)
+        return ()
+    return ports
+
+
+def validate_egress_posture(spec: VmWorkerSpec) -> None:
+    """The refusals LibvirtEgress.apply() makes at worker spawn (a routed exit without ExitRouting, inetsim
+    without a FakeNet sink, an unsupported exit driver, a shared-router VPN with gateway xor leg), checked
+    without a worker: the rotation preflight refuses a bad posture before the hour-long build, and the pool
+    refuses it before booting a VM. The rooter's own check stays the enforcement; this only moves the error
+    earlier (the exit sets are imported from blastbox so the two cannot drift apart)."""
+    from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
+    pol, rt = spec.egress, spec.routing
+    if pol is None:
+        return
+    if pol.exit_driver in _ROUTING_DRIVERS and rt is None:
+        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} needs the exit routing knobs (a filter-only policy would leak via the host route)")
+    if pol.exit_driver == "inetsim" and not (rt and rt.fakenet_addr):
+        raise ValueError("AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink)")
+    if pol.exit_driver not in _SUPPORTED_EXITS:
+        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} is not an exit the VM rooter supports ({', '.join(sorted(_SUPPORTED_EXITS))})")
+    if pol.exit_driver in ("openvpn", "wireguard") and rt is not None and bool(rt.gateway) != bool(rt.leg):
+        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (got gateway={rt.gateway!r}, leg={rt.leg!r})")
+
+
 def authenticode_spec() -> VmWorkerSpec:
     """Build the authenticode VM-worker spec from AUTHENTICODE_* env (golden, pool size, agent,
     optional egress: AUTHENTICODE_EXIT/EGRESS_PORTS/BLOCK_INTERNAL/VPN_TABLE/...)."""
@@ -77,8 +105,10 @@ def authenticode_spec() -> VmWorkerSpec:
         egress = VmEgressPolicy(
             exit_driver=exit_driver,
             # blastbox's own fail-closed parsers: a typo in a SECURITY knob must raise (BLOCK_INTERNAL=treu) or be
-            # dropped (a port outside 1..65535), never read as "off" or written into a broken --dports
-            egress_ports=parse_egress_ports(os.environ.get("AUTHENTICODE_EGRESS_PORTS")),
+            # dropped (a port outside 1..65535), never read as "off" or written into a broken --dports —
+            # and a value GIVEN but wholly unparsable ('8080-8090', 'http,https') is a CLOSED allowlist (), never
+            # None, which the rooter reads as "no allowlist: ACCEPT" (blastbox's own YAML path does the same)
+            egress_ports=_egress_ports(os.environ.get("AUTHENTICODE_EGRESS_PORTS")),
             block_internal=parse_strict_bool(os.environ.get("AUTHENTICODE_BLOCK_INTERNAL")),
         )
         routing = ExitRouting(
@@ -175,7 +205,9 @@ class WarmVmPool:
             # would otherwise skip silently and every snapshot would carry a cold CRL/OCSP cache
             raise RuntimeError(f"AUTHENTICODE_WARM_DIR={warm_dir!r} is not a directory; put the benign signed samples there or unset it")
         pre_snapshot = _warm_crl if warm_dir else None
-        self._pool = authenticode_spec().build_pool(
+        spec = authenticode_spec()
+        validate_egress_posture(spec)   # by name, before a single VM boots (the rooter would refuse at spawn, after the boot)
+        self._pool = spec.build_pool(
             jobs_per_recycle=jobs_per_recycle, health_check=health_check,
             pre_snapshot=pre_snapshot, on_ready=_sync_clock)
         self._claim_timeout_s = claim_timeout_s

@@ -216,7 +216,7 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     # Clean up the temp file on any failure before the job is queued (only _run unlinks otherwise).
     max_bytes = upload_mb() * 1024 * 1024
     name = Path(file.filename or "input").name
-    if not name or name in (".", ".."):
+    if not name or name in (".", "..") or "\x00" in name:   # a NUL made mkstemp raise ValueError as a 500
         raise HTTPException(status_code=400, detail="filename has no usable name")
     # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
     # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
