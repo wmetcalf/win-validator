@@ -29,7 +29,7 @@ HostRunner.validate(file)
 | File | Role |
 |------|------|
 | `engine.py` | `AuthenticodeEngine` — the blastbox `Engine`; maps myatg JSON → `DetonationResult`. Module-level warm VM-pool singleton (`get_pool`/`warmup`/`shutdown_pool`). |
-| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>`. |
+| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>` — exits 1 when the sealed envelope is an `engine_error` (VM or transport failure), 0 for any verdict. |
 | `vm_pool.py` | `WarmVmPool` — blastbox `WarmPool` over `LibvirtVmRuntime` (overlay-clone workers off the golden, recycle-after-N). `agent_validate` is the HTTP client. The guest agent is **`myatg.exe --serve-http`**, baked into the golden as the ONSTART task (`NT AUTHORITY\NETWORK SERVICE`, LIMITED) — so there is no PowerShell shim anymore. |
 | `orchestrator.py` | **P3** — thin FastAPI fan-out (`POST /scan`, `GET /scan/{id}`, `GET /cert/{tbs}`, `GET /healthz`). Warms the pool at startup, runs engines off-request-path via a bounded executor, returns each engine's verdict side-by-side (components, not an opinion). |
 
@@ -46,8 +46,9 @@ curl http://127.0.0.1:8099/scan/<job_id>                       # -> per-engine v
 `POST /scan` accepts a file + optional `engines=authenticode,...` (default `authenticode`);
 unbuilt engines (`ember-legacy`/`ember-2024`, P4) return `status:"unavailable"`. The
 authenticode result is the parsed myatg verdict (status / signer / chain / graveyard) plus
-the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns every
-scanned file whose signer or chain carries that cert.
+the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns the scanned
+files whose signer or chain carries that cert, searching the newest 2000 scans only (`scanned` /
+`truncated` in the answer say how far it looked).
 
 ## Output (payload `Record` fields)
 

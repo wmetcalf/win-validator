@@ -84,6 +84,8 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
+    Warm --> Respawn: 2 consecutive job failures on one worker<br/>(blastbox max_consecutive_failures — a wedged agent is destroyed and a fresh overlay booted, no rotation involved)
+    Respawn --> Warm
     Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
 
@@ -153,7 +155,8 @@ curl -F file=@suspect.dll 'http://127.0.0.1:8099/scan'   # -> {job_id, status: q
 curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict(s)
 ```
 
-`GET /cert/{tbs_sha256}` returns every scanned file whose signer or chain carries that cert.
+`GET /cert/{tbs_sha256}` returns the scanned files whose signer or chain carries that cert, searching the
+newest 2000 scans only (`scanned` / `truncated` in the answer say how far it looked).
 
 ## Status
 

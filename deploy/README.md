@@ -154,6 +154,9 @@ build_candidate()  private copy of the promoted golden --overlay clone--> refres
                    whatever that checkout holds ships to every worker), installs the task and ACLs, refreshes, gates, promotes
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
+                   (EVERY pool-manager start, this one included, fails each authenticode row still RUNNING
+                   as "orphaned by a pool-manager restart" and deletes its spooled sample: a validation in
+                   flight at the restart is lost and the client resubmits; the ingress answers the row's error)
 
 ```
 
