@@ -265,6 +265,8 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         _store.submit(jid, path, sel)
     except NotQueued as exc:   # refused BEFORE the item is queued — nothing will ever run it
         _store._update(jid, status="error", error=f"could not queue the job: {exc}")
+        for e in sel:   # the UI reads the ENGINE pane first: a pane still 'queued' under an error row spun forever
+            _store._update_engine(jid, e, {"status": "error", "error": f"not queued: {exc}"})
         try:
             os.unlink(path)
         except OSError:
@@ -392,6 +394,7 @@ function certRow(c){const cn=c.subject_cn||c.subject||'—';
     <div class="muted">issuer: ${esc(c.issuer_cn||c.issuer||'—')}${c.not_after?' · expires '+esc(c.not_after.slice(0,10)):''}</div>
     ${c.tbs_sha256?`<div class="mono"><a onclick="cert(${js(c.tbs_sha256)})">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
 function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac.warnings||[];
+  if(j.status==='error'&&!v){$('#detail').innerHTML=`<h3>${esc(j.filename||'')}</h3><div class="flag bad">${esc(j.error||ac.error||'failed')}</div>`;return;}
   if(ac.status==='queued'||ac.status==='running'||j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||j.status)} <span class="muted">validating…</span>`;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}

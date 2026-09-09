@@ -45,12 +45,6 @@ _POOL: WarmVmPool | None = None
 _POOL_LOCK = threading.Lock()
 
 
-def _bool_env(key: str, default: bool = False) -> bool:
-    v = os.environ.get(key)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
 
 def get_pool(stop_event=None) -> WarmVmPool:
     """Return the started WarmPool-backed VM pool, booting it on first use (thread-safe)."""
