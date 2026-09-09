@@ -227,7 +227,7 @@ class PoolManager:
                 in_dirfd = os.open("input", _DIR, dir_fd=job_fd)
                 # O_NONBLOCK: a FIFO the ingress mkfifo'd here (no capability needed) would otherwise park this
                 # claim thread in open(2) until a writer appeared — forever — and the type check below never ran
-                in_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=in_dirfd)
+                in_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, dir_fd=in_dirfd)
             except FileNotFoundError:
                 raise FileNotFoundError(f"spooled input missing: {Path(job.result_dir) / 'input' / filename}") from None
             st = os.fstat(in_fd)
