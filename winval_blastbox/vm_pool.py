@@ -21,6 +21,7 @@ import re
 import socket
 import subprocess
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -75,30 +76,39 @@ except ImportError:   # an older blastbox: pass what ITS release() accepts (0.1.
             accepted = inspect.signature(fn).parameters
         except (TypeError, ValueError):
             return {}
-        return {k: v for k, v in (("dirty", dirty), ("fault", fault), ("fault_stage", fault_stage)) if k in accepted}
+        var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in accepted.values())   # a release(**kwargs) takes everything, as blastbox's own helper reads it
+        return {k: v for k, v in (("dirty", dirty), ("fault", fault), ("fault_stage", fault_stage)) if var_kw or k in accepted}
     logger.warning("this blastbox has no release_kwargs: only what its release() accepts is passed (install blastbox >= 0.1.33 for worker/job evidence)")
 
 
 def fault_of(exc: BaseException) -> str:
-    """Whose evidence a failed validation is, for blastbox's release(dirty=True, fault=...).
-    'worker': the agent could not be reached at all (connection refused, host unreachable, a connect timeout —
-    urllib wraps those in URLError; a frozen guest or one that lost its IP) — nothing about the sample explains
-    that, and two in a row evict the worker.
-    'job': the agent ANSWERED — an HTTP error status, an oversize or unparsable verdict — evidence about the
-    sample: the worker is snapshot-reverted (dirty) but never evicted for it. Filing these as worker faults let
-    four crafted samples through the unauthenticated ingress empty the warm pool every ten minutes.
-    'unknown': a READ timeout (a bare TimeoutError: the connection was accepted, no verdict came) is NO answer —
-    a wedged agent and a sample that makes myatg slow through its AIA/CRL/OCSP URLs look the same. blastbox's
-    'job' is positive proof of health (it resets the worker's streak and cancels a base rebuild), so a wedged
-    agent filed as 'job' was never evicted and erased its siblings' evidence; 'unknown' reverts the worker and
-    leaves every streak as it was."""
+    """Whose evidence a failed validation is, for blastbox's release(dirty=True, fault=...) — three values with
+    three meanings in blastbox's pool: 'worker' is NEGATIVE (two in a row evict the worker), 'job' is POSITIVE
+    (a served job: it resets the worker's streak and cancels a base rebuild), 'unknown' is NEUTRAL (revert the
+    worker, touch no streak). Every dirty release snapshot-reverts the worker, so a wedged guest is restored
+    whichever value is filed; the value decides only what the pool LEARNS.
+    'worker': the agent could not be reached at all — connection refused, host unreachable, a connect timeout
+    (urllib wraps those in URLError) — a frozen guest, a rebooting one, one that lost its IP. No sample explains
+    that, and the pool may act on it.
+    'job': the agent answered with HTTP: an error status, an oversize or unparsable body. That is the sample's
+    doing; filing it as the worker's let four crafted samples through the unauthenticated ingress empty the pool.
+    'unknown': the agent ACCEPTED the connection and then gave no usable answer — a read timeout, a reset or a
+    disconnect mid-request, a torn response. A sample that crashes or stalls myatg and a wedged agent look the
+    same from here, and the revert restores the agent either way (it is an ONSTART task, restored with the
+    snapshot); filing it as 'worker' let one crash sample, sent twice, evict a healthy worker, and as 'job' it
+    would count a crash as proof of health."""
     if isinstance(exc, urllib.error.HTTPError):
         return "job"
-    if isinstance(exc, (TimeoutError, socket.timeout)):
-        return "unknown"
-    if isinstance(exc, OSError):   # URLError (refused, unreachable, connect timeout), RemoteDisconnected, ECONNRESET
+    if isinstance(exc, urllib.error.URLError):   # no HTTP answer: the reason says whether the agent was ever reached
+        reason = exc.reason
+        if isinstance(reason, (ConnectionResetError, BrokenPipeError)):
+            return "unknown"   # accepted, then gone while the request was still being sent
+        return "worker"   # refused, unreachable, a connect timeout
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError, http.client.HTTPException)):
+        return "unknown"   # a read timeout; RemoteDisconnected/ECONNRESET after the request; BadStatusLine/IncompleteRead
+    if isinstance(exc, OSError):
         return "worker"
-    return "job"   # RuntimeError (oversize verdict), ValueError (not JSON), http.client's BadStatusLine/IncompleteRead: the agent answered
+    return "job"   # RuntimeError (oversize verdict), ValueError (not JSON): an HTTP answer arrived
 
 
 def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
