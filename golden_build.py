@@ -198,7 +198,8 @@ def build_and_promote(base: str = BASE_QCOW2) -> int:
     # (grown by the agent, ngen images and every cycle's trust state — the lean packer master understates it)
     golden = Path(gr.GOLDEN_BASE_DISK)
     gr.rotation_preflight(estimate_bytes=max(Path(base).stat().st_size, golden.stat().st_size if golden.is_file() else 0),
-                          source_copy=os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK))   # only a build FROM the golden takes a private copy
+                          source_copy=os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK),   # only a build FROM the golden takes a private copy
+                          keep=base)   # a base chosen from inside the backup dir (an old candidate) must survive the preflight's prune
     candidate = build(base)
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)
