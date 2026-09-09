@@ -102,6 +102,9 @@ ExecStartPre=/usr/bin/flock -w 1800 ${GOLDEN_ROTATE_LOCK} /bin/sh -c 'b="$AUTHEN
 # PLUS the copy itself (an 18 GB image at a cold cache on a slow store can take 20 min), so the
 # budget is the sum: a contended start must not be killed mid-copy by its own timeout.
 TimeoutStartSec=55min
+# a stop (the rotation's try-restart after every promotion) waits for in-flight validations: run() returns only
+# after the claim threads finish their current job, and systemd's default 90 s stop would SIGKILL them mid-job
+TimeoutStopSec=15min
 # Smoke gate — OPT-IN, and OFF until you set it in winval.env: with AUTHENTICODE_SMOKE_SAMPLE set,
 # a benign signed sample must validate == Valid BEFORE the clean snapshot is taken AND after every
 # recycle, so a booted-but-broken golden/worker never serves a job. Without it, readiness is

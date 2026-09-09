@@ -55,9 +55,14 @@ def _load_env_file(path: str) -> None:
     except OSError:
         return
     seen: dict[str, str] = {}
-    joined: list[str] = []   # systemd: a backslash at END OF LINE continues the assignment on the next line
+    def _continues(raw: str) -> bool:   # systemd: an ODD number of trailing backslashes continues the line — but never a comment
+        if raw.lstrip().startswith("#"):
+            return False
+        n = len(raw) - len(raw.rstrip("\\"))
+        return n % 2 == 1
+    joined: list[str] = []
     for line in lines:
-        if joined and joined[-1].endswith("\\") and not joined[-1].endswith("\\\\"):
+        if joined and _continues(joined[-1]):
             joined[-1] = joined[-1][:-1] + line
         else:
             joined.append(line)
@@ -73,8 +78,8 @@ def _load_env_file(path: str) -> None:
             v = v[1:-1]
             if quote == '"':   # systemd.exec(5): inside double quotes a backslash escapes a backslash or a quote
                 v = re.sub(r'\\([\\"])', r'\1', v)
-        else:   # UNQUOTED: systemd drops every backslash (verified against systemd-run) — a Windows path must be single-quoted
-            v = v.replace("\\", "")
+        else:   # UNQUOTED: a backslash escapes the next character (\\ -> \, \c -> c), as systemd does — a Windows path must be single-quoted or double-escaped
+            v = re.sub(r"\\(.)", r"\1", v)
         if k:
             seen[k] = v   # the LAST assignment wins, as it does for systemd — a hand run must read the file the units read
     for k, v in seen.items():

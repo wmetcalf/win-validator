@@ -70,6 +70,7 @@ class PoolManager:
         # host files via the finally-unlink. Strip filename to a basename; require result_dir under
         # JOB_ROOT.
         in_path = None
+        recorded = False   # whether a terminal status reached the store: only then is the spooled input consumed
         try:
             # INSIDE the guard: a hostile row is exactly what the sanitiser exists for, and raising
             # outside it ended the claim thread for the life of the process (the unit stayed "active")
@@ -91,16 +92,21 @@ class PoolManager:
                 job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
                 status=status, finished_at=time.time(), result_summary=summary,
                 worker_runtime="vm")
+            recorded = True
         except Exception as exc:  # noqa: BLE001 — one bad job must not sink the manager
             logger.warning("job %s failed: %s", job.job_id, exc, exc_info=True)
             try:   # the recovery write uses the same store that may have just failed (a Postgres restart): it must not escape either
                 self._store.update_if_status(
                     job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
                     status=JobStatus.FAILED, finished_at=time.time(), error=type(exc).__name__)
+                recorded = True
             except Exception:  # noqa: BLE001
-                logger.warning("job %s: could not record the failure (the claim stays with the store's reaper)", job.job_id, exc_info=True)
+                # there is NO store-side reaper for RUNNING jobs (blastbox's retention never touches them): the row
+                # stays RUNNING until the next pool-manager start recovers it (_recover_orphans), and the spooled
+                # input is KEPT so that recovery — or an operator — can still act on the sample
+                logger.warning("job %s: could not record the failure; the row stays RUNNING until the next pool-manager start recovers it", job.job_id, exc_info=True)
         finally:
-            if in_path is not None:
+            if in_path is not None and recorded:
                 try:  # the sample is consumed; drop the spooled input (keep the sealed output)
                     in_path.unlink()
                 except OSError:
@@ -121,7 +127,26 @@ class PoolManager:
             except Exception:  # noqa: BLE001 — NOTHING a job does may end this loop: run() never reads the executor's futures, so a dead loop is a silent claim thread lost for the life of the process
                 logger.error("job %s: unexpected error escaped _process; the claim loop continues", getattr(job, "job_id", "?"), exc_info=True)
 
+    def _recover_orphans(self) -> None:
+        """A RUNNING job at pool-manager START belongs to nobody: this process is the store's only claimant of
+        its tier, so anything still RUNNING was abandoned by the previous instance (a restart mid-validation,
+        a lost terminal write). blastbox's retention never touches RUNNING rows and there is no reaper, so
+        they would sit RUNNING forever — the UI polling them without end. Mark them FAILED, by name."""
+        try:
+            stale = list(self._store.list(status=JobStatus.RUNNING))
+        except Exception:  # noqa: BLE001 — recovery is best effort; the claim loops will surface a broken store
+            logger.warning("orphan recovery: could not list RUNNING jobs", exc_info=True)
+            return
+        for job in stale:
+            try:
+                if self._store.update_if_status(job.job_id, JobStatus.RUNNING, status=JobStatus.FAILED,
+                                                finished_at=time.time(), error="orphaned by a pool-manager restart"):
+                    logger.warning("job %s was RUNNING at start (abandoned by the previous pool-manager): marked FAILED", job.job_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("orphan recovery: job %s could not be updated", job.job_id, exc_info=True)
+
     def run(self) -> None:
+        self._recover_orphans()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         self._runner.warmup()
         logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)

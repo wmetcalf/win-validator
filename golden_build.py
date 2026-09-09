@@ -78,6 +78,8 @@ STEPS: list[tuple[str, str]] = [
         icacls C:\certgraveyard /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null
         New-Item -Force -ItemType Directory C:\scan | Out-Null
         icacls C:\scan /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null
+        New-Item -Force -ItemType Directory C:\ProgramData\myatg\uploads | Out-Null
+        icacls C:\ProgramData\myatg /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null   # the agent's upload dir (http_serve.cs): without a grant its write probe fails and it falls back to a %TEMP% path no Defender exclusion covers
         'acls ok'"""),
     ("http-acl", fr"""
         cmd /c "netsh http delete urlacl url=http://+:{AGENT_PORT}/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete

@@ -99,8 +99,11 @@ stateDiagram-v2
 `golden_rotate.py` keeps the golden image **fresh** and keeps the last N as **rollback backups**:
 
 ```
-build_candidate()  master --overlay--> myatg.exe --refresh
+build_candidate()  private copy of the PROMOTED golden --overlay--> myatg.exe --refresh
                    (disallowed kill-list + CRL cache + roots/CTL via syncWithWU) --> flatten
+                   (every GOLDEN_MAX_CHAIN cycles, or with GOLDEN_REBAKE_FROM=master, the cycle is instead the
+                   full golden_build bake from the packer master — the Disallowed store is add-only, so the
+                   chain of goldens is reset from the pristine image; see deploy/README.md)
 validate_golden()  boot a throwaway worker off the candidate
                    GATE:  benign binary == Valid  AND  known-revoked == Revoked
 rotate()           back up current golden (keep last N) --> promote candidate --> restart pool-manager
