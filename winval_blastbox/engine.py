@@ -76,7 +76,9 @@ def shutdown_pool() -> None:
 
 # Per-job parameters are NOT forwarded by either tier: /scan takes the file (and an engine list on the orchestrator) only,
 # and detonate() reads AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS from the process environment — one operator-wide value for
-# every job. A request naming AUTHENTICODE_GV or AUTHENTICODE_TIER gets a param_not_forwarded warning (below).
+# every job. AUTHENTICODE_GV and AUTHENTICODE_TIER are read by nothing (the graveyard is GOLDEN_GRAVEYARD, baked into the
+# golden's serve startup; TIER is not a myatg parameter): an operator who exports either into the ENGINE PROCESS gets a
+# param_not_forwarded warning on every verdict (below) — a request cannot set them at all.
 
 # Extension → (detection label, mime) for the file-type tag on the envelope.
 _EXT_TYPE = {
@@ -175,11 +177,10 @@ class AuthenticodeEngine:
         get_pool(stop_event=stop_event)
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
-        # Per-job myatg overrides come in via the blastbox allowlist as AUTHENTICODE_* env.
-        # rev/scripts are per-REQUEST (forwarded as ?rev=/?scripts= on the agent HTTP call);
-        # gv (graveyard) is server-global — baked into the golden's --serve-http startup, so it
-        # can't be applied per job — and TIER isn't a myatg parameter. Forward what we can and be
-        # honest about what we can't.
+        # rev/scripts come from THIS process's environment (see the module comment: nothing forwards per-job
+        # parameters) and go to the agent as ?rev=/?scripts=; gv (graveyard) is baked into the golden's
+        # --serve-http startup and TIER isn't a myatg parameter, so an operator export of either is
+        # answered with a warning rather than silently ignored.
         req_params = {}
         if os.environ.get("AUTHENTICODE_REV"):
             req_params["rev"] = os.environ["AUTHENTICODE_REV"]

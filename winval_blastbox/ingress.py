@@ -24,12 +24,11 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
-from .knobs import upload_mb
+from .knobs import ENGINE, upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
 MAX_BYTES = upload_mb() * 1024 * 1024   # the pool-manager enforces the same bound on what it copies: set both tiers alike
 CERT_SCAN_LIMIT = 2000   # /cert/{tbs} searches the newest rows only: it answers "seen in the last N scans", and SAYS so (scanned/truncated)
-ENGINE = "authenticode"
 
 _store = build_job_store_from_env()
 app = FastAPI(title="win-validator ingress")

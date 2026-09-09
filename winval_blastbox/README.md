@@ -69,8 +69,9 @@ a `graveyard_hit` warning.
 
 Per-job parameters are not forwarded by either tier: `/scan` takes the file (and, on the orchestrator, an engine
 list) only, and the engine reads `AUTHENTICODE_REV` / `AUTHENTICODE_SCRIPTS` from its process environment — one
-operator-wide value for every job. `AUTHENTICODE_GV` is baked into the golden's serve startup and `AUTHENTICODE_TIER`
-is not a myatg parameter; a request that sets either gets an honest `param_not_forwarded` warning.
+operator-wide value for every job. `AUTHENTICODE_GV` and `AUTHENTICODE_TIER` are read by nothing (the graveyard knob
+is `GOLDEN_GRAVEYARD`, baked into the golden's serve startup; TIER is not a myatg parameter): exporting either into the
+engine process puts an honest `param_not_forwarded` warning on every verdict. A request cannot set any of them.
 
 ## Status
 

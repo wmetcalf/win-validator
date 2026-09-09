@@ -36,7 +36,7 @@ from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .host_runner import HostRunner
-from .knobs import env_float, upload_mb
+from .knobs import ENGINE, env_float, upload_mb
 from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
@@ -45,7 +45,6 @@ JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
 # The pool-manager's OWN scratch root (mode 0700, this uid): the engine reads its input copy from and
 # writes its sealed output into a tree the ingress cannot touch; results are then PUBLISHED into
 # <job>/output by directory descriptor with O_EXCL (see _publish). Never place it under WINVAL_JOB_ROOT.
-ENGINE = "authenticode"   # the engine this tier claims and recovers (the ingress creates rows with the same name)
 WORK_ROOT = Path(os.environ.get("WINVAL_WORK_ROOT", "/var/lib/winval/work"))
 SWEEP_S = 3600.0
 # The same bound the ingress enforces on an upload (AUTHENTICODE_MAX_UPLOAD_MB, read by the same tolerant

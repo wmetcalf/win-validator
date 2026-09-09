@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import os
 
+ENGINE = "authenticode"   # the ONE engine name both tiers use: the ingress creates rows with it, the pool-manager claims and recovers only those (a rename on one side alone left every row queued forever, silently)
+
 logger = logging.getLogger("winval.knobs")
 
 
