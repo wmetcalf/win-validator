@@ -240,13 +240,25 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         raise
     try:
         jid = _store.create(file.filename or "input", sel)
-        _store.submit(jid, path, sel)
     except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
         try:
             os.unlink(path)
         except OSError:
             pass
         raise
+    try:
+        _store.submit(jid, path, sel)
+    except RuntimeError:   # "cannot schedule new futures after shutdown": raised BEFORE the item is queued — nothing will ever run it
+        _store._update(jid, status="error", error="could not queue the job: the orchestrator is shutting down")
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    except Exception as exc:  # noqa: BLE001 — raised AFTER the item was queued (a worker thread could not start): the job IS queued and an idle
+        # worker may already be running it, so the request succeeded — say so (a 500 here, with the upload deleted, let a worker run an
+        # engine on a missing file and report done after the client was told failed)
+        _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run", jid, exc)
     return {"job_id": jid, "status": "queued", "engines": sel}
 
 
