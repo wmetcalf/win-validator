@@ -429,7 +429,10 @@ class PoolManager:
             # the JOB_ROOT sweep would otherwise remove the scratch root as a rowless job dir, and an ingress
             # result_dir could name a directory inside the manager's own scratch tree
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} and WINVAL_JOB_ROOT {JOB_ROOT} must be disjoint")
-        WORK_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            WORK_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:   # the one start-time config check here that was a traceback; its four siblings are one line
+            raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} cannot be created: {exc}")
         if WORK_ROOT.is_symlink() or WORK_ROOT.stat().st_uid != os.geteuid():
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} must be a directory owned by this process (uid {os.geteuid()})")
         os.chmod(WORK_ROOT, 0o700)
@@ -463,8 +466,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
         pm = PoolManager()
-    except ValueError as exc:   # HostRunner's Limits.from_env() refuses a bad BLASTBOX_* value in winval.env loudly: one journal line, not a traceback per restart
-        logger.error("the pool-manager cannot start: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — a bad BLASTBOX_* value (ValueError), a store that cannot be opened (a wrong Postgres password is a
+        # PoolTimeout after 10 s, an uncreatable sqlite path a PermissionError): one journal line each restart, not a traceback
+        logger.error("the pool-manager cannot start: %s: %s", type(exc).__name__, exc)
         return 1
     signal.signal(signal.SIGTERM, pm.stop)
     signal.signal(signal.SIGINT, pm.stop)

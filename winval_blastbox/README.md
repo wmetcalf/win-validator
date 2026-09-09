@@ -29,7 +29,7 @@ HostRunner.validate(file)
 | File | Role |
 |------|------|
 | `engine.py` | `AuthenticodeEngine` — the blastbox `Engine`; maps myatg JSON → `DetonationResult`. Module-level warm VM-pool singleton (`get_pool`/`warmup`/`shutdown_pool`). |
-| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>` — exits 1 when the sealed envelope is an `engine_error` (VM or transport failure), 0 for any verdict. |
+| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>` — exit 0 for any verdict, 1 when the sealed envelope is an `engine_error` (VM or transport failure), 2 for a usage or configuration error (no file, not a file, a bad `BLASTBOX_*` value; one line on stderr), 143 when a SIGTERM ended it before a verdict (empty stdout). |
 | `vm_pool.py` | `WarmVmPool` — blastbox `WarmPool` over `LibvirtVmRuntime` (overlay-clone workers off the golden, recycle-after-N). `agent_validate` is the HTTP client. The guest agent is **`myatg.exe --serve-http`**, baked into the golden as the ONSTART task (`NT AUTHORITY\NETWORK SERVICE`, LIMITED) — so there is no PowerShell shim anymore. |
 | `orchestrator.py` | **P3** — thin FastAPI fan-out (`POST /scan`, `GET /scan/{id}`, `GET /cert/{tbs}`, `GET /healthz`). Warms the pool at startup, runs engines off-request-path via a bounded executor, returns each engine's verdict side-by-side (components, not an opinion). |
 
