@@ -57,6 +57,17 @@ _load_env_file(os.environ.get("WINVAL_ENV_FILE", "/etc/winval/winval.env"))
 
 MASTER_DOMAIN = os.environ.get("GOLDEN_MASTER_DOMAIN", "winserver2025-core")
 MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserver2025-core.qcow2")
+# what a rebake is CLONED FROM: the promoted golden (it carries the agent and last cycle's trust
+# state; the refresh runs on top of it) — the frozen master only before any golden was ever
+# promoted, exactly as the pool-manager unit materialises the RAM base. GOLDEN_REBAKE_FROM=master
+# forces the master (a pristine rebuild every cycle) for images whose master already carries the agent.
+REBAKE_FROM = os.environ.get("GOLDEN_REBAKE_FROM", "golden")
+
+
+def rebake_source() -> str:
+    if REBAKE_FROM != "master" and Path(GOLDEN_BASE_DISK).exists():
+        return GOLDEN_BASE_DISK
+    return MASTER_QCOW2
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
 # would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
@@ -251,12 +262,14 @@ def build_candidate() -> str:
     xml_path = f"/tmp/{dom}.xml"
     built = False
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
-        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", MASTER_QCOW2, "-F", "qcow2",
+        src = rebake_source()
+        logger.info("rebake source: %s", src)
+        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src, "-F", "qcow2",
                      overlay], 120).returncode == 0, "overlay create failed"
         _run(["sudo", "chmod", "644", overlay])
         # define+boot the overlay domain (reuse the runtime's XML generator for a real worker shape)
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
-        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=MASTER_QCOW2))
+        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=src))
         Path(xml_path).write_text(rt._domain_xml(dom, overlay))
         assert _virsh("define", xml_path).returncode == 0, "define failed"
         assert _virsh("start", dom).returncode == 0, "start failed"
@@ -467,6 +480,8 @@ def _promote(candidate: str) -> None:
     r = _run(["sudo", "mv", "-fT", tmps[0], GOLDEN_BASE_DISK])
     if r.returncode != 0:
         _cleanup_tmps()
+        if bak:   # nothing changed: a backup of the unchanged golden would only evict a real rollback generation
+            _run(["sudo", "rm", "-f", bak])
         raise NothingPublished(f"promotion rename -> {GOLDEN_BASE_DISK} failed (rc={r.returncode}); golden NOT promoted (nothing published)")
     r = _run(["sudo", "mv", "-fT", tmps[1], GOLDEN_BASE])
     if r.returncode == 0:
@@ -537,6 +552,7 @@ def restart_pool() -> bool:
         logger.warning("GOLDEN_RESTART_SERVICE is empty: the promoted golden is NOT in service until winval-pool-manager is restarted")
         return False
     logger.info("restarting %s to warm off the refreshed golden", svc)
+    _run(["sudo", "systemctl", "reset-failed", svc])   # a start-limit-latched unit refuses a plain restart
     r = _run(["sudo", "systemctl", "restart", svc], 3600)
     if r.returncode != 0:
         logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)

@@ -51,8 +51,10 @@ LENIENT_STEPS = {"ngen", "compile-myatg"}   # they redirect native stderr (2>&1)
 STEPS: list[tuple[str, str]] = [
     ("ngen", f"""
         $ngen='C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\ngen.exe'
+        if (-not (Test-Path $ngen)) {{ throw "ngen.exe not found at $ngen" }}
         if ((& $ngen display System.Management.Automation 2>&1) -match 'not installed') {{
-            & $ngen executeQueuedItems | Out-Null }}   # NGen the PS engine so child startup is ~0.5s not ~3s
+            & $ngen executeQueuedItems | Out-Null   # NGen the PS engine so child startup is ~0.5s not ~3s
+            if ($LASTEXITCODE -ne 0) {{ throw "ngen executeQueuedItems exited $LASTEXITCODE" }} }}
         'ngen ok'"""),
     ("qemu-ga", r"""
         if (-not (Get-Service QEMU-GA -ErrorAction SilentlyContinue)) {
@@ -178,6 +180,14 @@ def build_and_promote() -> int:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        return _main(argv)
+    except gr.NothingPublished as e:
+        logger.error("%s", e)
+        return 1
+
+
+def _main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "steps"
     if cmd == "steps":
         print("staged files:")
