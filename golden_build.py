@@ -138,7 +138,7 @@ def build(base: str = BASE_QCOW2) -> str:
             # landing during the build evicted the overlay's backing file. A hold named after THIS build's pid: honoured only
             # while this builder runs (a build that died pins nothing), and distinct from the operator's .keep marker and
             # from another build's hold on the same base
-            held_keep = gr._mark_kept(os.path.realpath(base), suffix=f".keep.build-{os.getpid()}")
+            held_keep = gr._mark_kept(os.path.realpath(base), suffix=gr.build_hold_suffix())
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:

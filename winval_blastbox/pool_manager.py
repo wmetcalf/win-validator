@@ -411,12 +411,14 @@ class PoolManager:
         for label, root in (("WINVAL_WORK_ROOT", wr), ("WINVAL_JOB_ROOT", jr)):   # a link to nothing: the mkdir would EEXIST on the link, the claim loop would fail every job
             if root.is_symlink() and not root.exists():
                 raise SystemExit(f"{label} {root} is a symlink to a directory that does not exist")
+        if not jr.is_dir():   # the ingress spools into it (the deploy creates it, shared with the container): missing, a file, a link to a file — every claimed job would fail after the pool warmed
+            raise SystemExit(f"WINVAL_JOB_ROOT {JOB_ROOT} is not a directory")
         same_inode = False
         try:   # a bind mount is the same directory under two names no path comparison can relate
             sa, sb = os.stat(wr), os.stat(jr)
             same_inode = (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
         except OSError:
-            pass   # a root that does not exist yet is created (WORK_ROOT) or refused (JOB_ROOT) below
+            pass   # WORK_ROOT may not exist yet (created below); JOB_ROOT was just required to be a directory
         if same_inode or wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr) or wrr == jrr or wrr.is_relative_to(jrr) or jrr.is_relative_to(wrr):
             # the JOB_ROOT sweep would otherwise remove the scratch root as a rowless job dir, and an ingress
             # result_dir could name a directory inside the manager's own scratch tree

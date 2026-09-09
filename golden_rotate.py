@@ -914,7 +914,22 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
-_BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)$")
+_BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)\.(\d+)$")   # <backup>.keep.build-<pid>.<starttime>
+
+
+def _proc_start(pid: str) -> str | None:
+    """The process's start time (clock ticks since boot, /proc/<pid>/stat field 22): with the pid it names ONE
+    process, so a hold is never honoured for a different builder that later got the same number."""
+    try:
+        st = Path("/proc", pid, "stat").read_text()
+        return st[st.rindex(")") + 2:].split()[19]   # fields after the comm: state is #3, starttime #22 -> index 19 past the ")"
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def build_hold_suffix() -> str:
+    """The sidecar suffix for THIS process's hold on a base it bakes from (golden_build)."""
+    return f".keep.build-{os.getpid()}.{_proc_start(str(os.getpid())) or '0'}"
 
 
 def _held_backups() -> set[str]:
@@ -929,7 +944,9 @@ def _held_backups() -> set[str]:
                 held.add(str((BACKUP_DIR / kp.name[:-len(".keep")]).resolve()))
                 continue
             m = _BUILD_HOLD.match(kp.name)
-            if m and _is_builder(m.group(2)):
+            if not m:
+                continue   # not a hold this code writes (.keep.disabled, .keep~ ...): not its to remove
+            if _is_builder(m.group(2)) and _proc_start(m.group(2)) == m.group(3):
                 held.add(str((BACKUP_DIR / m.group(1)).resolve()))
             else:
                 logger.info("removing stale build hold %s (its builder is gone)", kp.name)
