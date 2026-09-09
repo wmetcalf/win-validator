@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 import sys
 import time
@@ -128,8 +127,10 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._ensure_backup_dir()
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
-    if GRAVEYARD and not re.match(r"^[A-Za-z]:\\[^\\]", GV_DIR or ""):   # the NETWORK SERVICE grant follows the knob's directory: a file at a drive root would grant C:\ itself, a relative path grants nothing
-        raise SystemExit(f"GOLDEN_GRAVEYARD={GRAVEYARD!r} must be an absolute Windows path inside a directory (its directory {GV_DIR!r} is granted to the agent; a drive root or a relative path is refused)")
+    try:
+        gr.validate_graveyard(GRAVEYARD)   # the NETWORK SERVICE grant follows the knob's directory: the shape is refused before anything is built
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     base_is_golden = os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK)
     held_keep: str | None = None   # a .keep sidecar this build holds on a retained backup it backs on (removed in the finally)
     if Path(os.path.realpath(base)).parent == Path(os.path.realpath(str(gr.BACKUP_DIR))):

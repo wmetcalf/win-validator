@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -79,6 +80,10 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 
 def _egress_ports(raw: str | None) -> tuple[int, ...] | None:
     ports = parse_egress_ports(raw)
+    if ports and raw:
+        dropped = [t for t in re.split(r"[,\s]+", raw.strip()) if t and not (t.isdigit() and int(t) in ports)]
+        if dropped:   # blastbox's parser skips a token it cannot read (a range, a name) silently: the operator must hear which
+            logger.warning("AUTHENTICODE_EGRESS_PORTS=%r: %s dropped (comma- or space-separated port NUMBERS 1..65535 only); allowing %s", raw, dropped, list(ports))
     if ports is None and raw is not None:   # PRESENT but parsing to nothing (blank included) is CLOSED, as vm_compose._ports reads a YAML value
         logger.error("AUTHENTICODE_EGRESS_PORTS=%r parses to no port at all (comma- or space-separated numbers 1..65535): the allowlist is CLOSED, not open", raw)
         return ()

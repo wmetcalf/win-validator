@@ -117,11 +117,18 @@ class JobStore:
             self._jobs[jid]["engines"][engine] = value
 
     def submit(self, jid: str, path: str, engines: list[str]) -> None:
-        # the executor enqueues BEFORE it can raise (a worker thread that cannot start raises after the put): the only refusal that is
-        # certainly pre-queue is a shut-down executor, checked here by name — everything the executor itself raises means "queued"
-        if getattr(self._pool, "_shutdown", False):
-            raise NotQueued("the orchestrator is shutting down")
-        self._pool.submit(self._run, jid, path, engines)
+        # the executor refuses BEFORE the put in three ways, all under its own lock (a broken pool, its shutdown, the interpreter's
+        # shutdown), and raises AFTER the put in one (a worker thread that cannot start): the first three are NotQueued, the last
+        # means the job is queued — classified by the executor's own exceptions, so no check of ours can race its shutdown
+        from concurrent.futures.thread import BrokenThreadPool
+        try:
+            self._pool.submit(self._run, jid, path, engines)
+        except BrokenThreadPool as exc:
+            raise NotQueued(f"the worker pool is broken ({exc})") from exc
+        except RuntimeError as exc:
+            if "shutdown" in str(exc):   # "cannot schedule new futures after (interpreter) shutdown": refused before the put
+                raise NotQueued("the orchestrator is shutting down") from exc
+            raise   # "can't start new thread": the item is queued
 
     def _run(self, jid: str, path: str, engines: list[str]) -> None:
         try:

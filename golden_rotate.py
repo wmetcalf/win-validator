@@ -432,6 +432,10 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     The estimate is the larger of the current golden and the master, or the caller's (the
     build entry point passes its own base); with nothing to estimate from, refuse rather than
     pass a full disk. Raises NothingPublished."""
+    try:
+        validate_graveyard(GRAVEYARD)   # a static knob: refused before the lock, the prune and the hour-long build
+    except ValueError as exc:
+        raise NothingPublished(str(exc)) from exc
     if os.geteuid() != 0:
         raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     import fcntl
@@ -915,6 +919,19 @@ def _mtime(p: Path) -> float | None:
 
 
 _BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)(?:\.(\d+))?$")   # <backup>.keep.build-<pid>.<starttime> (a start-less one is an earlier format: always stale)
+
+
+def validate_graveyard(path: str) -> None:
+    """GOLDEN_GRAVEYARD's shape, refused before a build or a rotation: golden_build grants its DIRECTORY to the agent inside a
+    PowerShell double-quoted string, so it must be an absolute drive path with a directory below the root (a file at C:\\
+    would grant the drive; a relative or UNC path grants nothing) and carry no $, backtick or quote (PowerShell expands or
+    ends the string there: C:\\gy$dir granted C:\\gy and said 'ok'). Empty = the graveyard is disabled."""
+    if not path:
+        return
+    d = __import__("ntpath").dirname(path)
+    if not re.match(r"^[A-Za-z]:\\[^\\]", d) or any(c in path for c in "$`\"'"):
+        raise ValueError(f"GOLDEN_GRAVEYARD={path!r} must be an absolute Windows drive path inside a directory, without $ ` or quotes "
+                         f"(its directory {d!r} is granted to the agent verbatim in PowerShell); UNC, forward-slash and relative paths are refused")
 
 
 def _proc_start(pid: str) -> str | None:
