@@ -32,6 +32,8 @@ cd /opt/win-validator
 
 # shared job_root (writable by the ingress container's uid + readable by the host pool-manager)
 sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs
+# (the pool-manager creates its OWN scratch tree, WINVAL_WORK_ROOT=/var/lib/winval/work, 0700 root, at start:
+#  samples are copied and validated there, never inside the ingress-owned job_root)
 
 # secrets, root-only: the env file BOTH units read, and the golden's ssh key
 sudo git clone https://github.com/wmetcalf/myatg /opt/myatg   # the in-guest agent's sources (MYATG_SRC), compiled by golden_build.py

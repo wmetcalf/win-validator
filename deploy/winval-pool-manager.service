@@ -30,7 +30,10 @@ Description=win-validator pool-manager (libvirt VM worker dispatcher)
 # `systemctl reset-failed winval-pool-manager` once fixed). A start that dies in the start budget
 # (TimeoutStartSec below: up to 30 min behind a rotation's lock plus the copy) is one start per
 # window and never latches: retrying a wedged store each budget is the intended behaviour, not a
-# loop to cap.
+# loop to cap. Nor does a CRASH with a virsh/ssh child still running count as fast: KillMode=mixed
+# (below) leaves that child to TimeoutStopSec, so such a restart can be up to 15 min away and, being
+# more than 10 min apart, never latches either — the child is the validation in flight, and losing
+# it at the first instant of every stop was the worse trade.
 StartLimitIntervalSec=10min
 StartLimitBurst=8
 After=network-online.target libvirtd.service docker.service
@@ -54,6 +57,9 @@ Environment=PYTHONPATH=/opt/win-validator
 # place for the Postgres password, the pool size, the ssh key, egress and smoke settings.
 Environment=BLASTBOX_DATABASE_URL=postgresql://winval:winval@127.0.0.1:5433/winval
 Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
+# The manager's OWN scratch tree (created 0700 at start): the engine never reads from or writes into the
+# ingress-owned job_root directly; sealed outputs are published into <job>/output by descriptor afterwards
+Environment=WINVAL_WORK_ROOT=/var/lib/winval/work
 Environment=AUTHENTICODE_POOL_SIZE=2
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
