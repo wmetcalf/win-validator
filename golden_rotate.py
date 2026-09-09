@@ -7,9 +7,14 @@ ROLLBACK backups. The point is fail-safe rebakes: a candidate is promoted to the
 ONLY if it passes a benign+revoked validation gate; otherwise the current golden is kept and the
 failure is surfaced — so a bad bake (the WU-wedge / corruption scenarios) never silently ships.
 
-  build_candidate()  master -> overlay clone -> refresh trust state -> flatten -> candidate.qcow2
+  build_candidate()  a PRIVATE COPY of the promoted golden (GOLDEN_REBAKE_FROM=golden, the default)
+                     -> overlay clone -> refresh trust state -> flatten -> candidate.qcow2
+                     Every GOLDEN_MAX_CHAIN cycles (or GOLDEN_REBAKE_FROM=master) the cycle is
+                     instead golden_build's FULL bake from the packer master (it carries no agent).
   validate_golden()  boot a worker off a qcow2 -> assert benign==Valid AND revoked==Revoked
-  rotate()           backup current base (keep last N) -> promote candidate -> base
+  rotate()           backup current base (keep last N) -> promote candidate -> base -> record the
+                     chain depth (beside the golden + the mirror off the images store) -> restart
+                     the pool-manager so the promoted golden is in service
 
 CLI:
   python golden_rotate.py refresh-and-rotate          # the full gated cycle (cron this)
@@ -402,7 +407,11 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             if not _write_small(probe, "probe"):
                 raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
             _run(["sudo", "rm", "-f", probe])
-            if not _chain_file().exists() and not _write_small(str(_chain_file()), str(chain_length())):
+            # seed a missing record — and REWRITE a stale one: after an images-store outage the record beside the
+            # golden holds an old depth while the mirror holds the real one; chain_length() picks the newer, but a
+            # lost mirror (a rebuilt root filesystem) or a touched record would hand the stale depth back
+            want = chain_length()
+            if _read_depth(_chain_file()) != want and not _write_small(str(_chain_file()), str(want)):
                 raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
             # the mirror (the copy that survives the images store refusing writes) is proved the same way, but
             # its loss is a WARNING every run, not a refusal: the record beside the golden is the primary
