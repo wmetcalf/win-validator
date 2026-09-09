@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import errno
+import hashlib
 import os
 import shutil
 import signal
@@ -258,15 +259,17 @@ class PoolManager:
             (work / "input").mkdir(0o700)
             (work / "output").mkdir(0o700)
             with open(in_fd, "rb", closefd=False) as src, open(work / "input" / filename, "wb") as dst:
-                copied = 0
+                copied = 0; digest = hashlib.sha256()
                 while True:   # bounded by BYTES, not by the size fstat saw: the ingress can still be appending
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
-                    copied += len(chunk)
+                    copied += len(chunk); digest.update(chunk)
                     if copied > MAX_INPUT_BYTES:
                         raise PublicError(f"input grew past the pool-manager's {MAX_INPUT_BYTES}-byte bound while being copied (AUTHENTICODE_MAX_UPLOAD_MB)")
                     dst.write(chunk)
+            if job.input_sha256 and digest.hexdigest() != job.input_sha256:   # the ingress hashed what it spooled: a copy that reads differently is not the sample it recorded
+                raise PublicError("the spooled input does not match the sha256 the ingress recorded for it (changed after it was spooled?)")
             env = self._runner.validate_to_dir(work / "input" / filename, work / "output")
             summary = _extract_verdict(env)
             status = (JobStatus.FAILED if summary.get("envelope_status") == "engine_error"

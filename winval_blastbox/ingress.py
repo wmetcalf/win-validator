@@ -91,8 +91,8 @@ async def scan(file: UploadFile = File(...)) -> dict:
     except Exception:   # the row is what makes the spool a job: without it the upload (up to the cap) and its dir would sit rowless until the retention sweep
         try:   # an AMBIGUOUS failure (the commit landed, the acknowledgement did not): the job is live, its input must stay
             committed = _store.get(job.job_id) is not None
-        except Exception:  # noqa: BLE001 — the store is unreachable either way: assume nothing landed
-            committed = False
+        except Exception:  # noqa: BLE001 — the store cannot say: the commit MAY have landed, so the input stays (a rowless dir costs the
+            committed = True   # retention sweep one entry; a live job whose input was deleted costs the submitter the scan)
         if not committed:
             for d_ in (path, indir, Path(job.result_dir)):
                 try:
