@@ -41,9 +41,9 @@ class HostRunner:
         self.engine = AuthenticodeEngine()
         self.limits = limits or Limits.from_env()
 
-    def warmup(self) -> None:
-        """Boot the VM pool up front (otherwise paid on the first validate)."""
-        self.engine.warmup()
+    def warmup(self, stop_event=None) -> None:
+        """Boot the VM pool up front (otherwise paid on the first validate); `stop_event` ends the wait early."""
+        self.engine.warmup(stop_event=stop_event)
 
     def validate_to_dir(self, input_path: str | Path, output_dir: str | Path) -> dict:
         """Validate ``input_path``, sealing artifacts + metadata.json into ``output_dir``.

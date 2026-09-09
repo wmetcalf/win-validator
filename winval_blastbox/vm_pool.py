@@ -28,6 +28,22 @@ from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
 logger = logging.getLogger("winval.vm_pool")
 
 
+def pool_size() -> int:
+    """AUTHENTICODE_POOL_SIZE — the ONE reader for the warm size and the claim concurrency: an empty or
+    non-numeric value is a warning plus the default (2) instead of a bare traceback that latches the
+    unit failed; 0 or less (a pool that could never warm) is raised to 1."""
+    raw = os.environ.get("AUTHENTICODE_POOL_SIZE", "2").strip()
+    try:
+        n = int(raw or "2")
+    except ValueError:
+        logger.warning("AUTHENTICODE_POOL_SIZE=%r is not a whole number: using 2", raw)
+        return 2
+    if n < 1:
+        logger.warning("AUTHENTICODE_POOL_SIZE=%r is below 1: using 1", raw)
+        return 1
+    return n
+
+
 # Per-job myatg overrides that are safe to vary per REQUEST (myatg exposes them as query params on
 # --serve-http). `gv` (graveyard) and `max-size` are server-global — baked into the golden's serve
 # startup — so they are NOT here; a per-job gv/tier can't be applied and the engine says so.
@@ -82,7 +98,7 @@ def authenticode_spec() -> VmWorkerSpec:
         name="authenticode",
         image=VmImageSpec(golden=os.environ.get("AUTHENTICODE_GOLDEN_BASE", "/dev/shm/golden-base.qcow2")),
         agent_port=int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765")),
-        warm_size=int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2")),
+        warm_size=pool_size(),
         egress=egress,
         routing=routing,
         # Assign+enforce (blastbox >= 0.1.18): when AUTHENTICODE_IP_POOL is set (e.g.
@@ -149,6 +165,7 @@ class WarmVmPool:
     """Engine-facing adapter: a WarmPool of VM workers with a ``validate(path)`` surface."""
 
     def __init__(self, *, jobs_per_recycle: int = 1, claim_timeout_s: float = 180.0) -> None:
+        self._last_reap = ""
         # smoke + CRL-warm are opt-in via env; clock-sync (on_ready) is always on — a stale clock at
         # boot or after revert would corrupt validity/revocation verdicts.
         smoke_sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
@@ -169,23 +186,47 @@ class WarmVmPool:
             pre_snapshot=pre_snapshot, on_ready=_sync_clock)
         self._claim_timeout_s = claim_timeout_s
 
-    def start(self, wait_warm_s: float = 300.0) -> None:
+    def start(self, wait_warm_s: float = 300.0, stop_event=None) -> None:
         """Launch the pool and block until at least one worker is warm (so the first scan isn't a
-        ~60s cold boot) — mirrors the old synchronous pool's start()."""
+        ~60s cold boot) — mirrors the old synchronous pool's start(). `stop_event` (the pool-manager's
+        SIGTERM flag) ends the wait early. On EVERY exit but success — the deadline, a stop request,
+        ^C or SystemExit raised inside the poll — the pool this call started is reaped here:
+        WarmPool.stop() is the only thing that destroys the domains its spawn loop already defined and
+        started (overlays on /dev/shm, guest RAM), and no caller can, because engine.get_pool()
+        publishes the pool only after this returns."""
         self._pool.start()
-        deadline = time.time() + wait_warm_s
-        while time.time() < deadline:
-            if self._pool.idle_count >= 1:  # idle_count is a @property
-                return
-            time.sleep(2)
-        # the pool this call STARTED is reaped here: WarmPool.stop() is the only thing that destroys the
-        # domains its spawn loop already defined and started (overlays on /dev/shm, guest RAM), and the
-        # caller cannot — engine.get_pool() publishes the pool only after this returns
+        warm = False
+        why = "no worker became warm within timeout"
         try:
-            self._pool.stop()
+            deadline = time.time() + wait_warm_s
+            while time.time() < deadline:
+                if self._pool.idle_count >= 1:  # idle_count is a @property
+                    warm = True
+                    return
+                if stop_event is not None and stop_event.is_set():
+                    why = "stop requested during the warm-up"
+                    break
+                time.sleep(2)
+        finally:
+            if not warm:
+                self._reap("failed warm-up")
+        raise RuntimeError(f"WarmVmPool: {why} ({self._last_reap})")
+
+    def _reap(self, what: str) -> int:
+        """WarmPool.stop() RETURNS the slots it could not destroy (a failed `virsh destroy` leaves the guest
+        running with its overlay and egress rules): say so by count, never 'stopped' when it was not."""
+        try:
+            left = int(self._pool.stop() or 0)
         except Exception:  # noqa: BLE001
-            logger.warning("WarmVmPool: stop after a failed warm-up raised", exc_info=True)
-        raise RuntimeError("WarmVmPool: no worker became warm within timeout (the workers it started were stopped)")
+            logger.error("WarmVmPool: stop after a %s raised; workers may still be running (virsh list)", what, exc_info=True)
+            self._last_reap = "the workers' state is UNKNOWN: stop raised, check virsh list"
+            return -1
+        if left:
+            logger.error("WarmVmPool: %d worker(s) could NOT be reaped after a %s: still running with overlay and egress rules (virsh list)", left, what)
+            self._last_reap = f"{left} worker(s) could NOT be reaped, check virsh list"
+        else:
+            self._last_reap = "the workers it started were stopped"
+        return left
 
     def validate(self, path: str, params: dict | None = None) -> dict:
         slot = self._pool.claim(timeout_s=self._claim_timeout_s)
@@ -197,4 +238,4 @@ class WarmVmPool:
             self._pool.release(slot)
 
     def shutdown(self) -> None:
-        self._pool.stop()
+        self._reap("shutdown")

@@ -34,6 +34,7 @@ from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .host_runner import HostRunner
+from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
 
@@ -64,20 +65,7 @@ def _retention_days() -> float:
     return days
 
 
-def _pool_size() -> int:
-    """AUTHENTICODE_POOL_SIZE, hardened like the retention knob: an empty or non-numeric value is a
-    warning plus the default (2) instead of a bare traceback that latches the unit failed; 0 (no
-    worker would ever warm, then the executor would refuse max_workers=0) is raised to 1."""
-    raw = os.environ.get("AUTHENTICODE_POOL_SIZE", "2").strip()
-    try:
-        n = int(raw or "2")
-    except ValueError:
-        logger.warning("AUTHENTICODE_POOL_SIZE=%r is not a whole number: using 2", raw)
-        return 2
-    if n < 1:
-        logger.warning("AUTHENTICODE_POOL_SIZE=%r is below 1: using 1", raw)
-        return 1
-    return n
+_pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authenticode_spec) and the claim concurrency
 
 
 def _rel_parts(p: Path, what: str, root: Path = JOB_ROOT) -> tuple:
@@ -396,7 +384,7 @@ class PoolManager:
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         try:
-            self._runner.warmup()
+            self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
             logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
             with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
                 for _ in range(self._concurrency):

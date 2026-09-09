@@ -51,7 +51,7 @@ def _bool_env(key: str, default: bool = False) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-def get_pool() -> WarmVmPool:
+def get_pool(stop_event=None) -> WarmVmPool:
     """Return the started WarmPool-backed VM pool, booting it on first use (thread-safe)."""
     global _POOL
     if _POOL is None:
@@ -65,7 +65,7 @@ def get_pool() -> WarmVmPool:
                 jpr = int(os.environ.get("AUTHENTICODE_JOBS_PER_RECYCLE",
                                          getattr(AuthenticodeEngine, "jobs_per_recycle", 1)))
                 pool = WarmVmPool(jobs_per_recycle=jpr)
-                pool.start()
+                pool.start(stop_event=stop_event)   # reaps its own workers on every failed exit; nothing else can
                 _POOL = pool
     return _POOL
 
@@ -179,9 +179,9 @@ class AuthenticodeEngine:
         label, mime = _EXT_TYPE.get(input.suffix.lower(), ("binary", "application/octet-stream"))
         return Detection(label=label, mime=mime, confidence=1.0, source="authenticode")
 
-    def warmup(self) -> None:
-        """Pre-pay the VM-pool boot for the host runner (optional)."""
-        get_pool()
+    def warmup(self, stop_event=None) -> None:
+        """Pre-pay the VM-pool boot for the host runner (optional); `stop_event` ends the wait early."""
+        get_pool(stop_event=stop_event)
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
         # Per-job myatg overrides come in via the blastbox allowlist as AUTHENTICODE_* env.

@@ -111,7 +111,8 @@ def chain_length() -> int:
     f = _chain_file()
     if not f.exists():
         # no record: a golden that predates the chain, a fresh host — or a promotion whose record write the
-        # store refused (_record_chain): then the promoted candidate's sidecar, kept for exactly this, holds it
+        # store refused (_record_chain) or that raised after the rename: then the promoted candidate's
+        # sidecar, renamed to the .chain.unrecorded marker for exactly this, holds it
         orphan = _newest_orphan_sidecar()
         if orphan is not None:
             try:
@@ -168,23 +169,32 @@ def candidate_depth_file(candidate: str) -> Path:
 
 
 def _newest_orphan_sidecar() -> Path | None:
-    """A candidate sidecar whose candidate is gone: left by a promotion whose golden record could not be written."""
-    orphans = [sc for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain") if not Path(str(sc)[:-len(".chain")]).exists()]
-    return max(orphans, key=lambda p: _mtime(p) or 0) if orphans else None
+    """The newest `.chain.unrecorded` marker: the depth of a promotion whose golden record could not be
+    written (only such sidecars are ever renamed to the marker; an abandoned build's leftover is not)."""
+    marks = list(BACKUP_DIR.glob("golden-base.*.qcow2.chain.unrecorded"))
+    return max(marks, key=lambda p: _mtime(p) or 0) if marks else None
 
 
-_UNRECORDED_SIDECARS: set = set()   # candidate sidecars whose depth could NOT be written to the golden's record (this process)
+def unrecorded_marker(candidate: str) -> Path:
+    """The sidecar of a candidate that WAS promoted but whose depth never reached the golden's record,
+    renamed so the fact survives on disk (a later oneshot cannot know it otherwise) and so that no
+    leftover of an abandoned build can ever be mistaken for it."""
+    return Path(candidate + ".chain.unrecorded")
+
+
+def _keep_as_unrecorded(candidate: str) -> None:
+    sidecar = candidate_depth_file(candidate)
+    if sidecar.exists():
+        _run(["sudo", "mv", "-f", str(sidecar), str(unrecorded_marker(candidate))])
 
 
 def _rm_candidate(candidate: str) -> None:
-    sidecar = str(candidate_depth_file(candidate))
-    # the sidecar is the promoted golden's ONLY record of depth whenever the candidate is already gone
-    # (renamed into place) and the golden's record is absent — the record write failed (_record_chain),
-    # or _promote raised after the disk rename before the record was ever attempted: chain_length() reads it
-    if sidecar in _UNRECORDED_SIDECARS or (not os.path.lexists(candidate) and not _chain_file().exists()):
-        _run(["sudo", "rm", "-f", candidate])
-        return
-    _run(["sudo", "rm", "-f", candidate, sidecar])
+    # a candidate already gone (renamed into place by _promote, which then raised before any record was
+    # attempted) while the golden has no record: its sidecar is the promoted golden's ONLY depth — keep it
+    # under the marker name chain_length() reads, never as a plain sidecar an aged leftover could imitate
+    if not os.path.lexists(candidate) and not _chain_file().exists():
+        _keep_as_unrecorded(candidate)
+    _run(["sudo", "rm", "-f", candidate, str(candidate_depth_file(candidate))])
 
 
 def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str, int]:
@@ -760,12 +770,14 @@ def _prune_backups(keep: str | None = None) -> None:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)
-        if str(sc.resolve()) in keep_paths or str(sc) in _UNRECORDED_SIDECARS:
+        if str(sc.resolve()) in keep_paths:
             continue
-        if not _chain_file().exists():
-            continue   # while the golden has NO record, an orphan sidecar may be the record (chain_length reads the newest)
         if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
+    if _chain_file().exists():   # the record exists again: the markers it superseded age out (never while it is absent — they ARE the record then)
+        for mk in BACKUP_DIR.glob("golden-base.*.qcow2.chain.unrecorded"):
+            if (_mtime(mk) or float("inf")) < time.time() - 3600:
+                _run(["sudo", "rm", "-f", str(mk)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
@@ -798,8 +810,8 @@ def _record_chain(candidate: str) -> None:
         depth = MAX_CHAIN   # unknown provenance: force the master rebake NEXT cycle (0 would postpone it by MAX_CHAIN cycles)
     if _write_small(str(_chain_file()), str(depth)):
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
-    else:   # the sidecar stays: it is the only surviving record of this golden's provenance (_rm_candidate keeps it, chain_length reads it)
-        _UNRECORDED_SIDECARS.add(str(candidate_depth_file(candidate)))
+    else:   # the sidecar stays, as the on-disk marker chain_length() reads: the only surviving record of this golden's provenance
+        _keep_as_unrecorded(candidate)
         if _chain_file().exists():
             logger.error("chain depth %s NOT recorded for %s: the images store refused a small write (read-only? full?); the record still reads %s (the previous golden's depth), so the master rebake may come up to one cycle late", depth, GOLDEN_BASE_DISK, chain_length())
         else:
