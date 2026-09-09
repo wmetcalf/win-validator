@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -105,8 +106,8 @@ STRANDED_SOURCE_HOURS = int(os.environ.get("GOLDEN_STRANDED_SOURCE_HOURS", "24")
 
 def _sweep_stranded_sources() -> None:
     """A rebake-source copy has no value once its run ended; one left by a killed run (OOM, a
-    reboot, systemctl stop) is reclaimed here — BEFORE the preflight's space check would refuse
-    every later run because of it — after STRANDED_SOURCE_HOURS (a live rebake is younger)."""
+    reboot, systemctl stop) is reclaimed here — called from rotation_preflight() BEFORE its space
+    check, and again before each snapshot — after STRANDED_SOURCE_HOURS (a live rebake is younger)."""
     cutoff = time.time() - STRANDED_SOURCE_HOURS * 3600
     for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
         if c.stat().st_mtime < cutoff:
@@ -116,6 +117,10 @@ def _sweep_stranded_sources() -> None:
 
 def candidate_depth_file(candidate: str) -> Path:
     return Path(candidate + ".chain")
+
+
+def _rm_candidate(candidate: str) -> None:
+    _run(["sudo", "rm", "-f", candidate, str(candidate_depth_file(candidate))])
 
 
 def snapshot_source(ts: str) -> tuple[str, str]:
@@ -278,6 +283,11 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
                 time.sleep(5)
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
+    for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
+        if Path(base).is_symlink() or Path(base).is_dir():
+            raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
+    if BACKUP_DIR.exists():
+        _sweep_stranded_sources()   # BEFORE the space check below, which a stranded copy would fail forever
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if REVOKED and not Path(REVOKED).is_file():
@@ -346,7 +356,8 @@ def build_candidate() -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
-    xml_path = f"/tmp/{dom}.xml"
+    xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
+    os.close(xfd)
     built = False
     src, src_copy = snapshot_source(ts)
     depth = 0 if src == MASTER_QCOW2 else chain_length() + 1
@@ -393,7 +404,7 @@ def build_candidate() -> str:
             # a convert that failed or timed out leaves a full-size partial candidate in the
             # backup dir; _prune_backups deliberately never touches candidates, so nothing else
             # would ever reclaim it and each failed nightly rebake would keep one image of space
-            _run(["sudo", "rm", "-f", candidate])
+            _rm_candidate(candidate)
     return candidate
 
 
@@ -546,7 +557,7 @@ def _promote(candidate: str) -> None:
     want = Path(candidate).stat().st_size
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
         if Path(base).is_symlink() or Path(base).is_dir():
-            raise RuntimeError(f"refusing to promote: {base} is a symlink or a directory, not a regular file; golden NOT promoted")
+            raise NothingPublished(f"refusing to promote: {base} is a symlink or a directory, not a regular file; golden NOT promoted (nothing published)")
     _sweep_own_temps()
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):
         if _free_beside(base) < want:
@@ -624,6 +635,9 @@ def _prune_backups() -> None:
         if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and c.stat().st_mtime < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
+    for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone
+        if not Path(str(sc)[:-len(".chain")]).exists():
+            _run(["sudo", "rm", "-f", str(sc)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
@@ -646,7 +660,7 @@ def _record_chain(candidate: str) -> None:
     try:
         depth = int(candidate_depth_file(candidate).read_text().strip() or "0")
     except (OSError, ValueError):
-        depth = 0   # an unknown candidate (hand-made) resets the chain, which errs toward a master rebake sooner
+        depth = MAX_CHAIN   # unknown provenance: force the master rebake NEXT cycle (0 would postpone it by MAX_CHAIN cycles)
     _write_small(str(_chain_file()), str(depth))
     _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
 
@@ -682,7 +696,7 @@ def refresh_and_rotate() -> int:
     if not validate_golden(candidate):
         logger.error("REBAKE REJECTED: keeping current golden %s; candidate %s discarded",
                      GOLDEN_BASE_DISK, candidate)
-        _run(["sudo", "rm", "-f", candidate])
+        _rm_candidate(candidate)
         return 1
     try:
         rotate(candidate)
@@ -692,9 +706,9 @@ def refresh_and_rotate() -> int:
         logger.error("%s — candidate KEPT at %s; retry with: sudo %s %s rotate %s", e, candidate, sys.executable, Path(__file__).resolve(), candidate)
         return 1
     except BaseException:
-        _run(["sudo", "rm", "-f", candidate])
+        _rm_candidate(candidate)
         raise
-    _run(["sudo", "rm", "-f", candidate])
+    _rm_candidate(candidate)
     if restart_pool():
         logger.info("REBAKE PROMOTED: golden refreshed and in service; %d backup(s) retained", KEEP_N)
     else:

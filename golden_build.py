@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -100,7 +101,8 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._ensure_backup_dir()
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
-    xml = f"/tmp/{dom}.xml"
+    xfd, xml = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable (see golden_rotate)
+    os.close(xfd)
     built = False
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
         assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base, "-F", "qcow2", overlay], 120).returncode == 0
@@ -149,7 +151,7 @@ def build(base: str = BASE_QCOW2) -> str:
         gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
         gr._run(["sudo", "rm", "-f", overlay, xml])
         if not built:
-            gr._run(["sudo", "rm", "-f", candidate])   # a failed/timed-out convert leaves a full-size partial
+            gr._rm_candidate(candidate)   # a failed/timed-out convert leaves a full-size partial
     gr._write_small(str(gr.candidate_depth_file(candidate)), "0")   # built from the base: chain depth 0
     return candidate
 
@@ -161,7 +163,7 @@ def build_and_promote() -> int:
     candidate = build()
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)
-        gr._run(["sudo", "rm", "-f", candidate])
+        gr._rm_candidate(candidate)
         return 1
     try:
         gr.rotate(candidate)
@@ -169,9 +171,9 @@ def build_and_promote() -> int:
         logger.error("%s — candidate KEPT at %s; retry with: sudo %s %s rotate %s", e, candidate, sys.executable, Path(gr.__file__).resolve(), candidate)
         return 1
     except BaseException:
-        gr._run(["sudo", "rm", "-f", candidate])
+        gr._rm_candidate(candidate)
         raise
-    gr._run(["sudo", "rm", "-f", candidate])
+    gr._rm_candidate(candidate)
     if gr.restart_pool():   # warm workers ran the old golden; without this the build is not "live"
         logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
     else:
