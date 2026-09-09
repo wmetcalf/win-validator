@@ -282,7 +282,8 @@ def _existing_ancestor(path: str) -> Path:
     return p
 
 
-def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False, keep: str | None = None) -> None:
+def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False, keep: str | None = None,
+                       source_copy: bool = True) -> None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
     samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
@@ -347,7 +348,11 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     # in the backup dir the peak is 2x: source copy + candidate during the bake (the copy is gone
     # before promotion), then candidate + backup during promotion
     # a retry of a candidate that already EXISTS in the backup dir needs only the backup there
-    demands = [(str(BACKUP_DIR), (1 if candidate_built else 2) * need, "backup in the backup dir" if candidate_built else "candidate + (rebake-source copy, then backup) in the backup dir"),
+    # what the backup dir really holds at the peak: the candidate (unless it already exists), plus ONE of
+    # the rebake-source copy (only when the source is the golden — a bake from the master takes none)
+    # and the backup of the current golden (only when there is one; the copy is gone before the backup)
+    backup_terms = ([] if candidate_built else ["candidate"]) + (["rebake-source copy / backup"] if (source_copy or Path(GOLDEN_BASE_DISK).exists()) else [])
+    demands = [(str(BACKUP_DIR), len(backup_terms) * need, " + ".join(backup_terms) + " in the backup dir" if backup_terms else "nothing in the backup dir"),
                (str(Path(GOLDEN_BASE_DISK).parent), need, "temporary beside the disk base"),
                (str(Path(GOLDEN_BASE).parent), need, "temporary beside the RAM base")]
     per_fs: dict = {}
@@ -822,7 +827,7 @@ def _main(cmd: str, argv: list[str]) -> int:
         # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
         # the larger of the candidate and the golden the promotion backs up, with the candidate's own
         # allocation already spent
-        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c))
+        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False)
         rotate(argv[1])
         restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0

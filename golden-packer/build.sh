@@ -25,7 +25,10 @@ command -v "$QEMU" >/dev/null 2>&1 || [ -x "$QEMU" ] || die "qemu not found: '$Q
 
 # The gotcha that bites people: a qemu compiled WITHOUT slirp (libslirp) can't do Packer's user-mode
 # networking. Crucially, `-netdev help` LISTS 'user' even when it's compiled OUT — so test it FOR REAL.
-if "$QEMU" -machine none -netdev user,id=slirptest 2>&1 | grep -qi "not compiled"; then
+# a slirp-enabled qemu ACCEPTS the netdev and then sits in its main loop forever — nothing asks it to
+# quit — so the probe feeds it `quit` on a stdio monitor (a qemu without slirp rejects the option
+# before the monitor exists) and is bounded by a timeout either way
+if printf 'quit\n' | timeout 30 "$QEMU" -machine none -display none -monitor stdio -netdev user,id=slirptest 2>&1 | grep -qi "not compiled"; then
     die "'$QEMU' has no slirp (user-mode networking) compiled in — Packer's qemu builder can't reach
        the guest. Install a slirp-enabled qemu, or point QEMU_BINARY at one (e.g. a stock Ubuntu qemu)."
 fi

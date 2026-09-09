@@ -100,11 +100,13 @@ sudo systemctl enable --now winval-pool-manager
 ```
 
 The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
-`ExecStartPre` only when it is MISSING — `/dev/shm` empties on reboot, so a rebooted host comes
+`ExecStartPre` when it is MISSING, or present but not owned by the unit — `/dev/shm` empties on reboot, so a rebooted host comes
 back on its own (an 18 GB copy takes ~20–30 s; the unit's start budget is 55 min: up to 30 min behind a rotation's lock plus the copy on a slow store). Fast
 failures — Postgres not up yet, a bad `winval.env` — are retried every 30 s for eight starts, then the
 unit latches `failed`: fix the cause and `sudo systemctl reset-failed winval-pool-manager && sudo
-systemctl start winval-pool-manager`. A base that is present is never touched. The
+systemctl start winval-pool-manager`. A present base owned by the unit is never touched; one owned by anyone else
+(libvirt's DAC driver leaves the shared base owned by the qemu user, and /dev/shm is world-writable) is discarded
+and materialised afresh — only once a source is known to exist, so a restart never destroys the only golden in service. The
 source is `GOLDEN_BASE_DISK`, the on-disk twin `golden_rotate.rotate()` promotes into, so a reboot
 never reverts a rotation; `GOLDEN_MASTER` (the frozen packer image) is used only before any
 golden has been promoted. The copy is atomic and size-checked, so an interrupted copy never
