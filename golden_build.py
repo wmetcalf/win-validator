@@ -125,6 +125,7 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
     base_is_golden = os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK)
+    held_keep: str | None = None   # a .keep sidecar this build holds on a retained backup it backs on (removed in the finally)
     if Path(os.path.realpath(base)).parent == Path(os.path.realpath(str(gr.BACKUP_DIR))):
         # a base chosen from inside the backup dir (an old candidate) is the running build's BACKING file
         # for hours; a concurrent rotation's preflight prunes candidates older than CANDIDATE_KEEP_DAYS,
@@ -132,6 +133,10 @@ def build(base: str = BASE_QCOW2) -> str:
         if not os.path.isfile(base):   # a typo'd path must not be CREATED by the touch (a 0-byte backup-shaped file would join the rollback set)
             raise SystemExit(f"base {base} does not exist")
         gr._run(["sudo", "touch", os.path.realpath(base)])
+        if gr._BACKUP_NAME.match(Path(base).name):
+            # a RETAINED backup as the base: the age prune leaves it, the COUNT prune (GOLDEN_KEEP_N) does not — a rotation
+            # landing during the build evicted the overlay's backing file. The split-state keep sidecar holds it for the build
+            held_keep = gr._mark_kept(os.path.realpath(base))
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:
@@ -214,6 +219,8 @@ def build(base: str = BASE_QCOW2) -> str:
     finally:
         gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
         gr._run(["sudo", "rm", "-f", overlay, xml] + ([base_src] if base_src != base else []))   # the private base copy is flattened into the candidate
+        if held_keep:
+            gr._run(["sudo", "rm", "-f", held_keep])   # the backup is the prune's again
         if not built:
             gr._rm_candidate(candidate)   # a failed/timed-out convert leaves a full-size partial
     gr._write_small(str(gr.candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
