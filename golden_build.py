@@ -138,7 +138,10 @@ def build(base: str = BASE_QCOW2) -> str:
             # landing during the build evicted the overlay's backing file. A hold named after THIS build's pid: honoured only
             # while this builder runs (a build that died pins nothing), and distinct from the operator's .keep marker and
             # from another build's hold on the same base
-            held_keep = gr._mark_kept(os.path.realpath(base), suffix=gr.build_hold_suffix())
+            suffix = gr.build_hold_suffix()
+            if suffix is None:   # an unverifiable hold would be reclaimed under this build: refuse rather than bake on a base the prune may take
+                raise SystemExit(f"cannot read this process's start time (/proc/{os.getpid()}/stat): refusing to build from the retained backup {base}, whose hold could not be kept")
+            held_keep = gr._mark_kept(os.path.realpath(base), suffix=suffix)
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:

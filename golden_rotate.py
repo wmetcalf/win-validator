@@ -914,7 +914,7 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
-_BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)\.(\d+)$")   # <backup>.keep.build-<pid>.<starttime>
+_BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)(?:\.(\d+))?$")   # <backup>.keep.build-<pid>.<starttime> (a start-less one is an earlier format: always stale)
 
 
 def _proc_start(pid: str) -> str | None:
@@ -927,14 +927,17 @@ def _proc_start(pid: str) -> str | None:
         return None
 
 
-def build_hold_suffix() -> str:
-    """The sidecar suffix for THIS process's hold on a base it bakes from (golden_build)."""
-    return f".keep.build-{os.getpid()}.{_proc_start(str(os.getpid())) or '0'}"
+def build_hold_suffix() -> str | None:
+    """The sidecar suffix for THIS process's hold on a base it bakes from (golden_build): <pid>.<starttime>, or None when
+    the start time cannot be read — a hold written with a made-up start is stale on arrival, and the next prune would
+    remove the protection AND the backup under a live build; the caller refuses to build rather than write that."""
+    start = _proc_start(str(os.getpid()))
+    return f".keep.build-{os.getpid()}.{start}" if start else None
 
 
 def _held_backups() -> set[str]:
     """The backups every prune must leave: an operator's <backup>.keep (a split state's recovery marker, theirs to
-    remove) and a running build's <backup>.keep.build-<pid> (its backing file, held for exactly as long as that
+    remove) and a running build's <backup>.keep.build-<pid>.<starttime> (its backing file, held for exactly as long as that
     builder runs — a build that died holds nothing, and its stale sidecar is removed here). Sidecars live beside
     the backups or beside the chain mirror (where _mark_kept falls back to)."""
     held: set[str] = set()
@@ -946,7 +949,7 @@ def _held_backups() -> set[str]:
             m = _BUILD_HOLD.match(kp.name)
             if not m:
                 continue   # not a hold this code writes (.keep.disabled, .keep~ ...): not its to remove
-            if _is_builder(m.group(2)) and _proc_start(m.group(2)) == m.group(3):
+            if m.group(3) and _is_builder(m.group(2)) and _proc_start(m.group(2)) == m.group(3):
                 held.add(str((BACKUP_DIR / m.group(1)).resolve()))
             else:
                 logger.info("removing stale build hold %s (its builder is gone)", kp.name)
@@ -957,7 +960,7 @@ def _held_backups() -> set[str]:
 def _mark_kept(bak: str, suffix: str = ".keep") -> str | None:
     """Hold ``bak`` out of every prune: a checked sidecar beside it, else beside the chain mirror; None when neither
     could be written (the message must then say the copy is NOT held, not name a sidecar that does not exist).
-    ``suffix``: ".keep" for the operator's recovery marker, ".keep.build-<pid>" for a build's hold on its base."""
+    ``suffix``: ".keep" for the operator's recovery marker, ".keep.build-<pid>.<starttime>" for a build's hold on its base."""
     for d in (BACKUP_DIR, _mirror_file().parent):
         sc = d / (Path(bak).name + suffix)
         _run(["sudo", "mkdir", "-p", str(d)])

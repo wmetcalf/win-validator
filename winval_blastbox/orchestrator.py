@@ -238,8 +238,15 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         except OSError:
             pass
         raise
-    jid = _store.create(file.filename or "input", sel)
-    _store.submit(jid, path, sel)
+    try:
+        jid = _store.create(file.filename or "input", sel)
+        _store.submit(jid, path, sel)
+    except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
     return {"job_id": jid, "status": "queued", "engines": sel}
 
 
