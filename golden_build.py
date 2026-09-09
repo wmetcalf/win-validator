@@ -142,7 +142,7 @@ def build(base: str = BASE_QCOW2) -> str:
         if not os.path.isfile(base):   # a typo'd path must not be CREATED by the touch (a 0-byte backup-shaped file would join the rollback set)
             raise SystemExit(f"base {base} does not exist")
         gr._run(["sudo", "touch", os.path.realpath(base)])
-        if gr._BACKUP_NAME.match(Path(base).name):
+        if gr._BACKUP_NAME.match(Path(os.path.realpath(base)).name):   # the file the overlay backs on, as the touch above and the hold below name it: a symlink to a retained backup was touched but never held, and the count prune could take it mid-build
             # a RETAINED backup as the base: the age prune leaves it, the COUNT prune (GOLDEN_KEEP_N) does not — a rotation
             # landing during the build evicted the overlay's backing file. A hold named after THIS build's pid: honoured only
             # while this builder runs (a build that died pins nothing), and distinct from the operator's .keep marker and

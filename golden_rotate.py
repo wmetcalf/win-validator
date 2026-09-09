@@ -669,10 +669,12 @@ def validate_golden(qcow2: str) -> bool:
     if c.is_symlink() or not c.is_file():   # a mistyped path was 'did not boot a healthy worker' — the verdict a corrupt golden gives — after a 240 s wait
         logger.error("GATE FAIL: candidate %s is not a regular file (no such file, or a symlink/directory); nothing was booted", qcow2)
         return False
-    for label, sample in (("GOLDEN_BENIGN_SAMPLE", BENIGN), ("GOLDEN_REVOKED_SAMPLE", REVOKED)):
-        if sample and not Path(sample).is_file():   # every other entry point refuses this in the preflight; `validate` runs none and paid a full boot to find out
-            logger.error("GATE FAIL: %s=%r is not a file: the gate cannot run; nothing was booted", label, sample)
-            return False
+    if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample: unset or missing, nothing can be judged (as rotation_preflight rules); `validate` runs no preflight and paid a full boot to find out
+        logger.error("GATE FAIL: GOLDEN_BENIGN_SAMPLE=%r is not a file: the gate cannot run; nothing was booted", BENIGN)
+        return False
+    if REVOKED and not Path(REVOKED).is_file():   # optional: only refused when set and missing
+        logger.error("GATE FAIL: GOLDEN_REVOKED_SAMPLE=%r is not a file: the gate cannot run; nothing was booted", REVOKED)
+        return False
     try:   # the spec too: a knob blastbox refuses is a GATE FAIL by name, never a traceback (the preflight refuses it earlier still)
         rt = _gate_spec(qcow2).runtime(on_ready=_sync_clock)
         slot = rt.spawn_ready(timeout_s=240)
