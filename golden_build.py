@@ -62,8 +62,7 @@ STEPS: list[tuple[str, str]] = [
             $iso = Get-ChildItem 'D:\','E:\' -Filter 'virtio-win-guest-tools.exe' -ErrorAction SilentlyContinue | Select -First 1
             if ($iso) { Start-Process $iso.FullName -ArgumentList '/install','/quiet','/norestart' -Wait }
         }
-        if (-not (Get-Service QEMU-GA -ErrorAction SilentlyContinue)) { throw 'qemu-ga is not installed (no virtio-win-guest-tools.exe on D:/E:)' }
-        'qemu-ga True'"""),
+        'qemu-ga ' + [bool](Get-Service QEMU-GA -ErrorAction SilentlyContinue)"""),   # optional: the pool falls back to SSH for the clock
     ("compile-myatg", f"""
         & '{_CSC}' /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:{AGENT_DIR}\\myatg.exe {AGENT_DIR}\\myatg.cs {AGENT_DIR}\\rdp_validate.cs {AGENT_DIR}\\http_serve.cs {AGENT_DIR}\\service.cs 2>&1 | Out-File {AGENT_DIR}\\build.log
         if (-not (Test-Path {AGENT_DIR}\\myatg.exe)) {{ throw 'myatg compile failed' }}
@@ -139,6 +138,8 @@ def build(base: str = BASE_QCOW2) -> str:
             logger.info("  %s -> %s", name, out.replace("\n", " ")[:120])
             if name == "refresh-trust":
                 gr.refresh_result(out)
+            if name == "qemu-ga" and "False" in out:   # optional (the pool syncs the clock over SSH without it): report, never block the build
+                logger.warning("qemu-ga is not installed in the guest (no virtio-win-guest-tools.exe on D:/E:); the pool will use the SSH clock fallback")
         gr._ssh_ps(ip, "Stop-Computer -Force", 20)
         dl = time.time() + 180
         while time.time() < dl and "shut off" not in gr._virsh("domstate", dom).stdout:

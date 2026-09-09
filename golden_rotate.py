@@ -356,13 +356,12 @@ def build_candidate() -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
+    src, src_copy = snapshot_source(ts)   # may raise (lock wait, missing source): nothing else exists yet
+    depth = 0 if src == MASTER_QCOW2 else chain_length() + 1   # the sidecar is written once the candidate exists (below)
+    logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
     os.close(xfd)
     built = False
-    src, src_copy = snapshot_source(ts)
-    depth = 0 if src == MASTER_QCOW2 else chain_length() + 1
-    _write_small(str(candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
-    logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
         assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2",
                      overlay], 120).returncode == 0, "overlay create failed"
@@ -395,6 +394,7 @@ def build_candidate() -> str:
         logger.info("flattening overlay -> candidate %s", candidate)
         assert _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], 900).returncode == 0
         _run(["sudo", "chmod", "644", candidate])
+        _write_small(str(candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
         built = True
     finally:
         _virsh("destroy", dom)
@@ -472,7 +472,6 @@ def rotate(candidate: str) -> None:
         except OSError as e:
             raise NothingPublished(f"another rotation is in progress (lock {ROTATE_LOCK} held); golden NOT promoted (nothing published)") from e
         _rotate_locked(candidate)
-        _record_chain(candidate)
     finally:
         os.close(lock_fd)   # releases the lock with the descriptor
 
@@ -481,6 +480,7 @@ def _rotate_locked(candidate: str) -> None:
     _ensure_backup_dir()
     try:
         _promote(candidate)
+        _record_chain(candidate)   # BEFORE the prune: it could reclaim an old candidate together with the sidecar this reads
     finally:
         _prune_backups()   # on EVERY outcome
 
@@ -635,8 +635,8 @@ def _prune_backups() -> None:
         if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and c.stat().st_mtime < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
-    for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone
-        if not Path(str(sc)[:-len(".chain")]).exists():
+    for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)
+        if not Path(str(sc)[:-len(".chain")]).exists() and sc.stat().st_mtime < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
