@@ -53,13 +53,18 @@ class HostRunner:
         """
         input_path = Path(input_path)
         output_dir = Path(output_dir)
-        run_detonation(
+        envelope = output_dir / "metadata.json"
+        if envelope.exists():   # a populated outdir handed back the PREVIOUS run's envelope when this run wrote nothing
+            raise FileExistsError(f"{envelope} already exists: validate_to_dir needs an output dir without an envelope")
+        rc = run_detonation(
             self.engine,
             input_path=input_path,
             output_dir=output_dir,
             limits=self.limits,
         )
-        return json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+        if rc or not envelope.exists():   # 1 = the envelope could not be written (logged CRITICAL by the harness): there is no verdict to read
+            raise RuntimeError(f"run_detonation returned {rc} and left no envelope at {envelope}")
+        return json.loads(envelope.read_text(encoding="utf-8"))
 
     def validate(self, input_path: str | Path) -> dict:
         """Validate a file in a throwaway output dir; return the sealed envelope."""
@@ -72,16 +77,26 @@ class HostRunner:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if not argv:
+    if len(argv) != 1:
         print("usage: python -m winval_blastbox.host_runner <file>", file=sys.stderr)
         return 2
+    sample = Path(argv[0])
+    if not sample.is_file():   # a usage error, said in one line and exit 2: exit 1 is the VM tier's failure (an engine_error envelope)
+        print(f"host_runner: {sample} is not a file", file=sys.stderr)
+        return 2
 
-    runner = HostRunner()
+    try:
+        runner = HostRunner()
+    except ValueError as exc:   # Limits.from_env() refuses a bad BLASTBOX_* value loudly: one line, not a traceback
+        print(f"host_runner: {exc}", file=sys.stderr)
+        return 2
 
-    # Tear the VM pool down cleanly on Ctrl-C / SIGTERM.
+    # Tear the VM pool down cleanly on Ctrl-C / SIGTERM. A signal before a verdict is NOT a success: exit 143
+    # (128+SIGTERM), never the 0 that let `host_runner.py sample.exe && ...` carry on with an empty stdout.
     def _term(*_: object) -> None:
         runner.shutdown()
-        sys.exit(0)
+        print("host_runner: stopped by SIGTERM before a verdict", file=sys.stderr)
+        sys.exit(143)
 
     signal.signal(signal.SIGTERM, _term)
     try:

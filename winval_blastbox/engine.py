@@ -140,6 +140,13 @@ def _summary(verdict: dict) -> Record:
         "chain_len": len(chain.get("chain") or []),
         "chain_explicit_distrust": chain.get("explicit_distrust"),
         "chain_valid_at_sign_time": chain.get("valid_at_sign_time"),
+        "chain_chains_to_trusted_root": chain.get("chains_to_trusted_root"),
+        "chain_builds": chain.get("chain_builds"),
+        "chain_revoked": chain.get("revoked"),
+        # myatg reports 'unknown' here WITHOUT downgrading status when the responders were unreachable: an hour of
+        # dead egress made Records byte-identical to fully checked Valid ones until this was indexed
+        "chain_revocation_checked": chain.get("revocation_checked"),
+        "error": verdict.get("error"),
         # timestamper
         "timestamper_subject_cn": tsa.get("subject_cn"),
         "timestamper_tbs_sha256": tsa.get("tbs_sha256"),

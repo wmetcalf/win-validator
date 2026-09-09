@@ -461,7 +461,11 @@ class PoolManager:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    pm = PoolManager()
+    try:
+        pm = PoolManager()
+    except ValueError as exc:   # HostRunner's Limits.from_env() refuses a bad BLASTBOX_* value in winval.env loudly: one journal line, not a traceback per restart
+        logger.error("the pool-manager cannot start: %s", exc)
+        return 1
     signal.signal(signal.SIGTERM, pm.stop)
     signal.signal(signal.SIGINT, pm.stop)
     return pm.run()
