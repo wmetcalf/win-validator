@@ -665,6 +665,14 @@ def validate_golden(qcow2: str) -> bool:
     is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
     from winval_blastbox.vm_pool import agent_validate, _sync_clock
+    c = Path(qcow2)
+    if c.is_symlink() or not c.is_file():   # a mistyped path was 'did not boot a healthy worker' — the verdict a corrupt golden gives — after a 240 s wait
+        logger.error("GATE FAIL: candidate %s is not a regular file (no such file, or a symlink/directory); nothing was booted", qcow2)
+        return False
+    for label, sample in (("GOLDEN_BENIGN_SAMPLE", BENIGN), ("GOLDEN_REVOKED_SAMPLE", REVOKED)):
+        if sample and not Path(sample).is_file():   # every other entry point refuses this in the preflight; `validate` runs none and paid a full boot to find out
+            logger.error("GATE FAIL: %s=%r is not a file: the gate cannot run; nothing was booted", label, sample)
+            return False
     try:   # the spec too: a knob blastbox refuses is a GATE FAIL by name, never a traceback (the preflight refuses it earlier still)
         rt = _gate_spec(qcow2).runtime(on_ready=_sync_clock)
         slot = rt.spawn_ready(timeout_s=240)
@@ -1170,6 +1178,11 @@ def _main(cmd: str, argv: list[str]) -> int:
         return 0 if validate_golden(argv[1]) else 1
     if cmd == "rotate" and len(argv) > 1:
         c = Path(argv[1]); g = Path(GOLDEN_BASE_DISK)
+        if c.is_symlink() or not c.is_file():
+            # BEFORE the preflight: it takes the lock and PRUNES surplus backups keeping only `keep`, and a mistyped
+            # candidate matched no file — the oldest rollback backup was deleted and the refusal then said 'no backup
+            # taken'. rotate() has the same guard, but it ran after the preflight had already pruned.
+            raise NothingPublished(f"candidate {argv[1]} is not a regular file; golden NOT promoted (nothing published, no backup taken, nothing pruned)")
         # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
         # the larger of the candidate and the golden the promotion backs up, with the candidate's own
         # allocation already spent
