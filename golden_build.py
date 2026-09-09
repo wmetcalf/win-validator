@@ -143,6 +143,9 @@ def build(base: str = BASE_QCOW2) -> str:
                 break
             time.sleep(5)
         assert ip, "guest never reachable"
+        # the packer image has no agent directory: scp cannot create a parent, so the first upload
+        # of a build from the master failed before any step ran
+        gr._ssh_ps(ip, f"New-Item -Force -ItemType Directory '{AGENT_DIR}' | Out-Null", 60, check=True)
         for src, dst in STAGE:
             if Path(src).exists():
                 r = gr._run(["scp", "-i", gr.SSH_KEY, "-o", "StrictHostKeyChecking=no",

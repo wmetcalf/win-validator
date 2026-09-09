@@ -104,7 +104,8 @@ def rebake_source() -> str:
     """The promoted golden, unless the operator forced the master or the chain is due for a
     reset: RefreshTrust only ever ADDS to the Disallowed store, so a golden rebaked from itself
     keeps every kill-list entry Microsoft later withdrew — every GOLDEN_MAX_CHAIN cycles the
-    rebake starts from the pristine master again. Never a path that does not exist: a host
+    rebake starts from the pristine master again (as a FULL bake, see refresh_and_rotate: the
+    master is the packer image and carries no agent). Never a path that does not exist: a host
     provisioned by golden_build has no master, and the chain reset must not latch rotation off."""
     golden = Path(GOLDEN_BASE_DISK).exists()
     master = Path(MASTER_QCOW2).exists()
@@ -754,6 +755,14 @@ def refresh_and_rotate() -> int:
     """The full gated cycle: build a refreshed candidate, validate it, and ONLY promote if it passes.
     A failing gate keeps the current golden and returns non-zero (surfaced to the cron/alert)."""
     rotation_preflight()   # root, lock, space — BEFORE the hour-long build and gate
+    if rebake_source() == MASTER_QCOW2:
+        # the master is the PACKER image (the bring-up installs it as GOLDEN_MASTER): no agent, no
+        # task, no ACLs — a trust refresh alone would fail at C:\agent\myatg.exe. The chain reset
+        # (and GOLDEN_REBAKE_FROM=master) is therefore the full reproducible bake: install + compile
+        # + refresh + gate + promote, which records depth 0 and restarts the chain.
+        logger.info("rebake from the master %s: running the full golden_build bake (the master carries no agent)", MASTER_QCOW2)
+        import golden_build   # sibling module; imported lazily (it imports this one)
+        return golden_build.build_and_promote(MASTER_QCOW2)
     candidate = build_candidate()
     if not validate_golden(candidate):
         logger.error("REBAKE REJECTED: keeping current golden %s; candidate %s discarded",

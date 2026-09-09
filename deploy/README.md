@@ -55,7 +55,7 @@ fi
 # encoded form existed, or the URL was edited). Postgres keeps whatever password its volume was
 # initialised with: to change the password for real, `down -v` first, then edit the URL.
 WANT_URLENC=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); print(quote(unquote(u.password), safe="")) if u.password else None')
-if [ "$(sudo sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' /etc/winval/compose.env 2>/dev/null)" != "$WANT_URLENC" ]; then
+if ! sudo test -f /etc/winval/compose.env || [ "$(sudo sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' /etc/winval/compose.env)" != "$WANT_URLENC" ]; then   # a MISSING compose.env is derived too (an undecodable URL compares empty to empty otherwise, and the guidance below never prints)
   # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
   # Postgres must be initialised with; both clients decode it the same way)
   # two forms: the literal password (Postgres initialises with it; written as a JSON/double-quoted
