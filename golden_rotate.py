@@ -178,7 +178,10 @@ _UNRECORDED_SIDECARS: set = set()   # candidate sidecars whose depth could NOT b
 
 def _rm_candidate(candidate: str) -> None:
     sidecar = str(candidate_depth_file(candidate))
-    if sidecar in _UNRECORDED_SIDECARS:   # the only surviving record of the promoted golden's depth: chain_length() reads it
+    # the sidecar is the promoted golden's ONLY record of depth whenever the candidate is already gone
+    # (renamed into place) and the golden's record is absent — the record write failed (_record_chain),
+    # or _promote raised after the disk rename before the record was ever attempted: chain_length() reads it
+    if sidecar in _UNRECORDED_SIDECARS or (not os.path.lexists(candidate) and not _chain_file().exists()):
         _run(["sudo", "rm", "-f", candidate])
         return
     _run(["sudo", "rm", "-f", candidate, sidecar])
