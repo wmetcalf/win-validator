@@ -279,7 +279,7 @@ def _existing_ancestor(path: str) -> Path:
     return p
 
 
-def rotation_preflight(estimate_bytes: int | None = None) -> None:
+def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False) -> None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
     samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
@@ -343,7 +343,8 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     # peak per filesystem: candidate + backup in BACKUP_DIR, one temporary beside each base
     # in the backup dir the peak is 2x: source copy + candidate during the bake (the copy is gone
     # before promotion), then candidate + backup during promotion
-    demands = [(str(BACKUP_DIR), 2 * need, "candidate + (rebake-source copy, then backup) in the backup dir"),
+    # a retry of a candidate that already EXISTS in the backup dir needs only the backup there
+    demands = [(str(BACKUP_DIR), (1 if candidate_built else 2) * need, "backup in the backup dir" if candidate_built else "candidate + (rebake-source copy, then backup) in the backup dir"),
                (str(Path(GOLDEN_BASE_DISK).parent), need, "temporary beside the disk base"),
                (str(Path(GOLDEN_BASE).parent), need, "temporary beside the RAM base")]
     per_fs: dict = {}
@@ -806,8 +807,11 @@ def _main(cmd: str, argv: list[str]) -> int:
     if cmd == "validate" and len(argv) > 1:
         return 0 if validate_golden(argv[1]) else 1
     if cmd == "rotate" and len(argv) > 1:
-        c = Path(argv[1])
-        rotation_preflight(estimate_bytes=c.stat().st_size if c.is_file() else None)   # the retry is a promoting entry point too: root, lock, space, a writable chain record
+        c = Path(argv[1]); g = Path(GOLDEN_BASE_DISK)
+        # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
+        # the larger of the candidate and the golden the promotion backs up, with the candidate's own
+        # allocation already spent
+        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True)
         rotate(argv[1])
         restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0
