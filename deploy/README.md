@@ -117,7 +117,7 @@ temporal-trust ladder (workers sync real time + do live CRL on restore, so they 
 against *now*); the point is fail-safe rebakes:
 
 ```
-build_candidate()  promoted golden (the master before any promotion; GOLDEN_REBAKE_FROM=master to force it) --overlay clone--> refresh trust state (myatg --refresh: disallowed
+build_candidate()  private copy of the promoted golden (the master before any promotion, and every GOLDEN_MAX_CHAIN cycles) --overlay clone--> refresh trust state (myatg --refresh: disallowed
                    kill-list + CRL cache + roots/CTL) --> flatten --> candidate.qcow2
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager

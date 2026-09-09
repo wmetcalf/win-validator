@@ -64,10 +64,53 @@ MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserve
 REBAKE_FROM = os.environ.get("GOLDEN_REBAKE_FROM", "golden")
 
 
+MAX_CHAIN = int(os.environ.get("GOLDEN_MAX_CHAIN", "4"))   # golden-based rebakes before one from the master
+
+
+def _chain_file() -> Path:
+    return Path(GOLDEN_BASE_DISK + ".chain")
+
+
+def chain_length() -> int:
+    try:
+        return int(_chain_file().read_text().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
 def rebake_source() -> str:
-    if REBAKE_FROM != "master" and Path(GOLDEN_BASE_DISK).exists():
+    """The promoted golden, unless the operator forced the master or the chain is due for a
+    reset: RefreshTrust only ever ADDS to the Disallowed store, so a golden rebaked from itself
+    keeps every kill-list entry Microsoft later withdrew — every GOLDEN_MAX_CHAIN cycles the
+    rebake starts from the pristine master again."""
+    if REBAKE_FROM != "master" and Path(GOLDEN_BASE_DISK).exists() and chain_length() < MAX_CHAIN:
         return GOLDEN_BASE_DISK
     return MASTER_QCOW2
+
+
+def snapshot_source(ts: str) -> tuple[str, str]:
+    """A PRIVATE copy of the rebake source in the backup dir, taken under the rotation lock.
+    qcow2 records its backing file BY PATH: an overlay off the live GOLDEN_BASE_DISK would be
+    re-parented to whatever a concurrent promotion renames into that path (the retry command
+    or build-and-promote can run while the timer's rebake is in flight), and the flattened
+    candidate would silently mix two goldens. A copy nothing renames keeps the invariant the
+    frozen master used to provide. Returns (source_used, private_copy)."""
+    import fcntl
+    src = rebake_source()
+    _ensure_backup_dir()
+    copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}.qcow2")
+    fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)   # brief: a rotation in flight finishes publishing first
+        want = Path(src).stat().st_size
+        r = _run(["sudo", "cp", "--reflink=auto", src, copy], 3600)
+        got = Path(copy).stat().st_size if Path(copy).exists() else -1
+        if r.returncode != 0 or got != want:
+            _run(["sudo", "rm", "-f", copy])
+            raise RuntimeError(f"snapshot of the rebake source {src} -> {copy} failed (rc={r.returncode}, {got} of {want} bytes)")
+    finally:
+        os.close(fd)
+    return src, copy
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
 # would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
@@ -204,7 +247,7 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
         raise NothingPublished(f"cannot size the run: neither {GOLDEN_BASE_DISK} nor {MASTER_QCOW2} exists (set GOLDEN_MASTER, or pass the base's size)")
     need = estimate_bytes
     # peak per filesystem: candidate + backup in BACKUP_DIR, one temporary beside each base
-    demands = [(str(BACKUP_DIR), 2 * need, "candidate + backup in the backup dir"),
+    demands = [(str(BACKUP_DIR), 3 * need, "rebake-source copy + candidate + backup in the backup dir"),
                (str(Path(GOLDEN_BASE_DISK).parent), need, "temporary beside the disk base"),
                (str(Path(GOLDEN_BASE).parent), need, "temporary beside the RAM base")]
     per_fs: dict = {}
@@ -246,10 +289,12 @@ def _ip_for_mac(mac: str) -> str | None:
 
 
 def build_candidate() -> str:
-    """Clone the master, boot it, refresh the trust state in-guest, flatten -> a candidate qcow2.
+    """Clone the rebake source (a private copy of the promoted golden, or of the master), boot
+    it, refresh the trust state in-guest, flatten -> a candidate qcow2.
 
-    The refresh runs on an OVERLAY off the master so the master stays pristine; the flattened
-    candidate carries master + the fresh disallowed-list / CRL cache / roots."""
+    The refresh runs on an OVERLAY off that private copy, so neither the live golden nor the
+    master is ever written or depended on by path; the flattened candidate carries the source
+    + the fresh disallowed-list / CRL cache / roots."""
     ts = _run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
     dom = f"golden-cand-{ts}"
     overlay = f"/dev/shm/{dom}.qcow2"
@@ -258,18 +303,18 @@ def build_candidate() -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
-    logger.info("cloning master -> overlay %s", overlay)
     xml_path = f"/tmp/{dom}.xml"
     built = False
+    src, src_copy = snapshot_source(ts)
+    _LAST_SOURCE["src"] = src
+    logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
-        src = rebake_source()
-        logger.info("rebake source: %s", src)
-        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src, "-F", "qcow2",
+        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2",
                      overlay], 120).returncode == 0, "overlay create failed"
         _run(["sudo", "chmod", "644", overlay])
         # define+boot the overlay domain (reuse the runtime's XML generator for a real worker shape)
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
-        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=src))
+        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=src_copy))
         Path(xml_path).write_text(rt._domain_xml(dom, overlay))
         assert _virsh("define", xml_path).returncode == 0, "define failed"
         assert _virsh("start", dom).returncode == 0, "start failed"
@@ -299,7 +344,7 @@ def build_candidate() -> str:
     finally:
         _virsh("destroy", dom)
         _virsh("undefine", dom, "--snapshots-metadata")
-        _run(["sudo", "rm", "-f", overlay, xml_path])
+        _run(["sudo", "rm", "-f", overlay, xml_path, src_copy])   # the private source copy is flattened into the candidate
         if not built:
             # a convert that failed or timed out leaves a full-size partial candidate in the
             # backup dir; _prune_backups deliberately never touches candidates, so nothing else
@@ -531,7 +576,7 @@ def _prune_backups() -> None:
     # a candidate kept for a retry (NothingPublished) is reclaimed after CANDIDATE_KEEP_DAYS
     cutoff = time.time() - CANDIDATE_KEEP_DAYS * 86400
     for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
-        if (".candidate-" in c.name or ".built-" in c.name) and c.stat().st_mtime < cutoff:
+        if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and c.stat().st_mtime < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
@@ -539,6 +584,18 @@ def _prune_backups() -> None:
     for b in excess:
         logger.info("pruning old backup %s", b.name)
         _run(["sudo", "rm", "-f", str(b)])
+
+
+def _record_chain() -> None:
+    """After a promotion: count golden-based rebakes since the last master-based one."""
+    n = 0 if _LAST_SOURCE.get("src") == MASTER_QCOW2 else chain_length() + 1
+    try:
+        _run(["sudo", "sh", "-c", f"printf %s {n} > {_chain_file()}"])
+    except Exception:   # bookkeeping only
+        pass
+
+
+_LAST_SOURCE: dict = {}
 
 
 def restart_pool() -> bool:
@@ -552,8 +609,12 @@ def restart_pool() -> bool:
         logger.warning("GOLDEN_RESTART_SERVICE is empty: the promoted golden is NOT in service until winval-pool-manager is restarted")
         return False
     logger.info("restarting %s to warm off the refreshed golden", svc)
-    _run(["sudo", "systemctl", "reset-failed", svc])   # a start-limit-latched unit refuses a plain restart
-    r = _run(["sudo", "systemctl", "restart", svc], 3600)
+    state = _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip()
+    if state == "failed":   # crashed or start-limit-latched: clear the latch and bring it back
+        _run(["sudo", "systemctl", "reset-failed", svc])
+        r = _run(["sudo", "systemctl", "restart", svc], 3600)
+    else:   # running -> restart; deliberately stopped -> stays stopped (try-restart)
+        r = _run(["sudo", "systemctl", "try-restart", svc], 3600)
     if r.returncode != 0:
         logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
         return False
@@ -581,6 +642,7 @@ def refresh_and_rotate() -> int:
         _run(["sudo", "rm", "-f", candidate])
         raise
     _run(["sudo", "rm", "-f", candidate])
+    _record_chain()
     if restart_pool():
         logger.info("REBAKE PROMOTED: golden refreshed and in service; %d backup(s) retained", KEEP_N)
     else:
