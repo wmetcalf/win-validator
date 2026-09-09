@@ -84,7 +84,7 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
-    Warm --> Respawn: 2 consecutive agent failures on one worker (the agent did not answer: transport, HTTP, a wedged guest)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved; a sample the agent judged is never worker evidence)
+    Warm --> Respawn: 2 consecutive failures to REACH the agent on one worker (connection refused / unreachable)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved. An agent that answered — an error status, a bad or oversize verdict, a timeout — is the sample's evidence: the worker is snapshot-reverted, never evicted for it)
     Respawn --> Warm
     Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
@@ -129,11 +129,14 @@ With it set, the worker's network is a **class policy, not a host allowlist**: a
 fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
 and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RFC3161 timestamp). So we
 anonymize that beacon, protocol-limit it, and block SSRF/lateral movement. An unreachable responder
-just yields `revocation_checked="unknown"`. **Two hops the policy does not cover on its own:** (1) worker to
-worker on the same libvirt bridge is switched, not routed, so the FORWARD-chain rules never see it unless the
-host has `net.bridge.bridge-nf-call-iptables=1` (`br_netfilter` loaded) — set it, or a compromised worker
-reaches its siblings' agent port 8765, which the golden's firewall rule opens to any source; (2) the host's own
-services on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound, not egress — see
+just yields `revocation_checked="unknown"`. **Two hops to know about:** (1) worker to worker on the same
+libvirt bridge is switched, not routed: the FORWARD rules see it only with `net.bridge.bridge-nf-call-iptables=1`
+(`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist) drops it —
+the documented default `direct` exit with block_internal off ends in ACCEPT, so a compromised worker reaches
+its siblings' agent port 8765, which the golden's firewall rule opens to any source; (2) the host's own
+listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
+blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
+`block_internal` covers the docker-published 8099; with NO exit driver there is no chain at all — see
 `deploy/README.md`.
 
 ## Repo layout

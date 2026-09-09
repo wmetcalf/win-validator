@@ -18,8 +18,10 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -50,6 +52,40 @@ _PER_REQUEST_PARAMS = ("rev", "scripts")
 AGENT_RESPONSE_MAX = env_int("WINVAL_AGENT_RESPONSE_MB", 64, floor=1) * (1 << 20)
 
 
+def read_sample(path: str) -> bytes:
+    """The sample's bytes, read on the HOST before any worker is claimed: a missing file or a read error is
+    the caller's problem, never evidence about a worker (it was read inside the try that files worker faults)."""
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+try:
+    from blastbox.host.pool import release_kwargs   # the subset of dirty/fault THIS pool's release accepts (blastbox >= 0.1.33)
+except ImportError:   # an older blastbox: release() takes no evidence; say so once rather than swap the real exception for an ImportError in the error path
+    def release_kwargs(fn, *, dirty: bool, fault: str | None = None, fault_stage: str | None = None) -> dict:   # type: ignore[misc]
+        return {}
+    logger.warning("this blastbox has no release_kwargs: validation failures cannot be filed as worker/job evidence (install blastbox >= 0.1.33)")
+
+
+def fault_of(exc: BaseException) -> str:
+    """Whose evidence a failed validation is, for blastbox's release(dirty=True, fault=...).
+    'worker': the agent could not be reached at all (connection refused, host unreachable, a connect timeout)
+    — nothing about the sample explains that, and two in a row evict the worker.
+    'job': the agent ANSWERED — an HTTP error status, an oversize or unparsable verdict, or a read timeout
+    (a sample can make myatg slow through the AIA/CRL/OCSP URLs it embeds) — evidence about the sample:
+    the worker is snapshot-reverted (dirty) but never evicted for it. Filing these as worker faults let
+    four crafted samples through the unauthenticated ingress empty the warm pool every ten minutes."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return "job"
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "job"
+    if isinstance(exc, urllib.error.URLError):   # no HTTP answer at all: refused, unreachable, a connect timeout wrapped as URLError
+        return "job" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "worker"
+    if isinstance(exc, OSError):
+        return "worker"
+    return "job"   # RuntimeError (oversize verdict), ValueError (not JSON): the agent answered
+
+
 def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
                    params: dict | None = None) -> dict:
     """Validate a file via the myatg guest agent's HTTP API:
@@ -59,8 +95,7 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     ``params`` carries per-request myatg overrides (``rev`` / ``scripts``); myatg validates the values
     itself and falls back to its startup defaults on an unknown one."""
     host, port = endpoint
-    with open(path, "rb") as fh:
-        data = fh.read()
+    data = read_sample(path)
     q = {"name": os.path.basename(path)}
     for k in _PER_REQUEST_PARAMS:
         if params and params.get(k):
@@ -289,17 +324,20 @@ class WarmVmPool:
         return left
 
     def validate(self, path: str, params: dict | None = None) -> dict:
+        read_sample(path)   # a host-side read error is answered before a worker is claimed (see read_sample)
         slot = self._pool.claim(timeout_s=self._claim_timeout_s)
         if slot is None:
             raise RuntimeError("no warm VM worker available")
         try:
             verdict = agent_validate(slot.endpoint, path, params=params)  # type: ignore[attr-defined]
-        except BaseException:
-            # the AGENT did not answer (transport, HTTP, a wedged guest): evidence about the WORKER. A bare
-            # release counted every such failure as proof of health — it reset the slot's streak and its
-            # siblings' — so a wedged guest was never evicted and served up to 24 more samples between reverts
-            from blastbox.host.pool import release_kwargs   # the subset of dirty/fault THIS pool's release accepts
-            self._pool.release(slot, **release_kwargs(self._pool.release, dirty=True, fault="worker"))
+        except (KeyboardInterrupt, SystemExit):
+            self._pool.release(slot, **release_kwargs(self._pool.release, dirty=True))   # the slot ran something: revert it; nobody's evidence
+            raise
+        except Exception as exc:
+            # a bare release counted every failure as proof of health (it reset the slot's streak and its siblings'),
+            # so a wedged guest was never evicted; filing every failure as a WORKER fault let crafted samples evict
+            # healthy workers. fault_of() says whose evidence it is; either way the worker is reverted before reuse.
+            self._pool.release(slot, **release_kwargs(self._pool.release, dirty=True, fault=fault_of(exc)))
             raise
         self._pool.release(slot)
         return verdict

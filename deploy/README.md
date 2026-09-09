@@ -139,12 +139,15 @@ UI + API at <http://localhost:8099/>.
   worker still fails closed on a tunnel drop regardless of the ingress — once `AUTHENTICODE_EXIT`
   names an exit driver. The example env ships with every egress line commented out: a pool-manager
   started that way gives its workers the libvirt network's plain NAT. Set it before exposing the ingress.
-  Two things the policy does not do even when set: worker-to-worker traffic on the bridge is switched, not
-  routed, and only meets the FORWARD rules with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe
-  br_netfilter`; without it a worker reaches a sibling's agent port 8765, which the golden opens to any source);
-  and the host's own listeners on the bridge address stay reachable inbound — the ingress publishes 8099 on all
-  interfaces with no authentication, so a worker can read `/jobs` or fill the spool unless the host firewall
-  scopes 8099 to the clients that need it. Postgres is bound to 127.0.0.1 and is not reachable that way.
+  Without an exit driver nothing governs a worker's traffic to the host either: the ingress publishes 8099 on
+  all interfaces with no authentication, so a worker can read `/jobs` or fill the spool (Postgres is bound to
+  127.0.0.1). With `AUTHENTICODE_EXIT` set, blastbox installs a per-worker INPUT chain on the host that drops
+  host-destined traffic except established, DHCP and gated DNS, and `AUTHENTICODE_BLOCK_INTERNAL=1` drops the
+  docker-published 8099 in FORWARD. Worker-to-worker traffic on the bridge is switched, not routed: it meets the
+  FORWARD rules only with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe br_netfilter`), and is
+  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1` or a port allowlist — the example's `direct` exit with
+  block_internal commented out ends in ACCEPT, so a worker reaches a sibling's agent port 8765, which the golden
+  opens to any source. Set both when workers share a bridge.
 - **`/cert/{tbs}` on the ingress** searches the newest 2000 scans of its store and says so in the answer's
   `scanned` / `truncated` fields (the orchestrator's `/cert` has no such bound).
 
