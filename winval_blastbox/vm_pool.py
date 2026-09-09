@@ -43,6 +43,11 @@ def pool_size() -> int:
 # startup — so they are NOT here; a per-job gv/tier can't be applied and the engine says so.
 _PER_REQUEST_PARAMS = ("rev", "scripts")
 
+# the guest agent's verdict is read in full and then written twice (the artifact and the envelope's
+# authenticode_json field) and copied once more into JOB_ROOT by the pool-manager: a VM that answers
+# with gigabytes (a myatg fault on a crafted sample) would fill the host. Bounded here, at the source.
+AGENT_RESPONSE_MAX = env_int("WINVAL_AGENT_RESPONSE_MB", 64, floor=1) * (1 << 20)
+
 
 def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
                    params: dict | None = None) -> dict:
@@ -63,7 +68,11 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     req = urllib.request.Request(
         url, data=data, method="POST", headers={"Content-Type": "application/octet-stream"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        body = r.read(AGENT_RESPONSE_MAX + 1)
+    if len(body) > AGENT_RESPONSE_MAX:
+        raise RuntimeError(f"the guest agent's verdict exceeds {AGENT_RESPONSE_MAX} bytes (WINVAL_AGENT_RESPONSE_MB); "
+                           "refusing to publish it")
+    return json.loads(body)
 
 
 

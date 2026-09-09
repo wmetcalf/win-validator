@@ -15,7 +15,7 @@
 #     # Postgres + ingress (the unit claims jobs from that Postgres): mint the DB password once (a hex one needs no encoding —
 #     # deploy/README.md derives compose.env for any other), write compose.env from it, then bring the compose up
 #     sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env || echo "BLASTBOX_DATABASE_URL=postgresql://winval:$(openssl rand -hex 16)@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-#     PW=$(sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([0-9a-f]*\)@.*|\1|p' /etc/winval/winval.env | tail -1)
+#     PW=$(sudo sed -n 's|^BLASTBOX_DATABASE_URL=postgresql://winval:\([0-9a-f]\{1,\}\)@[^@]*$|\1|p' /etc/winval/winval.env | tail -1)
 #     if [ -n "$PW" ]; then printf 'WINVAL_PG_PASSWORD="%s"\nWINVAL_PG_PASSWORD_URLENC=%s\n' "$PW" "$PW" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env; else echo "non-hex password: derive compose.env per deploy/README.md before the compose up" >&2; fi   # (never `exit` in a pasted recipe: it would close the shell)
 #     sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
 #     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/ && sudo systemctl daemon-reload

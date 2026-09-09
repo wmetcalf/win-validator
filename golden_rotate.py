@@ -336,6 +336,17 @@ class NothingPublished(RuntimeError):
     rename): the candidate is still good and `golden_rotate.py rotate <candidate>` can retry it."""
 
 
+class SplitState(RuntimeError):
+    """The disk twin was published but the RAM rename failed AND the automatic rollback failed:
+    ``backup`` is the copy of the previous golden the message tells the operator to restore from,
+    which the prune that runs on every outcome must therefore keep (GOLDEN_KEEP_N=0 would have
+    removed it in the same breath as naming it)."""
+
+    def __init__(self, msg: str, backup: str | None = None) -> None:
+        super().__init__(msg)
+        self.backup = backup
+
+
 def refresh_ps(gv: str = "", warm: str = "") -> str:
     """The in-guest trust refresh as PowerShell that FAILS HARD (a non-zero myatg exit, JSON that
     does not parse) and then prints myatg's JSON itself, for refresh_result() to judge — never a
@@ -681,11 +692,15 @@ def rotate(candidate: str) -> None:
 
 def _rotate_locked(candidate: str) -> None:
     _ensure_backup_dir()
+    needed: str | None = None
     try:
         _promote(candidate)
         _record_chain(candidate)   # BEFORE the prune: it could reclaim an old candidate together with the sidecar this reads
+    except SplitState as e:
+        needed = e.backup   # the recovery copy the message names: never pruned, whatever GOLDEN_KEEP_N says
+        raise
     finally:
-        _prune_backups(candidate)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
+        _prune_backups(candidate, also_keep=needed)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
 
 
 def _backup_current() -> str | None:
@@ -804,6 +819,7 @@ def _promote(candidate: str) -> None:
     # a rollback step that itself fails (mktemp ENOSPC, a store gone read-only) must never
     # replace this diagnostic with "nothing published".
     how = "no backup exists to roll back from (nothing was backed up: no golden was on disk before)"
+    intact: str | None = None   # the backup a FAILED rollback leaves for the operator
     if bak and Path(bak).exists():
         try:
             rbt = _mktemp(GOLDEN_BASE_DISK)
@@ -824,14 +840,16 @@ def _promote(candidate: str) -> None:
         except RuntimeError as e:
             if "ROLLED BACK" in str(e):
                 raise
+            intact = bak
             how = (f"the automatic rollback from {bak} FAILED ({e}; the backup itself is intact) — "
                    f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
         except Exception as e:  # anything unexpected in the rollback path: still report the split state
+            intact = bak
             how = (f"the automatic rollback from {bak} FAILED ({type(e).__name__}: {e}; the backup itself is intact) — "
                    f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
-    raise RuntimeError(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
-                       f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden; {how}. "
-                       f"Restart winval-pool-manager after clearing /dev/shm to enact the new golden instead.")
+    raise SplitState(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
+                     f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden; {how}. "
+                     f"Restart winval-pool-manager after clearing /dev/shm to enact the new golden instead.", backup=intact)
 
 
 _BACKUP_NAME = re.compile(r"^golden-base\.\d{8}-\d{6}\.qcow2$")
@@ -844,10 +862,13 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
-def _prune_backups(keep: str | None = None) -> None:
+def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> None:
     """``keep``: a candidate this run is about to promote (the retry CLI's argument) — never
-    reclaimed here however old it is, nor its .chain sidecar."""
+    reclaimed here however old it is, nor its .chain sidecar. ``also_keep``: the backup a split
+    state names as the operator's recovery source (SplitState.backup) — kept whatever KEEP_N is."""
     keep_paths = {str(Path(keep).resolve()), str(Path(keep).resolve()) + ".chain"} if keep else set()   # resolved: a relative retry argument must still match the glob's absolute paths
+    if also_keep:
+        keep_paths.add(str(Path(also_keep).resolve()))
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one

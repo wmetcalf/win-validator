@@ -88,7 +88,9 @@ def main(argv: list[str] | None = None) -> int:
         env = runner.validate(argv[0])
         json.dump(env, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
+        # a sealed engine_error envelope (VM/transport failure) is a FAILURE, as the orchestrator and the
+        # pool-manager already treat it: `host_runner.py sample.exe && ...` must not carry on as if validated
+        return 1 if env.get("status") == "engine_error" else 0
     finally:
         runner.shutdown()
 
