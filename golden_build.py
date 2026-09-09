@@ -126,6 +126,8 @@ def build(base: str = BASE_QCOW2) -> str:
         # a base chosen from inside the backup dir (an old candidate) is the running build's BACKING file
         # for hours; a concurrent rotation's preflight prunes candidates older than CANDIDATE_KEEP_DAYS,
         # and this build holds no lock while it runs — freshen the mtime so the prune leaves it alone
+        if not os.path.isfile(base):   # a typo'd path must not be CREATED by the touch (a 0-byte backup-shaped file would join the rollback set)
+            raise SystemExit(f"base {base} does not exist")
         gr._run(["sudo", "touch", os.path.realpath(base)])
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance

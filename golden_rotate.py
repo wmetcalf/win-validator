@@ -103,7 +103,25 @@ MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserve
 REBAKE_FROM = os.environ.get("GOLDEN_REBAKE_FROM", "golden")
 
 
-MAX_CHAIN = int(os.environ.get("GOLDEN_MAX_CHAIN", "4"))   # golden-based rebakes before one from the master
+def _env_int(name: str, default: int, floor: int = 0) -> int:
+    """A GOLDEN_* knob read tolerantly (the same rule as winval_blastbox.knobs.env_int; this script runs
+    standalone): an empty value is the default, a non-numeric one is a warning plus the default — never a
+    bare traceback that ends the rotate oneshot before its first log line — and below `floor` is `floor`."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a whole number: using %d", name, raw, default)
+        return default
+    if n < floor:
+        logger.warning("%s=%r is below %d: using %d", name, raw, floor, floor)
+        return floor
+    return n
+
+
+MAX_CHAIN = _env_int("GOLDEN_MAX_CHAIN", 4, floor=1)   # golden-based rebakes before one from the master
 
 
 def _chain_file() -> Path:
@@ -180,7 +198,7 @@ def rebake_source() -> str:
     raise NothingPublished(f"nothing to rebake from: neither {GOLDEN_BASE_DISK} nor {MASTER_QCOW2} exists")
 
 
-STRANDED_SOURCE_HOURS = int(os.environ.get("GOLDEN_STRANDED_SOURCE_HOURS", "24"))
+STRANDED_SOURCE_HOURS = _env_int("GOLDEN_STRANDED_SOURCE_HOURS", 24, floor=1)
 
 
 def _sweep_stranded_sources() -> None:
@@ -287,9 +305,9 @@ BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/g
 # store that refuses writes (read-only, full) cannot take — and that is the very moment the depth
 # must survive. The root filesystem's state dir takes it; chain_length() reads whichever is newer.
 CHAIN_MIRROR = os.environ.get("GOLDEN_CHAIN_MIRROR", "/var/lib/winval/golden-base.chain")
-KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
-CANDIDATE_KEEP_DAYS = int(os.environ.get("GOLDEN_CANDIDATE_KEEP_DAYS", "7"))
-CONVERT_TIMEOUT_S = int(os.environ.get("GOLDEN_CONVERT_TIMEOUT_S", "3600"))   # the flatten writes a whole image: the same budget as every whole-image copy
+KEEP_N = _env_int("GOLDEN_KEEP_N", 5, floor=0)
+CANDIDATE_KEEP_DAYS = _env_int("GOLDEN_CANDIDATE_KEEP_DAYS", 7, floor=1)
+CONVERT_TIMEOUT_S = _env_int("GOLDEN_CONVERT_TIMEOUT_S", 3600, floor=60)   # the flatten writes a whole image: the same budget as every whole-image copy
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
@@ -617,7 +635,7 @@ def validate_golden(qcow2: str) -> bool:
 # create is a lock any local user can hold forever, blocking every rotation with a message
 # that blames a concurrent run — and with fs.protected_regular root cannot even open it
 ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
-PREFLIGHT_LOCK_WAIT_S = int(os.environ.get("GOLDEN_PREFLIGHT_LOCK_WAIT_S", "1800"))
+PREFLIGHT_LOCK_WAIT_S = _env_int("GOLDEN_PREFLIGHT_LOCK_WAIT_S", 1800, floor=0)
 
 
 def rotate(candidate: str) -> None:
