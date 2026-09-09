@@ -26,8 +26,8 @@ from fastapi.responses import HTMLResponse
 from .knobs import upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
-MAX_BYTES = upload_mb() * 1024 * 1024
-CERT_SCAN_LIMIT = 2000   # /cert/{tbs} searches the newest rows only: it answers "seen in this session's history", not a full-table query   # the pool-manager enforces the same bound on what it copies: set both tiers alike
+MAX_BYTES = upload_mb() * 1024 * 1024   # the pool-manager enforces the same bound on what it copies: set both tiers alike
+CERT_SCAN_LIMIT = 2000   # /cert/{tbs} searches the newest rows only: it answers "seen in the last N scans", and SAYS so (scanned/truncated)
 ENGINE = "authenticode"
 
 _store = build_job_store_from_env()
@@ -107,7 +107,9 @@ def jobs(limit: int = 80) -> dict:
 def cert(tbs_sha256: str) -> dict:
     tbs = tbs_sha256.lower()
     hits = []
+    scanned = 0
     for j in _store.list(limit=CERT_SCAN_LIMIT, newest_first=True):  # bounded: an unauthenticated caller must not make the ingress read the whole table (88 MiB at 10k rows)
+        scanned += 1
         v = _verdict(j)
         certs = []
         s = v.get("signer") or {}
@@ -118,7 +120,8 @@ def cert(tbs_sha256: str) -> dict:
                 certs.append(c["tbs_sha256"].lower())
         if tbs in certs:
             hits.append({"job_id": j.job_id, "filename": j.filename, "status": v.get("status")})
-    return {"tbs_sha256": tbs_sha256, "seen_in": hits}
+    # the bound is part of the answer: an older sighting past the window must not read as "never seen"
+    return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": scanned >= CERT_SCAN_LIMIT}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -227,7 +230,7 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   h+='</table>'; $('#detail').innerHTML=h;}
 async function cert(tbs){const r=await jget('/cert/'+tbs);
   $('#detail').innerHTML=`<h3>cert <span class="mono">${esc(tbs)}</span></h3>
-    <p class="muted">files signed by / chaining to this cert (${r.seen_in.length}):</p>
-    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
+    <p class="muted">files signed by / chaining to this cert in the last ${r.scanned} scans (${r.seen_in.length})${r.truncated?' — older scans not searched':''}:</p>
+    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in the last ${r.scanned} scans</div>'}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""

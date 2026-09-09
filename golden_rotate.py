@@ -549,8 +549,9 @@ def build_candidate(src: str | None = None) -> str:
     logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     built = False
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
-        assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2",
-                     overlay], 120).returncode == 0, "overlay create failed"
+        r = _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2", overlay], 120)
+        if r.returncode != 0:   # the nightly path's twin of golden_build's check: name the source and qemu-img's own words, as one logged line
+            raise NothingPublished(f"cannot create the rebake overlay on {src_copy} (rc {r.returncode}): {(r.stderr or '').strip()[-400:]}; golden NOT promoted (nothing published)")
         _run(["sudo", "chmod", "644", overlay])
         # define+boot the overlay domain (reuse the runtime's XML generator for a real worker shape)
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime

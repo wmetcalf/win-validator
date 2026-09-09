@@ -19,6 +19,7 @@ Run on the libvirt host (toolz3):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -32,6 +33,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .knobs import upload_mb
+
+_log = logging.getLogger("winval.orchestrator")
 from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
 from .host_runner import HostRunner
@@ -104,12 +107,20 @@ class JobStore:
 
     def _update_engine(self, jid: str, engine: str, value: dict) -> None:
         with self._lock:
+            if jid not in self._jobs:
+                raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid]["engines"][engine] = value
 
     def submit(self, jid: str, path: str, engines: list[str]) -> None:
         self._pool.submit(self._run, jid, path, engines)
 
     def _run(self, jid: str, path: str, engines: list[str]) -> None:
+        try:
+            self._run_inner(jid, path, engines)
+        except KeyError as exc:   # the executor never reads the future: an eviction must be SAID here, or it leaves no trace anywhere
+            _log.warning("job %s: %s; its upload was removed", jid, exc)
+
+    def _run_inner(self, jid: str, path: str, engines: list[str]) -> None:
         try:   # the finally owns the upload temp file whatever happens — a job evicted by the max_jobs cap while queued raised KeyError before the old try, leaking the file
             self._update(jid, status="running")
             for e in engines:
