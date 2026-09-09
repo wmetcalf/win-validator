@@ -47,6 +47,12 @@ class BodyCap:
         except Exception:
             if not (state["over"] and not state["started"]):
                 raise
+        if state["over"]:
+            # the multipart parser's spool for the part in flight (a SpooledTemporaryFile, rolled over to /tmp at 1 MiB) is
+            # dropped by the unwind, not closed: the traceback's frame cycle kept it open until a collection happened to run,
+            # and a tmpfs sized for two uploads filled with refused ones. One collection per refusal is cheap; refusals are rare
+            import gc
+            gc.collect()
         if state["over"] and not state["started"] and not state["answered"]:
             state["answered"] = True
             await self._reject(send)
