@@ -433,7 +433,8 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     build entry point passes its own base); with nothing to estimate from, refuse rather than
     pass a full disk. Raises NothingPublished."""
     try:
-        validate_graveyard(GRAVEYARD)   # a static knob: refused before the lock, the prune and the hour-long build
+        validate_graveyard(GRAVEYARD)   # static knobs: refused before the lock, the prune and the hour-long build
+        validate_warm_dir(WARM_DIR)
     except ValueError as exc:
         raise NothingPublished(str(exc)) from exc
     if os.geteuid() != 0:
@@ -934,6 +935,16 @@ def validate_graveyard(path: str) -> None:
                          f"(its directory {d!r} is granted to the agent verbatim in PowerShell); UNC, forward-slash and relative paths are refused")
 
 
+def validate_warm_dir(path: str) -> None:
+    """GOLDEN_WARM_DIR's shape: pasted verbatim into the same PowerShell double-quoted --warm-cache argument (rotate and build),
+    so an absolute drive path with no $, backtick or quote — C:\\corp$us expanded to C:\\corp and warmed nothing, silently.
+    Empty = no warm-up."""
+    if not path:
+        return
+    if not re.match(r"^[A-Za-z]:\\[^\\]", path) or any(c in path for c in "$`\"'"):
+        raise ValueError(f"GOLDEN_WARM_DIR={path!r} must be an absolute Windows drive directory without $ ` or quotes (it is passed verbatim to myatg --warm-cache in PowerShell)")
+
+
 def _proc_start(pid: str) -> str | None:
     """The process's start time (clock ticks since boot, /proc/<pid>/stat field 22): with the pid it names ONE
     process, so a hold is never honoured for a different builder that later got the same number."""
@@ -1084,7 +1095,7 @@ def restart_pool() -> bool:
         _run(["sudo", "systemctl", "reset-failed", svc])
         r = _run(["sudo", "systemctl", "restart", svc], 3600)
     else:   # running -> restart; deliberately stopped -> stays stopped (try-restart)
-        r = _run(["sudo", "systemctl", "try-restart", svc], 3600)
+        r = _run(["sudo", "systemctl", "try-restart", svc], 4500)   # >= the unit's TimeoutStopSec (15 min) + TimeoutStartSec (55 min): a client killed at 60 min reported "NOT in service" about a restart still succeeding
     if r.returncode != 0:
         logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
         return False
@@ -1143,6 +1154,9 @@ def main(argv: list[str]) -> int:
     except SplitState as e:   # the branch's worst outcome must not be the one failure that reaches the journal as a traceback at info
         logger.error("SPLIT STATE: %s", e)
         return 1
+    except RuntimeError as e:   # an in-guest step (_ssh_ps check=True), refresh_result, snapshot_source, the staging upload: one ERROR line, not a traceback at info
+        logger.error("%s", e)
+        return 1
 
 
 def _main(cmd: str, argv: list[str]) -> int:
@@ -1157,8 +1171,11 @@ def _main(cmd: str, argv: list[str]) -> int:
         # allocation already spent
         rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False, gate_samples=False)
         rotate(argv[1])
-        restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
-        return 0
+        if restart_pool():   # the retry path is a promoting entry point too: warm workers ran the old golden
+            logger.info("PROMOTED: golden refreshed and in service")
+            return 0
+        logger.warning("PROMOTED but NOT in service until winval-pool-manager is restarted")
+        return 1
     print(__doc__)
     return 2
 

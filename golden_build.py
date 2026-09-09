@@ -130,6 +130,7 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._run(["sudo", "rm", "-f", overlay])
     try:
         gr.validate_graveyard(GRAVEYARD)   # the NETWORK SERVICE grant follows the knob's directory: the shape is refused before anything is built
+        gr.validate_warm_dir(gr.WARM_DIR)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     base_is_golden = os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK)
@@ -283,6 +284,9 @@ def main(argv: list[str]) -> int:
         return 1
     except gr.SplitState as e:   # the worst outcome must not be the one failure that reaches the journal as a traceback
         logger.error("SPLIT STATE: %s", e)
+        return 1
+    except RuntimeError as e:   # an in-guest step, the staging upload, snapshot_source: one ERROR line, not a traceback at info
+        logger.error("%s", e)
         return 1
 
 
