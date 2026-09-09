@@ -150,6 +150,7 @@ def build(base: str = BASE_QCOW2) -> str:
         gr._run(["sudo", "rm", "-f", overlay, xml])
         if not built:
             gr._run(["sudo", "rm", "-f", candidate])   # a failed/timed-out convert leaves a full-size partial
+    gr._write_small(str(gr.candidate_depth_file(candidate)), "0")   # built from the base: chain depth 0
     return candidate
 
 

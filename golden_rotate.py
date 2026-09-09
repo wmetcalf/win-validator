@@ -82,10 +82,40 @@ def rebake_source() -> str:
     """The promoted golden, unless the operator forced the master or the chain is due for a
     reset: RefreshTrust only ever ADDS to the Disallowed store, so a golden rebaked from itself
     keeps every kill-list entry Microsoft later withdrew — every GOLDEN_MAX_CHAIN cycles the
-    rebake starts from the pristine master again."""
-    if REBAKE_FROM != "master" and Path(GOLDEN_BASE_DISK).exists() and chain_length() < MAX_CHAIN:
+    rebake starts from the pristine master again. Never a path that does not exist: a host
+    provisioned by golden_build has no master, and the chain reset must not latch rotation off."""
+    golden = Path(GOLDEN_BASE_DISK).exists()
+    master = Path(MASTER_QCOW2).exists()
+    want_master = REBAKE_FROM == "master" or chain_length() >= MAX_CHAIN
+    if want_master and master:
+        return MASTER_QCOW2
+    if want_master and golden:
+        logger.warning("a rebake from the master is due (chain %d >= %d) but %s does not exist: rebaking from the golden again",
+                       chain_length(), MAX_CHAIN, MASTER_QCOW2)
         return GOLDEN_BASE_DISK
-    return MASTER_QCOW2
+    if golden:
+        return GOLDEN_BASE_DISK
+    if master:
+        return MASTER_QCOW2
+    raise NothingPublished(f"nothing to rebake from: neither {GOLDEN_BASE_DISK} nor {MASTER_QCOW2} exists")
+
+
+STRANDED_SOURCE_HOURS = int(os.environ.get("GOLDEN_STRANDED_SOURCE_HOURS", "24"))
+
+
+def _sweep_stranded_sources() -> None:
+    """A rebake-source copy has no value once its run ended; one left by a killed run (OOM, a
+    reboot, systemctl stop) is reclaimed here — BEFORE the preflight's space check would refuse
+    every later run because of it — after STRANDED_SOURCE_HOURS (a live rebake is younger)."""
+    cutoff = time.time() - STRANDED_SOURCE_HOURS * 3600
+    for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
+        if c.stat().st_mtime < cutoff:
+            logger.warning("removing stranded rebake-source copy %s (a killed run left it)", c.name)
+            _run(["sudo", "rm", "-f", str(c)])
+
+
+def candidate_depth_file(candidate: str) -> Path:
+    return Path(candidate + ".chain")
 
 
 def snapshot_source(ts: str) -> tuple[str, str]:
@@ -98,10 +128,21 @@ def snapshot_source(ts: str) -> tuple[str, str]:
     import fcntl
     src = rebake_source()
     _ensure_backup_dir()
+    _sweep_stranded_sources()
     copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}.qcow2")
     fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)   # brief: a rotation in flight finishes publishing first
+        # bounded like the preflight's wait (a pool-manager start holds the lock for minutes; a
+        # rotation for hours): never an unbounded block inside a oneshot with no start timeout
+        deadline = time.time() + PREFLIGHT_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if time.time() >= deadline:
+                    raise NothingPublished(f"lock {ROTATE_LOCK} still held after {PREFLIGHT_LOCK_WAIT_S}s while taking the rebake-source copy") from e
+                time.sleep(5)
         want = Path(src).stat().st_size
         r = _run(["sudo", "cp", "--reflink=auto", src, copy], 3600)
         got = Path(copy).stat().st_size if Path(copy).exists() else -1
@@ -247,7 +288,9 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
         raise NothingPublished(f"cannot size the run: neither {GOLDEN_BASE_DISK} nor {MASTER_QCOW2} exists (set GOLDEN_MASTER, or pass the base's size)")
     need = estimate_bytes
     # peak per filesystem: candidate + backup in BACKUP_DIR, one temporary beside each base
-    demands = [(str(BACKUP_DIR), 3 * need, "rebake-source copy + candidate + backup in the backup dir"),
+    # in the backup dir the peak is 2x: source copy + candidate during the bake (the copy is gone
+    # before promotion), then candidate + backup during promotion
+    demands = [(str(BACKUP_DIR), 2 * need, "candidate + (rebake-source copy, then backup) in the backup dir"),
                (str(Path(GOLDEN_BASE_DISK).parent), need, "temporary beside the disk base"),
                (str(Path(GOLDEN_BASE).parent), need, "temporary beside the RAM base")]
     per_fs: dict = {}
@@ -306,7 +349,8 @@ def build_candidate() -> str:
     xml_path = f"/tmp/{dom}.xml"
     built = False
     src, src_copy = snapshot_source(ts)
-    _LAST_SOURCE["src"] = src
+    depth = 0 if src == MASTER_QCOW2 else chain_length() + 1
+    _write_small(str(candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
     logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
         assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2",
@@ -417,6 +461,7 @@ def rotate(candidate: str) -> None:
         except OSError as e:
             raise NothingPublished(f"another rotation is in progress (lock {ROTATE_LOCK} held); golden NOT promoted (nothing published)") from e
         _rotate_locked(candidate)
+        _record_chain(candidate)
     finally:
         os.close(lock_fd)   # releases the lock with the descriptor
 
@@ -586,16 +631,24 @@ def _prune_backups() -> None:
         _run(["sudo", "rm", "-f", str(b)])
 
 
-def _record_chain() -> None:
-    """After a promotion: count golden-based rebakes since the last master-based one."""
-    n = 0 if _LAST_SOURCE.get("src") == MASTER_QCOW2 else chain_length() + 1
+def _write_small(path: str, text: str) -> None:
+    """Root-owned small file next to a root-owned image, written with the arguments QUOTED and
+    the result checked (an unquoted redirect truncated at the first space in the path)."""
+    r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2"', "sh", text, path])
+    if r.returncode != 0:
+        logger.error("could not write %s (rc=%s): %s", path, r.returncode, r.stderr.strip()[-200:])
+
+
+def _record_chain(candidate: str) -> None:
+    """After EVERY promotion (timer, retry CLI, build-and-promote): the golden's chain depth is
+    the promoted candidate's depth — 0 for an image built from the base or the master, its
+    source's depth + 1 for a rebake — read from the sidecar build_candidate/golden_build wrote."""
     try:
-        _run(["sudo", "sh", "-c", f"printf %s {n} > {_chain_file()}"])
-    except Exception:   # bookkeeping only
-        pass
-
-
-_LAST_SOURCE: dict = {}
+        depth = int(candidate_depth_file(candidate).read_text().strip() or "0")
+    except (OSError, ValueError):
+        depth = 0   # an unknown candidate (hand-made) resets the chain, which errs toward a master rebake sooner
+    _write_small(str(_chain_file()), str(depth))
+    _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
 
 
 def restart_pool() -> bool:
@@ -642,7 +695,6 @@ def refresh_and_rotate() -> int:
         _run(["sudo", "rm", "-f", candidate])
         raise
     _run(["sudo", "rm", "-f", candidate])
-    _record_chain()
     if restart_pool():
         logger.info("REBAKE PROMOTED: golden refreshed and in service; %d backup(s) retained", KEEP_N)
     else:
