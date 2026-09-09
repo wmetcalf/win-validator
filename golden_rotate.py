@@ -55,7 +55,13 @@ def _load_env_file(path: str) -> None:
     except OSError:
         return
     seen: dict[str, str] = {}
+    joined: list[str] = []   # systemd: a backslash at END OF LINE continues the assignment on the next line
     for line in lines:
+        if joined and joined[-1].endswith("\\") and not joined[-1].endswith("\\\\"):
+            joined[-1] = joined[-1][:-1] + line
+        else:
+            joined.append(line)
+    for line in joined:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

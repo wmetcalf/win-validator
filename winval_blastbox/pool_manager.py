@@ -93,9 +93,12 @@ class PoolManager:
                 worker_runtime="vm")
         except Exception as exc:  # noqa: BLE001 — one bad job must not sink the manager
             logger.warning("job %s failed: %s", job.job_id, exc, exc_info=True)
-            self._store.update_if_status(
-                job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
-                status=JobStatus.FAILED, finished_at=time.time(), error=type(exc).__name__)
+            try:   # the recovery write uses the same store that may have just failed (a Postgres restart): it must not escape either
+                self._store.update_if_status(
+                    job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
+                    status=JobStatus.FAILED, finished_at=time.time(), error=type(exc).__name__)
+            except Exception:  # noqa: BLE001
+                logger.warning("job %s: could not record the failure (the claim stays with the store's reaper)", job.job_id, exc_info=True)
         finally:
             if in_path is not None:
                 try:  # the sample is consumed; drop the spooled input (keep the sealed output)
@@ -113,7 +116,10 @@ class PoolManager:
             if job is None:
                 self._stop.wait(POLL_S)
                 continue
-            self._process(job)
+            try:
+                self._process(job)
+            except Exception:  # noqa: BLE001 — NOTHING a job does may end this loop: run() never reads the executor's futures, so a dead loop is a silent claim thread lost for the life of the process
+                logger.error("job %s: unexpected error escaped _process; the claim loop continues", getattr(job, "job_id", "?"), exc_info=True)
 
     def run(self) -> None:
         logger.info("warming VM pool (%d workers)…", self._concurrency)
