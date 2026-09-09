@@ -87,9 +87,10 @@ def fault_of(exc: BaseException) -> str:
     (a served job: it resets the worker's streak and cancels a base rebuild), 'unknown' is NEUTRAL (revert the
     worker, touch no streak). Every dirty release snapshot-reverts the worker, so a wedged guest is restored
     whichever value is filed; the value decides only what the pool LEARNS.
-    'worker': the agent could not be reached at all — connection refused, host unreachable, a connect timeout
-    (urllib wraps those in URLError) — a frozen guest, a rebooting one, one that lost its IP. No sample explains
-    that, and the pool may act on it.
+    'worker': the agent could not be reached at all — connection refused, host unreachable (urllib wraps those in
+    URLError) — a rebooting guest, one that lost its IP, a dead listener. No sample explains that, and the pool
+    may act on it. A timeout wrapped in URLError is NOT here: urllib wraps a timeout during the body send exactly
+    like a connect timeout, and a large sample that stalls the agent while it is still being sent would evict.
     'job': the agent answered with HTTP: an error status, an oversize or unparsable body. That is the sample's
     doing; filing it as the worker's let four crafted samples through the unauthenticated ingress empty the pool.
     'unknown': the agent ACCEPTED the connection and then gave no usable answer — a read timeout, a reset or a
@@ -101,9 +102,12 @@ def fault_of(exc: BaseException) -> str:
         return "job"
     if isinstance(exc, urllib.error.URLError):   # no HTTP answer: the reason says whether the agent was ever reached
         reason = exc.reason
-        if isinstance(reason, (ConnectionResetError, BrokenPipeError)):
-            return "unknown"   # accepted, then gone while the request was still being sent
-        return "worker"   # refused, unreachable, a connect timeout
+        if isinstance(reason, (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout)):
+            # accepted, then gone or stalled while the request was still being sent — urllib wraps a timeout during the
+            # body send the same way as a connect timeout, and a large sample that stalls the agent must not evict it;
+            # a frozen guest is reverted on every attempt either way (the revert is what un-freezes it)
+            return "unknown"
+        return "worker"   # refused, unreachable
     if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError, http.client.HTTPException)):
         return "unknown"   # a read timeout; RemoteDisconnected/ECONNRESET after the request; BadStatusLine/IncompleteRead
     if isinstance(exc, OSError):

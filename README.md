@@ -84,7 +84,7 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
-    Warm --> Respawn: 2 consecutive failures to REACH the agent on one worker (connection refused / unreachable / connect timeout)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved. An agent that answered with HTTP — an error status, a bad or oversize body — is the sample's evidence; one that accepted the connection and then stalled, reset or died is nobody's: the worker is snapshot-reverted either way and never evicted for it)
+    Warm --> Respawn: 2 consecutive failures to REACH the agent on one worker (connection refused / unreachable)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved. An agent that answered with HTTP — an error status, a bad or oversize body — is the sample's evidence; one that accepted the connection and then stalled, reset or died is nobody's: the worker is snapshot-reverted either way and never evicted for it)
     Respawn --> Warm
     Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
