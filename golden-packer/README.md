@@ -81,12 +81,18 @@ key downstream if you deploy it.
 
 - **Image index**: `answer/Autounattend.xml.tmpl` installs `/IMAGE/INDEX = 1` (Server Standard Core).
   Change it for Desktop Experience / Datacenter.
-- **Eval ISO**: the WS2025 eval ISO works; `80-eval-rearm.ps1` re-arms the 180-day eval. For retail,
-  add a product key in the autounattend `<UserData>`.
+- **Eval ISO**: the WS2025 eval ISO works, but the 180-day evaluation is NOT re-armed by anything here:
+  `80-eval-rearm.ps1` only installs a daily task that LOGS the licence state (`slmgr /dlv` to
+  `C:\prov\slmgr-dlv.txt`). Every rebake clones the promoted golden and the MAX_CHAIN reset returns to
+  the same packer master, so the eval clock is inherited and expires inside every worker (hourly forced
+  shutdowns). Re-arm before it does (`slmgr /rearm`, at most 5 times, then rebuild) or, for a service,
+  use a retail/VLSC ISO with a product key in the autounattend `<UserData>`.
 - **`x86_64` template**: this builds an x86_64 golden. (For an ARM64 golden — e.g. targeting managed
   microVM runtimes — the machine type / ISO / arch would need adjusting.)
-- **Windows Update**: applied at build time in an **install→reboot loop** (`20-windows-update.ps1` ×3
-  with `windows-restart` between), so the golden ships fully patched. The **deployed image then has WU
+- **Windows Update**: ONE best-effort pass at build time (`20-windows-update.ps1`, then one
+  `windows-restart`), and the ~22 GB checkpoint cumulative KB5094125 is excluded inside the script
+  (`-NotTitle`), so the golden is NOT fully patched; for a fully-patched golden build from a
+  pre-integrated VLSC/MSDN ISO. The **deployed image then has WU
   frozen** (`95-freeze-windows-update.ps1`: `NoAutoUpdate=1`, WU/UsoSvc/WaaSMedic disabled, update tasks
   off) — a disposable analysis VM stays deterministic and won't self-patch or phone home mid-job.
   Re-patch by **rebuilding** the golden, not at runtime.

@@ -1,7 +1,11 @@
-# Declarative win-validator VM worker — the "docker-compose for libvirt/kvm/qemu" (blastbox
-# vm_compose). `VmWorkerSpec.from_dict` builds the WarmPool from this; `build_image()` runs the
-# reproducible golden bake. The OS-install base (autounattend WS2025) is produced once and lives at
-# image.base_qcow2; golden_build.py layers the worker value-add on top, gated + promoted.
+# DESCRIPTIVE ONLY — the shape of the win-validator VM worker in blastbox vm_compose terms. NOTHING in
+# this repo parses this file: the pool is configured in code by winval_blastbox/vm_pool.py from the
+# AUTHENTICODE_* variables in /etc/winval/winval.env (POOL_SIZE, GOLDEN_BASE, AGENT_PORT, IP_POOL,
+# SMOKE_SAMPLE, WARM_DIR, and for egress: AUTHENTICODE_EXIT, AUTHENTICODE_EGRESS_PORTS,
+# AUTHENTICODE_BLOCK_INTERNAL, AUTHENTICODE_VPN_TABLE/VPN_TUN, AUTHENTICODE_FAKENET_ADDR,
+# AUTHENTICODE_GATEWAY, AUTHENTICODE_LEG). Editing this file changes nothing; set those instead.
+# The OS-install base (autounattend WS2025) is produced once and lives at image.base_qcow2;
+# golden_build.py layers the worker value-add on top, gated + promoted.
 workers:
   authenticode:
     image:
@@ -30,7 +34,8 @@ workers:
     jobs_per_recycle: 25
     max_jobs_per_slot: 0
 
-    # egress (rooter model). exit: direct | openvpn | wireguard | tor | inetsim.
+    # egress (rooter model) — documentation of the AUTHENTICODE_EXIT / EGRESS_PORTS / BLOCK_INTERNAL knobs above;
+    # this block is not read. exit: direct | openvpn | wireguard | tor | inetsim.
     # egress_ports composes onto any exit; unset = all traffic over the exit. tor blocks non-TCP.
     egress:
       exit: direct
