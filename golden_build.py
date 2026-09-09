@@ -47,6 +47,10 @@ STAGE = [(os.path.join(MYATG_SRC, f), f"{AGENT_DIR}/{f}") for f in _MYATG_FILES]
 # safe to re-run (check-then-act). The heavy OS hardening / cert-store / graveyard-pull steps are in
 # the BASE image; this layer is the worker value-add (agent runtime, perf, trust freshness).
 _CSC = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
+GV_ARG = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""          # the in-guest refresh (quoted; absent when disabled, as in golden_rotate)
+WARM_PS = f'{AGENT_DIR}\\myatg.exe --warm-cache "{gr.WARM_DIR}" {GV_ARG} | Out-Null;' if gr.WARM_DIR else ""   # same CRL warm-up as the rotator's rebake
+GV_TASK = f'--gv \\"{GRAVEYARD}\\"' if GRAVEYARD else ""   # quoted inside the /tr string, absent when disabled (a bare path with a space silently emptied the graveyard)
+
 LENIENT_STEPS = {"ngen", "compile-myatg"}   # they redirect native stderr (2>&1) and check their result themselves
 
 STEPS: list[tuple[str, str]] = [
@@ -67,7 +71,7 @@ STEPS: list[tuple[str, str]] = [
         & '{_CSC}' /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:{AGENT_DIR}\\myatg.exe {AGENT_DIR}\\myatg.cs {AGENT_DIR}\\rdp_validate.cs {AGENT_DIR}\\http_serve.cs {AGENT_DIR}\\service.cs 2>&1 | Out-File {AGENT_DIR}\\build.log
         if (-not (Test-Path {AGENT_DIR}\\myatg.exe)) {{ throw 'myatg compile failed' }}
         'compiled ' + (Test-Path {AGENT_DIR}\\myatg.exe)"""),
-    ("refresh-trust", gr.refresh_ps(f'--gv "{GRAVEYARD}"')),   # fails hard in-guest; counts checked below
+    ("refresh-trust", gr.refresh_ps(GV_ARG, WARM_PS)),   # fails hard in-guest; counts checked below
     ("netsvc-acls", fr"""
         icacls {AGENT_DIR} /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null
         icacls C:\certgraveyard /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null
@@ -81,7 +85,7 @@ STEPS: list[tuple[str, str]] = [
         'http-acl ok'"""),
     ("onstart-agent", fr"""
         schtasks /delete /tn valagent /f 2>$null | Out-Null
-        schtasks /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port 8765 --allow-insecure --gv {GRAVEYARD}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f | Out-Null
+        schtasks /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port 8765 --allow-insecure {GV_TASK}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f | Out-Null
         (schtasks /query /tn valagent /v /fo list | Select-String 'Task To Run')"""),
 ]
 
@@ -100,11 +104,27 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._ensure_backup_dir()
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
+    base_is_golden = os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK)
+    # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
+    # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
+    if base_is_golden:
+        depth = gr.chain_length() + 1
+    elif os.path.realpath(base) in (os.path.realpath(BASE_QCOW2), os.path.realpath(gr.MASTER_QCOW2)):
+        depth = 0
+    else:
+        depth = gr.MAX_CHAIN
+    base_src = base
     xfd, xml = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable (see golden_rotate)
     os.close(xfd)
     built = False
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
-        assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base, "-F", "qcow2", overlay], 120).returncode == 0
+        # the live golden is a promotion target another process can rename over (qcow2 backs by
+        # PATH): overlay a private copy of it, as golden_rotate does; the packer base is never renamed
+        if base_is_golden:
+            _, base_src = gr.snapshot_source(ts, base)
+        else:
+            base_src = base
+        assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base_src, "-F", "qcow2", overlay], 120).returncode == 0
         gr._run(["sudo", "chmod", "644", overlay])
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
         rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
@@ -150,10 +170,10 @@ def build(base: str = BASE_QCOW2) -> str:
         built = True
     finally:
         gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
-        gr._run(["sudo", "rm", "-f", overlay, xml])
+        gr._run(["sudo", "rm", "-f", overlay, xml] + ([base_src] if base_src != base else []))   # the private base copy is flattened into the candidate
         if not built:
             gr._rm_candidate(candidate)   # a failed/timed-out convert leaves a full-size partial
-    gr._write_small(str(gr.candidate_depth_file(candidate)), "0")   # built from the base: chain depth 0
+    gr._write_small(str(gr.candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
     return candidate
 
 

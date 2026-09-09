@@ -73,10 +73,13 @@ def _chain_file() -> Path:
 
 
 def chain_length() -> int:
+    """The promoted golden's rebake depth. A golden WITHOUT a readable record (never recorded,
+    or the record could not be written) is unknown provenance: MAX_CHAIN, so the next rebake
+    starts from the master — 0 would pin the counter and disable the reset forever."""
     try:
         return int(_chain_file().read_text().strip() or "0")
     except (OSError, ValueError):
-        return 0
+        return MAX_CHAIN if Path(GOLDEN_BASE_DISK).exists() else 0
 
 
 def rebake_source() -> str:
@@ -123,7 +126,7 @@ def _rm_candidate(candidate: str) -> None:
     _run(["sudo", "rm", "-f", candidate, str(candidate_depth_file(candidate))])
 
 
-def snapshot_source(ts: str) -> tuple[str, str]:
+def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
     """A PRIVATE copy of the rebake source in the backup dir, taken under the rotation lock.
     qcow2 records its backing file BY PATH: an overlay off the live GOLDEN_BASE_DISK would be
     re-parented to whatever a concurrent promotion renames into that path (the retry command
@@ -131,7 +134,8 @@ def snapshot_source(ts: str) -> tuple[str, str]:
     candidate would silently mix two goldens. A copy nothing renames keeps the invariant the
     frozen master used to provide. Returns (source_used, private_copy)."""
     import fcntl
-    src = rebake_source()
+    if src is None:
+        src = rebake_source()
     _ensure_backup_dir()
     _sweep_stranded_sources()
     copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}.qcow2")
@@ -170,7 +174,7 @@ SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
 REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set
-WARM_DIR = os.environ.get("GOLDEN_WARM_DIR", "")        # optional in-guest dir of certs to re-warm
+WARM_DIR = os.environ.get("AUTHENTICODE_WARM_DIR") or os.environ.get("GOLDEN_WARM_DIR", "")        # optional in-guest dir of certs to re-warm
 
 _SSH = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=15", "-i", SSH_KEY]
@@ -645,12 +649,14 @@ def _prune_backups() -> None:
         _run(["sudo", "rm", "-f", str(b)])
 
 
-def _write_small(path: str, text: str) -> None:
+def _write_small(path: str, text: str) -> bool:
     """Root-owned small file next to a root-owned image, written with the arguments QUOTED and
     the result checked (an unquoted redirect truncated at the first space in the path)."""
     r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2"', "sh", text, path])
     if r.returncode != 0:
         logger.error("could not write %s (rc=%s): %s", path, r.returncode, r.stderr.strip()[-200:])
+        return False
+    return True
 
 
 def _record_chain(candidate: str) -> None:
@@ -661,8 +667,10 @@ def _record_chain(candidate: str) -> None:
         depth = int(candidate_depth_file(candidate).read_text().strip() or "0")
     except (OSError, ValueError):
         depth = MAX_CHAIN   # unknown provenance: force the master rebake NEXT cycle (0 would postpone it by MAX_CHAIN cycles)
-    _write_small(str(_chain_file()), str(depth))
-    _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
+    if _write_small(str(_chain_file()), str(depth)):
+        _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
+    else:   # the sidecar stays: it is the only surviving record of this golden's provenance
+        logger.error("chain depth %s NOT recorded for %s; the next rebake will treat the golden as unknown provenance (master rebake)", depth, GOLDEN_BASE_DISK)
 
 
 def restart_pool() -> bool:
