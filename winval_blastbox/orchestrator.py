@@ -71,6 +71,10 @@ def _authenticode_verdict(env: dict) -> dict:
     }
 
 
+class NotQueued(RuntimeError):
+    """submit() refused BEFORE queueing: nothing will ever run this job (the executor is shut down)."""
+
+
 class JobStore:
     """In-memory job store + a bounded executor that drives the engines off the request path."""
 
@@ -113,6 +117,10 @@ class JobStore:
             self._jobs[jid]["engines"][engine] = value
 
     def submit(self, jid: str, path: str, engines: list[str]) -> None:
+        # the executor enqueues BEFORE it can raise (a worker thread that cannot start raises after the put): the only refusal that is
+        # certainly pre-queue is a shut-down executor, checked here by name — everything the executor itself raises means "queued"
+        if getattr(self._pool, "_shutdown", False):
+            raise NotQueued("the orchestrator is shutting down")
         self._pool.submit(self._run, jid, path, engines)
 
     def _run(self, jid: str, path: str, engines: list[str]) -> None:
@@ -248,16 +256,16 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         raise
     try:
         _store.submit(jid, path, sel)
-    except RuntimeError:   # "cannot schedule new futures after shutdown": raised BEFORE the item is queued — nothing will ever run it
-        _store._update(jid, status="error", error="could not queue the job: the orchestrator is shutting down")
+    except NotQueued as exc:   # refused BEFORE the item is queued — nothing will ever run it
+        _store._update(jid, status="error", error=f"could not queue the job: {exc}")
         try:
             os.unlink(path)
         except OSError:
             pass
         raise
-    except Exception as exc:  # noqa: BLE001 — raised AFTER the item was queued (a worker thread could not start): the job IS queued and an idle
-        # worker may already be running it, so the request succeeded — say so (a 500 here, with the upload deleted, let a worker run an
-        # engine on a missing file and report done after the client was told failed)
+    except Exception as exc:  # noqa: BLE001 — raised by the executor AFTER the item was queued (a worker thread could not start — a RuntimeError
+        # too, which is why the pre-queue case is a class of its own): the job IS queued and an idle worker may already be running it, so
+        # the request succeeded — say so (a 500 here, with the upload deleted, let a worker run an engine on a missing file and report done)
         _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run", jid, exc)
     return {"job_id": jid, "status": "queued", "engines": sel}
 
