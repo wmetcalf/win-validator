@@ -318,6 +318,17 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
                              # golden-sized temporary beside a base, and the space check below would fail forever
         _prune_backups(keep)   # likewise the expired candidates and surplus backups: pruned only after a
                              # promotion, they could fill the store so that no promotion ever passes this check
+        if Path(GOLDEN_BASE_DISK).exists():
+            # UNDER THE LOCK: the seed of a missing record must not race a concurrent promotion's _record_chain
+        # the chain record must be WRITABLE, or the MAX_CHAIN reset could never fire (a counter that
+            # cannot be recorded stays where it is): prove it EVERY run with a probe file beside the record
+            # (never by rewriting an existing record), and seed a missing record with the depth it reads as
+            probe = str(_chain_file()) + ".probe"
+            if not _write_small(probe, "probe"):
+                raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
+            _run(["sudo", "rm", "-f", probe])
+            if not _chain_file().exists() and not _write_small(str(_chain_file()), str(chain_length())):
+                raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
@@ -325,16 +336,6 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
     if BACKUP_DIR.exists():
         _sweep_stranded_sources()   # BEFORE the space check below, which a stranded copy would fail forever
-    if Path(GOLDEN_BASE_DISK).exists():
-        # the chain record must be WRITABLE, or the MAX_CHAIN reset could never fire (a counter that
-        # cannot be recorded stays where it is): prove it EVERY run with a probe file beside the record
-        # (never by rewriting an existing record), and seed a missing record with the depth it reads as
-        probe = str(_chain_file()) + ".probe"
-        if not _write_small(probe, "probe"):
-            raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
-        _run(["sudo", "rm", "-f", probe])
-        if not _chain_file().exists() and not _write_small(str(_chain_file()), str(chain_length())):
-            raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if REVOKED and not Path(REVOKED).is_file():
