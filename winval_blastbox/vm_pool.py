@@ -91,8 +91,12 @@ def validate_egress_posture(spec: VmWorkerSpec) -> None:
     without a worker: the rotation preflight refuses a bad posture before the hour-long build, and the pool
     refuses it before booting a VM. The rooter's own check stays the enforcement; this only moves the error
     earlier (the exit sets are imported from blastbox so the two cannot drift apart)."""
-    from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
-    from blastbox.host.runtime.libvirt_vm import _parse_ip_pool
+    try:   # private names, imported so the sets cannot drift from blastbox's own; a blastbox without them must not escape as an ImportError traceback
+        from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
+        from blastbox.host.runtime.libvirt_vm import _parse_ip_pool
+    except ImportError as exc:
+        import importlib.metadata
+        raise RuntimeError(f"the installed blastbox ({importlib.metadata.version('blastbox')}) lacks a name this posture check relies on ({exc}); upgrade blastbox (deploy/README.md pins the minimum)") from exc
     if spec.worker_ip_pool:   # parsed only inside LibvirtVmRuntime.__init__ otherwise: the one AUTHENTICODE_* knob that could still fail after the build
         try:
             _parse_ip_pool(spec.worker_ip_pool)

@@ -236,9 +236,10 @@ def _keep_as_unrecorded(candidate: str) -> bool:
 
 
 def _rm_candidate(candidate: str) -> None:
-    # a candidate already gone (renamed into place by _promote, which then raised before any record was
-    # attempted) while the golden has no record: its sidecar is the promoted golden's ONLY depth — keep it
-    # under the marker name chain_length() reads, never as a plain sidecar an aged leftover could imitate
+    # a candidate already gone (removed out from under a run — _promote COPIES it, never renames it, and a
+    # split state records the depth itself) while the golden has no record: its sidecar would be the golden's
+    # ONLY depth — keep it under the marker name chain_length() reads, never as a plain sidecar an aged
+    # leftover could imitate
     if not os.path.lexists(candidate) and not _chain_file().exists():
         _keep_as_unrecorded(candidate)
     _run(["sudo", "rm", "-f", candidate, str(candidate_depth_file(candidate))])
@@ -704,6 +705,7 @@ def _rotate_locked(candidate: str) -> None:
         _record_chain(candidate)   # BEFORE the prune: it could reclaim an old candidate together with the sidecar this reads
     except SplitState as e:
         needed = e.backup   # the recovery copy the message names: never pruned, whatever GOLDEN_KEEP_N says
+        _record_chain(candidate)   # the DISK twin was published: its depth is the candidate's, and the caller removes the candidate next (a record that stayed at the old depth put the master rebake one cycle late, for good)
         raise
     finally:
         _prune_backups(candidate, also_keep=needed)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
