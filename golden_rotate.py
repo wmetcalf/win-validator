@@ -199,6 +199,15 @@ def _is_builder(pid: str) -> bool:
     return any(a.endswith((b"golden_rotate.py", b"golden_build.py")) for a in argv)
 
 
+def _rebake_src_live(c: Path) -> bool:
+    """A rebake-source copy whose builder (the pid in its name, snapshot_source) is still a running builder: the
+    BACKING file of that build, whatever its age — for the stranded sweep and the candidate prune alike."""
+    if ".rebake-src-" not in c.name:
+        return False
+    pid = c.name[:-len(".qcow2")].rsplit("-", 1)[-1]
+    return pid.isdigit() and _is_builder(pid)
+
+
 def _sweep_stranded_sources() -> None:
     """A rebake-source copy has no value once its run ended; one left by a killed run (OOM, a
     reboot, systemctl stop) is reclaimed here — called from rotation_preflight() BEFORE its space
@@ -206,9 +215,8 @@ def _sweep_stranded_sources() -> None:
     cutoff = time.time() - STRANDED_SOURCE_HOURS * 3600
     for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
         if (_mtime(c) or float("inf")) < cutoff:   # a builder deletes its copy without the lock
-            pid = c.name[:-len(".qcow2")].rsplit("-", 1)[-1]   # the builder's pid is in the name (snapshot_source): a copy is the BACKING file of its build for as long as that runs
-            if pid.isdigit() and _is_builder(pid):   # the NUMBER alone is recyclable after a day: it must still be a golden_rotate/golden_build
-                logger.warning("rebake-source copy %s is older than %dh but its builder (pid %s) is still running: left alone", c.name, STRANDED_SOURCE_HOURS, pid)
+            if _rebake_src_live(c):   # the NUMBER alone is recyclable after a day: it must still be a running golden_rotate/golden_build
+                logger.warning("rebake-source copy %s is older than %dh but its builder is still running: left alone", c.name, STRANDED_SOURCE_HOURS)
                 continue
             logger.warning("removing stranded rebake-source copy %s (a killed run left it)", c.name)
             _run(["sudo", "rm", "-f", str(c)])
@@ -723,8 +731,15 @@ def _rotate_locked(candidate: str) -> None:
     except SplitState as e:
         needed = e.backup   # the recovery copy the message names: never pruned, whatever GOLDEN_KEEP_N says
         prev = chain_length()
+        try:
+            want = int(candidate_depth_file(candidate).read_text().strip() or "0")
+        except (OSError, ValueError):
+            want = MAX_CHAIN
         _record_chain(candidate)   # the DISK twin was published: its depth is the candidate's, and the caller removes the candidate next (a record that stayed at the old depth put the master rebake one cycle late, for good)
-        raise SplitState(f"{e} The chain record now holds the published twin's depth ({chain_length()}); if you restore the disk twin by hand instead of restarting, "
+        now = chain_length()
+        record = (f"The chain record now holds the published twin's depth ({now})" if now == want
+                  else f"The published twin's depth ({want}) could NOT be recorded (the record reads {now}; see the log above)")
+        raise SplitState(f"{e} {record}; if you restore the disk twin by hand instead of restarting, "
                          f"put the previous depth back: sudo sh -c 'printf {prev} > {_chain_file()}; printf {prev} > {_mirror_file()}'.", backup=e.backup) from e
     finally:
         _prune_backups(candidate, also_keep=needed)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
@@ -739,8 +754,8 @@ def _backup_current() -> str | None:
     a truncated one (a timeout, ENOSPC) would pass all three, so rc AND size are checked."""
     if not Path(GOLDEN_BASE_DISK).exists():
         return None
-    ts = _run(["date", "+%Y%m%d-%H%M%S"]).stdout.strip()
-    bak = BACKUP_DIR / f"golden-base.{ts}.qcow2"
+    bak = BACKUP_DIR / f"golden-base.{time.strftime('%Y%m%d-%H%M%S')}.qcow2"   # never a spawned `date`: a fork failure gave "" and a golden-base..qcow2 no prune matches
+    assert _BACKUP_NAME.match(bak.name), bak
     logger.info("backing up current golden -> %s", bak)
     want = Path(GOLDEN_BASE_DISK).stat().st_size
     r = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 3600)
@@ -935,7 +950,7 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
     for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
         if str(c.resolve()) in keep_paths:
             continue
-        if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and (_mtime(c) or float("inf")) < cutoff:
+        if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and (_mtime(c) or float("inf")) < cutoff and not _rebake_src_live(c):   # this prune runs FIRST in the preflight: the same live-builder rule as the stranded sweep
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)

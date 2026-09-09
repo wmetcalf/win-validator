@@ -74,11 +74,13 @@ if ! sudo test -f /etc/winval/compose.env || [ "$(sudo sed -n 's/^WINVAL_PG_PASS
   # percent-encoded one (the ingress embeds it in a URL)
   PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
   if [ -n "$PWLINE" ]; then
-    printf '%s\n' "$PWLINE" | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # printf, not echo: dash's echo would eat the backslashes
+    { sudo grep -v '^WINVAL_PG_PASSWORD' /etc/winval/compose.env 2>/dev/null; printf '%s\n' "$PWLINE"; } | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change; printf, not echo: dash's echo would eat the backslashes
   else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
     echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to /etc/winval/compose.env by hand before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted, \$ as \$\$> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
   fi
 fi
+# compose.env also takes WINVAL_UPLOAD_MB (the ingress upload cap, default 1024 — set AUTHENTICODE_MAX_UPLOAD_MB in
+# winval.env alike) and WINVAL_SPOOL_SIZE (the ingress spool tmpfs, default 2g, keep it >= 2x the cap); add them by hand
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
 # ingress with the 'winval' fallback password against a volume that holds the real one
 sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d

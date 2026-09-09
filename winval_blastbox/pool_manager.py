@@ -405,6 +405,8 @@ class PoolManager:
     def run(self) -> int:
         wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
         wrr, jrr = wr.resolve(), jr.resolve()   # lexically AND through links: a job root symlinked into the scratch root is one directory tree
+        if wr.is_symlink() and not wr.exists():   # a link to nothing: the mkdir below would EEXIST on the link itself
+            raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} is a symlink to a directory that does not exist")
         same_inode = False
         try:   # a bind mount is the same directory under two names no path comparison can relate
             sa, sb = os.stat(wr), os.stat(jr)
