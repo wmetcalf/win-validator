@@ -85,7 +85,9 @@ try:
     data = t.encode("utf-8")   # a value the environment could not decode (not UTF-8) is refused here, not as a traceback
 except (ET.ParseError, UnicodeError) as exc:
     sys.exit(f"rendered Autounattend.xml is not well-formed UTF-8 XML ({exc}); refusing to build with it")
-open("answer/Autounattend.xml", "wb").write(data)
+fd = os.open("answer/Autounattend.xml", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # it carries the Administrator password: 0600, like keys/admin_password.txt
+os.chmod(fd, 0o600)   # an existing file from an earlier render keeps its old mode otherwise
+os.write(fd, data); os.close(fd)
 PY
 say "rendered answer/Autounattend.xml"
 
