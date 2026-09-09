@@ -163,11 +163,18 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     pass a full disk. Raises NothingPublished."""
     if os.geteuid() != 0:
         raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
+    import fcntl
     try:
         fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
-    os.close(fd)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # probe: a rotation in progress is refused NOW, not after the build
+        except OSError as e:
+            raise NothingPublished(f"another rotation is in progress (lock {ROTATE_LOCK} held)") from e
+    finally:
+        os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if REVOKED and not Path(REVOKED).is_file():
@@ -560,6 +567,7 @@ def main(argv: list[str]) -> int:
         return 0 if validate_golden(argv[1]) else 1
     if cmd == "rotate" and len(argv) > 1:
         rotate(argv[1])
+        restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0
     print(__doc__)
     return 2

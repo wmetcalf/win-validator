@@ -123,7 +123,11 @@ def build(base: str = BASE_QCOW2) -> str:
             # guest's stderr, so a build never flattens an image a step failed to prepare
             # every step under Stop: a failing cmdlet is a terminating error and a non-zero exit
             # (a native command's failure is still only $LASTEXITCODE — steps that run one test it)
-            out = gr._ssh_ps(ip, "$ErrorActionPreference = 'Stop'; " + ps, 600, check=True)
+            # cmdlet steps run under Stop so a failing cmdlet is a terminating error; the two steps
+            # that capture NATIVE stderr with 2>&1 (ngen, csc) must not — under Stop a benign stderr
+            # line becomes a NativeCommandError — and they assert their own outcome instead
+            strict = name not in LENIENT_STEPS
+            out = gr._ssh_ps(ip, ("$ErrorActionPreference = 'Stop'; " if strict else "") + ps, 600, check=True)
             logger.info("  %s -> %s", name, out.replace("\n", " ")[:120])
             if name == "refresh-trust":
                 gr.refresh_result(out)
