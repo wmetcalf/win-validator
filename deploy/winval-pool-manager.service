@@ -44,6 +44,11 @@ Type=simple
 User=root
 # The checkout (or a symlink to it) at a canonical path — nothing host-specific in this unit.
 WorkingDirectory=/opt/win-validator
+# the C locale for EVERYTHING this unit runs: blastbox's libvirt runtime and the rotation gate match
+# virsh's English output ("running", "shut off", "not running"); a translated host locale (systemd hands
+# services /etc/locale.conf's LANG) would reap every healthy worker and fail every gate
+Environment=LC_ALL=C
+Environment=LANG=C
 Environment=PYTHONPATH=/opt/win-validator
 # Defaults; /etc/winval/winval.env (deploy/winval.env.example) overrides any of them and is the
 # place for the Postgres password, the pool size, the ssh key, egress and smoke settings.

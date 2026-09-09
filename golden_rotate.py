@@ -67,6 +67,8 @@ def _load_env_file(path: str) -> None:
             v = v[1:-1]
             if quote == '"':   # systemd.exec(5): inside double quotes a backslash escapes a backslash or a quote
                 v = re.sub(r'\\([\\"])', r'\1', v)
+        else:   # UNQUOTED: systemd drops every backslash (verified against systemd-run) — a Windows path must be single-quoted
+            v = v.replace("\\", "")
         if k:
             seen[k] = v   # the LAST assignment wins, as it does for systemd — a hand run must read the file the units read
     for k, v in seen.items():
@@ -476,7 +478,7 @@ def validate_golden(qcow2: str) -> bool:
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
     from winval_blastbox.vm_pool import agent_validate
     from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
-    spec = VmWorkerSpec(name="goldgate", image=VmImageSpec(golden=qcow2), agent_port=8765)
+    spec = VmWorkerSpec(name="goldgate", image=VmImageSpec(golden=qcow2), agent_port=int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765")))   # the port the golden was BAKED to listen on (the pool's knob)
     rt = spec.runtime()
     try:
         slot = rt.spawn_ready(timeout_s=240)

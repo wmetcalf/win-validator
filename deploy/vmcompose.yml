@@ -1,6 +1,7 @@
 # DESCRIPTIVE ONLY — the shape of the win-validator VM worker in blastbox vm_compose terms. NOTHING in
 # this repo parses this file: the pool is configured in code by winval_blastbox/vm_pool.py from the
-# AUTHENTICODE_* variables in /etc/winval/winval.env (POOL_SIZE, GOLDEN_BASE, AGENT_PORT, IP_POOL,
+# AUTHENTICODE_* variables in /etc/winval/winval.env (POOL_SIZE, GOLDEN_BASE, AGENT_PORT — baked into the
+# golden's URL ACL/firewall/task by golden_build, so changing it needs a build-and-promote — IP_POOL,
 # SSH_KEY, SMOKE_SAMPLE, SMOKE_EXPECT, WARM_DIR, and for egress: AUTHENTICODE_EXIT,
 # AUTHENTICODE_EGRESS_PORTS, AUTHENTICODE_BLOCK_INTERNAL, AUTHENTICODE_VPN_TABLE/VPN_TUN,
 # AUTHENTICODE_FAKENET_ADDR, AUTHENTICODE_GATEWAY, AUTHENTICODE_LEG). Editing this file changes

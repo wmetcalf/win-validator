@@ -34,6 +34,7 @@ logger = logging.getLogger("winval.golden_build")
 
 BASE_QCOW2 = os.environ.get("GOLDEN_BUILD_BASE") or gr.MASTER_QCOW2   # the packer's output (golden-packer -> winserver2025-core.qcow2), installed as GOLDEN_MASTER: the ONLY image the repo produces
 AGENT_DIR = "C:\\agent"
+AGENT_PORT = int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765"))   # the pool's knob: the golden LISTENS on it (URL ACL, firewall, task), so changing it means a rebake
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 # The myatg validator sources compiled in-guest. Point MYATG_SRC at a myatg checkout
 # (github.com/wmetcalf/myatg); defaults to a sibling `../myatg` clone next to this repo.
@@ -78,17 +79,17 @@ STEPS: list[tuple[str, str]] = [
         New-Item -Force -ItemType Directory C:\scan | Out-Null
         icacls C:\scan /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null
         'acls ok'"""),
-    ("http-acl", r"""
-        cmd /c "netsh http delete urlacl url=http://+:8765/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete
-        netsh http add urlacl url=http://+:8765/ user="NT AUTHORITY\NETWORK SERVICE" | Out-Null
-        New-NetFirewallRule -DisplayName valagent-8765 -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    ("http-acl", fr"""
+        cmd /c "netsh http delete urlacl url=http://+:{AGENT_PORT}/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete
+        netsh http add urlacl url=http://+:{AGENT_PORT}/ user="NT AUTHORITY\NETWORK SERVICE" | Out-Null
+        New-NetFirewallRule -DisplayName valagent-{AGENT_PORT} -Direction Inbound -Protocol TCP -LocalPort {AGENT_PORT} -Action Allow -ErrorAction SilentlyContinue | Out-Null
         'http-acl ok'"""),
     ("onstart-agent", fr"""
         cmd /c "schtasks /delete /tn valagent /f >nul 2>&1"   # same: a fresh image has no valagent task, and its 'cannot find the file' would end the step
         # --% hands the rest of the line to schtasks VERBATIM: PowerShell 5.1 neither escapes nor preserves quotes
         # embedded in a native argument (a `" inside "..." reaches schtasks unescaped and splits /tr), so the line
         # is written in schtasks' own syntax — /tr "... --gv \"path\"" — with no PowerShell string in between
-        schtasks --% /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port 8765 --allow-insecure {GV_TASK}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f
+        schtasks --% /create /tn valagent /tr "{AGENT_DIR}\myatg.exe --serve-http --bind + --port {AGENT_PORT} --allow-insecure {GV_TASK}" /sc onstart /ru "NT AUTHORITY\NETWORK SERVICE" /rl LIMITED /f
         if ($LASTEXITCODE -ne 0) {{ throw "schtasks /create failed ($LASTEXITCODE)" }}
         (schtasks /query /tn valagent /v /fo list | Select-String 'Task To Run')"""),
 ]

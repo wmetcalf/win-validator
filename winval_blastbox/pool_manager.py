@@ -69,15 +69,18 @@ class PoolManager:
         # filename="../../../etc/shadow") would let a compromised ingress delete/clobber arbitrary
         # host files via the finally-unlink. Strip filename to a basename; require result_dir under
         # JOB_ROOT.
-        filename = Path(job.filename or "").name
-        if not filename:
-            raise ValueError(f"job {job.job_id}: empty/invalid filename")
-        result_dir = Path(job.result_dir).resolve()
-        if not result_dir.is_relative_to(JOB_ROOT.resolve()):
-            raise ValueError(f"job {job.job_id}: result_dir escapes JOB_ROOT: {job.result_dir!r}")
-        in_path = result_dir / "input" / filename
-        out_dir = result_dir / "output"
+        in_path = None
         try:
+            # INSIDE the guard: a hostile row is exactly what the sanitiser exists for, and raising
+            # outside it ended the claim thread for the life of the process (the unit stayed "active")
+            filename = Path(job.filename or "").name
+            if not filename:
+                raise ValueError(f"job {job.job_id}: empty/invalid filename")
+            result_dir = Path(job.result_dir or "").resolve()
+            if not result_dir.is_relative_to(JOB_ROOT.resolve()):
+                raise ValueError(f"job {job.job_id}: result_dir escapes JOB_ROOT: {job.result_dir!r}")
+            in_path = result_dir / "input" / filename
+            out_dir = result_dir / "output"
             if not in_path.exists():
                 raise FileNotFoundError(f"spooled input missing: {in_path}")
             env = self._runner.validate_to_dir(in_path, out_dir)
@@ -94,10 +97,11 @@ class PoolManager:
                 job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
                 status=JobStatus.FAILED, finished_at=time.time(), error=type(exc).__name__)
         finally:
-            try:  # the sample is consumed; drop the spooled input (keep the sealed output)
-                in_path.unlink()
-            except OSError:
-                pass
+            if in_path is not None:
+                try:  # the sample is consumed; drop the spooled input (keep the sealed output)
+                    in_path.unlink()
+                except OSError:
+                    pass
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():

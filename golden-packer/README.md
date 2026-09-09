@@ -4,8 +4,11 @@ A **portable, reproducible** builder for a hardened **Windows Server 2025 (Core)
 (`qcow2`) — for KVM/libvirt hosts. Clone, drop in an ISO, run one script. No host-specific setup.
 
 The image installs unattended, enables in-box **OpenSSH** (key-only), and bakes a hardened feature
-set via ordered PowerShell provisioners (cert-store sync, one Windows Update pass, WDAC/AppLocker,
-Defender, CIS-ish hardening, an eval-licence status log). It's the *OS base*; layering an application/agent on top is a separate
+set via ordered PowerShell provisioners (cert-store sync, one Windows Update pass, AppLocker in
+AUDIT mode — no WDAC policy is built — CIS-ish hardening, an eval-licence status log, and a Defender
+configuration that DISABLES real-time/behaviour/script/archive scanning with executable extensions
+excluded: right for a disposable validation worker, not a hardened general-purpose base). It's the
+*OS base* for this validator; layering an application/agent on top is a separate
 downstream step.
 
 ## Prerequisites

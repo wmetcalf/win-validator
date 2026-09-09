@@ -15,6 +15,11 @@ Requires=libvirtd.service
 Type=oneshot
 User=root
 WorkingDirectory=/opt/win-validator
+# the C locale for EVERYTHING this unit runs: blastbox's libvirt runtime and the rotation gate match
+# virsh's English output ("running", "shut off", "not running"); a translated host locale (systemd hands
+# services /etc/locale.conf's LANG) would reap every healthy worker and fail every gate
+Environment=LC_ALL=C
+Environment=LANG=C
 Environment=PYTHONPATH=/opt/win-validator
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 # the SAME name the pool-manager unit and vm_pool.py read: one path, promoted to and booted from
