@@ -44,6 +44,9 @@ JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
 # <job>/output by directory descriptor with O_EXCL (see _publish). Never place it under WINVAL_JOB_ROOT.
 WORK_ROOT = Path(os.environ.get("WINVAL_WORK_ROOT", "/var/lib/winval/work"))
 SWEEP_S = 3600.0
+# The same bound the ingress enforces on an upload (AUTHENTICODE_MAX_UPLOAD_MB): a compromised ingress can
+# spool ANY size, and the copy into WORK_ROOT must not be how the manager's disk is exhausted
+MAX_INPUT_BYTES = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024") or "1024") * 1024 * 1024
 
 
 def _retention_days() -> float:
@@ -228,6 +231,8 @@ class PoolManager:
             except FileNotFoundError:
                 raise FileNotFoundError(f"spooled input missing: {Path(job.result_dir) / 'input' / filename}") from None
             st = os.fstat(in_fd)
+            if st.st_size > MAX_INPUT_BYTES:
+                raise ValueError(f"job {job.job_id}: spooled input is {st.st_size} bytes, over the {MAX_INPUT_BYTES}-byte upload bound")
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 # a hard link to a root-owned file would pass O_NOFOLLOW and S_ISREG (fs.protected_hardlinks
                 # forbids the ingress making one, but that is a per-host sysctl this code cannot assert)
@@ -236,7 +241,15 @@ class PoolManager:
             (work / "input").mkdir(0o700)
             (work / "output").mkdir(0o700)
             with open(in_fd, "rb", closefd=False) as src, open(work / "input" / filename, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+                copied = 0
+                while True:   # bounded by BYTES, not by the size fstat saw: the ingress can still be appending
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > MAX_INPUT_BYTES:
+                        raise ValueError(f"job {job.job_id}: spooled input grew past the {MAX_INPUT_BYTES}-byte upload bound while being copied")
+                    dst.write(chunk)
             env = self._runner.validate_to_dir(work / "input" / filename, work / "output")
             summary = _extract_verdict(env)
             status = (JobStatus.FAILED if summary.get("envelope_status") == "engine_error"
