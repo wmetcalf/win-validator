@@ -754,7 +754,8 @@ def _backup_current() -> str | None:
     a truncated one (a timeout, ENOSPC) would pass all three, so rc AND size are checked."""
     if not Path(GOLDEN_BASE_DISK).exists():
         return None
-    bak = BACKUP_DIR / f"golden-base.{time.strftime('%Y%m%d-%H%M%S')}.qcow2"   # never a spawned `date`: a fork failure gave "" and a golden-base..qcow2 no prune matches
+    bak = BACKUP_DIR / f"golden-base.{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.qcow2"   # never a spawned `date`: a fork failure gave "" and a
+    # golden-base..qcow2 no prune matches; UTC: the prune sorts the names, and a local-time stamp went backwards across a DST fall-back
     assert _BACKUP_NAME.match(bak.name), bak
     logger.info("backing up current golden -> %s", bak)
     want = Path(GOLDEN_BASE_DISK).stat().st_size
@@ -913,19 +914,35 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
-def _keep_sidecars() -> list[Path]:
-    """Every <backup>.keep sidecar, beside the backups or beside the chain mirror (where _mark_kept falls back to)."""
-    out: list[Path] = []
+_BUILD_HOLD = re.compile(r"^(golden-base\..*\.qcow2)\.keep\.build-(\d+)$")
+
+
+def _held_backups() -> set[str]:
+    """The backups every prune must leave: an operator's <backup>.keep (a split state's recovery marker, theirs to
+    remove) and a running build's <backup>.keep.build-<pid> (its backing file, held for exactly as long as that
+    builder runs — a build that died holds nothing, and its stale sidecar is removed here). Sidecars live beside
+    the backups or beside the chain mirror (where _mark_kept falls back to)."""
+    held: set[str] = set()
     for d in (BACKUP_DIR, _mirror_file().parent):
-        out.extend(d.glob("golden-base.*.qcow2.keep"))
-    return out
+        for kp in d.glob("golden-base.*.qcow2.keep*"):
+            if kp.name.endswith(".keep"):
+                held.add(str((BACKUP_DIR / kp.name[:-len(".keep")]).resolve()))
+                continue
+            m = _BUILD_HOLD.match(kp.name)
+            if m and _is_builder(m.group(2)):
+                held.add(str((BACKUP_DIR / m.group(1)).resolve()))
+            else:
+                logger.info("removing stale build hold %s (its builder is gone)", kp.name)
+                _run(["sudo", "rm", "-f", str(kp)])
+    return held
 
 
-def _mark_kept(bak: str) -> str | None:
+def _mark_kept(bak: str, suffix: str = ".keep") -> str | None:
     """Hold ``bak`` out of every prune: a checked sidecar beside it, else beside the chain mirror; None when neither
-    could be written (the message must then say the copy is NOT held, not name a sidecar that does not exist)."""
+    could be written (the message must then say the copy is NOT held, not name a sidecar that does not exist).
+    ``suffix``: ".keep" for the operator's recovery marker, ".keep.build-<pid>" for a build's hold on its base."""
     for d in (BACKUP_DIR, _mirror_file().parent):
-        sc = d / (Path(bak).name + ".keep")
+        sc = d / (Path(bak).name + suffix)
         _run(["sudo", "mkdir", "-p", str(d)])
         if _run(["sudo", "touch", str(sc)]).returncode == 0 and sc.exists():
             return str(sc)
@@ -940,8 +957,7 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
     keep_paths = {str(Path(keep).resolve()), str(Path(keep).resolve()) + ".chain"} if keep else set()   # resolved: a relative retry argument must still match the glob's absolute paths
     if also_keep:
         keep_paths.add(str(Path(also_keep).resolve()))
-    for kp in _keep_sidecars():   # a split state's recovery copy (SplitState): held until the operator removes the sidecar
-        keep_paths.add(str((BACKUP_DIR / kp.name[:-len(".keep")]).resolve()))
+    keep_paths |= _held_backups()   # a split state's recovery copy (until the operator removes the marker) and a running build's base
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one

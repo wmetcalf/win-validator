@@ -102,7 +102,10 @@ def _open_under(root: Path, parts, what: str) -> int:
     re-resolve the intermediate <job> component, which the ingress can rename away and replace with a
     link to any host directory between a check and the open), and a component swapped after this walk
     cannot matter — the descriptor pins the directory that was walked. root's own parent is root-owned."""
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:   # the root itself: the same named refusal as a component, not a bare OSError
+        raise ValueError(f"{what}: {root}: {exc.strerror}") from exc
     try:
         for part in parts:
             nfd = os.open(part, _DIR, dir_fd=fd)
@@ -405,8 +408,9 @@ class PoolManager:
     def run(self) -> int:
         wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
         wrr, jrr = wr.resolve(), jr.resolve()   # lexically AND through links: a job root symlinked into the scratch root is one directory tree
-        if wr.is_symlink() and not wr.exists():   # a link to nothing: the mkdir below would EEXIST on the link itself
-            raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} is a symlink to a directory that does not exist")
+        for label, root in (("WINVAL_WORK_ROOT", wr), ("WINVAL_JOB_ROOT", jr)):   # a link to nothing: the mkdir would EEXIST on the link, the claim loop would fail every job
+            if root.is_symlink() and not root.exists():
+                raise SystemExit(f"{label} {root} is a symlink to a directory that does not exist")
         same_inode = False
         try:   # a bind mount is the same directory under two names no path comparison can relate
             sa, sb = os.stat(wr), os.stat(jr)

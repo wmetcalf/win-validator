@@ -135,12 +135,10 @@ def build(base: str = BASE_QCOW2) -> str:
         gr._run(["sudo", "touch", os.path.realpath(base)])
         if gr._BACKUP_NAME.match(Path(base).name):
             # a RETAINED backup as the base: the age prune leaves it, the COUNT prune (GOLDEN_KEEP_N) does not — a rotation
-            # landing during the build evicted the overlay's backing file. The split-state keep sidecar holds it for the build —
-            # unless one already exists: that is the operator's recovery marker, theirs to remove, never this build's
-            if any((dd / (Path(base).name + ".keep")).exists() for dd in (gr.BACKUP_DIR, gr._mirror_file().parent)):
-                gr.logger.info("base %s already carries a .keep sidecar (a split state's recovery marker): left to the operator", base)
-            else:
-                held_keep = gr._mark_kept(os.path.realpath(base))
+            # landing during the build evicted the overlay's backing file. A hold named after THIS build's pid: honoured only
+            # while this builder runs (a build that died pins nothing), and distinct from the operator's .keep marker and
+            # from another build's hold on the same base
+            held_keep = gr._mark_kept(os.path.realpath(base), suffix=f".keep.build-{os.getpid()}")
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:
