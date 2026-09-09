@@ -105,26 +105,38 @@ def _chain_file() -> Path:
     return Path(GOLDEN_BASE_DISK + ".chain")
 
 
-def chain_length() -> int:
-    """The promoted golden's rebake depth; 0 when there is no record yet (a golden that predates
-    the chain keeps rebaking from itself until MAX_CHAIN, exactly as before this branch)."""
-    f = _chain_file()
-    if not f.exists():
-        # no record: a golden that predates the chain, a fresh host — or a promotion whose record write the
-        # store refused (_record_chain) or that raised after the rename: then the promoted candidate's
-        # sidecar, renamed to the .chain.unrecorded marker for exactly this, holds it
-        orphan = _newest_orphan_sidecar()
-        if orphan is not None:
-            try:
-                return int(orphan.read_text().strip())
-            except (OSError, ValueError):
-                return MAX_CHAIN
-        return 0   # the count starts here — the preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
+def _mirror_file() -> Path:
+    return Path(CHAIN_MIRROR)
+
+
+def _read_depth(p: Path):
+    """None when there is no such record; MAX_CHAIN when it exists but cannot be read (empty, garbage):
+    unknown provenance forces the master rebake next cycle (0 would silently reset the counter)."""
+    if not p.exists():
+        return None
     try:
-        return int(f.read_text().strip())
+        return int(p.read_text().strip())
     except (OSError, ValueError):
-        return MAX_CHAIN   # a record that exists but cannot be read (empty, garbage): unknown provenance — the
-                          # master rebake next cycle re-establishes it (0 would silently reset the counter)
+        return MAX_CHAIN
+
+
+def chain_length() -> int:
+    """The promoted golden's rebake depth: the record beside the golden, the mirror off the images
+    store (the newer of the two when they disagree — a promotion whose store write failed leaves the
+    OLD record beside the golden and the new depth in the mirror), else a `.chain.unrecorded` marker,
+    else 0 (a golden that predates the chain keeps rebaking from itself until MAX_CHAIN, as before)."""
+    rec, mir = _read_depth(_chain_file()), _read_depth(_mirror_file())
+    if rec is not None and mir is not None and rec != mir:
+        return rec if (_mtime(_chain_file()) or 0) >= (_mtime(_mirror_file()) or 0) else mir
+    if rec is not None:
+        return rec
+    if mir is not None:
+        return mir
+    orphan = _newest_orphan_sidecar()
+    if orphan is not None:
+        d = _read_depth(orphan)
+        return MAX_CHAIN if d is None else d
+    return 0   # the count starts here — the preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
 
 
 def rebake_source() -> str:
@@ -171,21 +183,29 @@ def candidate_depth_file(candidate: str) -> Path:
 def _newest_orphan_sidecar() -> Path | None:
     """The newest `.chain.unrecorded` marker: the depth of a promotion whose golden record could not be
     written (only such sidecars are ever renamed to the marker; an abandoned build's leftover is not)."""
-    marks = list(BACKUP_DIR.glob("golden-base.*.qcow2.chain.unrecorded"))
+    marks = list(BACKUP_DIR.glob("*.chain.unrecorded"))
     return max(marks, key=lambda p: _mtime(p) or 0) if marks else None
 
 
 def unrecorded_marker(candidate: str) -> Path:
     """The sidecar of a candidate that WAS promoted but whose depth never reached the golden's record,
     renamed so the fact survives on disk (a later oneshot cannot know it otherwise) and so that no
-    leftover of an abandoned build can ever be mistaken for it."""
-    return Path(candidate + ".chain.unrecorded")
+    leftover of an abandoned build can ever be mistaken for it. Always INSIDE BACKUP_DIR, where the
+    reader and the prune look, whatever path the candidate was promoted from."""
+    return BACKUP_DIR / (Path(candidate).name + ".chain.unrecorded")
 
 
-def _keep_as_unrecorded(candidate: str) -> None:
+def _keep_as_unrecorded(candidate: str) -> bool:
+    """True when the marker now exists. The rename can fail for the very reason it is attempted (the
+    images store refusing writes), which is why the mirror off that store is the primary fallback."""
     sidecar = candidate_depth_file(candidate)
-    if sidecar.exists():
-        _run(["sudo", "mv", "-f", str(sidecar), str(unrecorded_marker(candidate))])
+    if not sidecar.exists():
+        return unrecorded_marker(candidate).exists()
+    r = _run(["sudo", "mv", "-f", str(sidecar), str(unrecorded_marker(candidate))])
+    ok = getattr(r, "returncode", 1) == 0 and unrecorded_marker(candidate).exists()
+    if not ok:
+        logger.error("the depth sidecar %s could not be kept as %s (the store refuses even a rename)", sidecar, unrecorded_marker(candidate))
+    return ok
 
 
 def _rm_candidate(candidate: str) -> None:
@@ -243,6 +263,10 @@ GOLDEN_BASE = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or os.environ.get("GOL
                or "/dev/shm/golden-base.qcow2")
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
+# A second copy of the chain record OFF the images store: the record beside the golden is the one a
+# store that refuses writes (read-only, full) cannot take — and that is the very moment the depth
+# must survive. The root filesystem's state dir takes it; chain_length() reads whichever is newer.
+CHAIN_MIRROR = os.environ.get("GOLDEN_CHAIN_MIRROR", "/var/lib/winval/golden-base.chain")
 KEEP_N = int(os.environ.get("GOLDEN_KEEP_N", "5"))
 CANDIDATE_KEEP_DAYS = int(os.environ.get("GOLDEN_CANDIDATE_KEEP_DAYS", "7"))
 CONVERT_TIMEOUT_S = int(os.environ.get("GOLDEN_CONVERT_TIMEOUT_S", "3600"))   # the flatten writes a whole image: the same budget as every whole-image copy
@@ -775,7 +799,7 @@ def _prune_backups(keep: str | None = None) -> None:
         if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
     if _chain_file().exists():   # the record exists again: the markers it superseded age out (never while it is absent — they ARE the record then)
-        for mk in BACKUP_DIR.glob("golden-base.*.qcow2.chain.unrecorded"):
+        for mk in BACKUP_DIR.glob("*.chain.unrecorded"):
             if (_mtime(mk) or float("inf")) < time.time() - 3600:
                 _run(["sudo", "rm", "-f", str(mk)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
@@ -808,14 +832,24 @@ def _record_chain(candidate: str) -> None:
         depth = int(candidate_depth_file(candidate).read_text().strip() or "0")
     except (OSError, ValueError):
         depth = MAX_CHAIN   # unknown provenance: force the master rebake NEXT cycle (0 would postpone it by MAX_CHAIN cycles)
+    # the mirror FIRST (the root filesystem's state dir, not the images store): it is the copy that survives
+    # the store refusing writes, and chain_length() reads the newer of the two when they disagree
+    _run(["sudo", "mkdir", "-p", str(_mirror_file().parent)])
+    mirrored = _write_small(str(_mirror_file()), str(depth))
     if _write_small(str(_chain_file()), str(depth)):
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
-    else:   # the sidecar stays, as the on-disk marker chain_length() reads: the only surviving record of this golden's provenance
-        _keep_as_unrecorded(candidate)
-        if _chain_file().exists():
-            logger.error("chain depth %s NOT recorded for %s: the images store refused a small write (read-only? full?); the record still reads %s (the previous golden's depth), so the master rebake may come up to one cycle late", depth, GOLDEN_BASE_DISK, chain_length())
-        else:
-            logger.error("chain depth %s NOT recorded for %s: the images store refused a small write (read-only? full?) and NO record remains — the count restarts at 0, so the master rebake is up to %d cycles away; fix the store and write %s to %s by hand", depth, GOLDEN_BASE_DISK, MAX_CHAIN, depth, _chain_file())
+        if not mirrored:
+            logger.warning("chain depth %s recorded beside the golden but NOT in the mirror %s (root filesystem refused a small write?)", depth, _mirror_file())
+        return
+    if mirrored:
+        logger.warning("chain depth %s NOT recorded beside %s: the images store refused a small write (read-only? full?); the mirror %s holds it, chain_length() reads it, and the next rotation re-seeds the store's record from it", depth, GOLDEN_BASE_DISK, _mirror_file())
+        _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
+        return
+    kept = _keep_as_unrecorded(candidate)   # neither store took a write: the sidecar is the last copy
+    if kept:
+        logger.error("chain depth %s NOT recorded for %s nor mirrored at %s (both stores refused a small write); kept as %s, which chain_length() reads — no hand-written record is needed once a store accepts writes again", depth, GOLDEN_BASE_DISK, _mirror_file(), unrecorded_marker(candidate))
+    else:
+        logger.error("chain depth %s is LOST: not recorded for %s, not mirrored at %s, and the sidecar could not be kept either; the count reads %s — write %s to %s by hand once the store accepts writes, or the master rebake is up to %d cycles late", depth, GOLDEN_BASE_DISK, _mirror_file(), chain_length(), depth, _chain_file(), MAX_CHAIN)
 
 
 def restart_pool() -> bool:

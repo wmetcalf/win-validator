@@ -397,7 +397,13 @@ class PoolManager:
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         try:
-            self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
+            try:
+                self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
+            except RuntimeError as exc:
+                if self._stop.is_set():   # the operator's stop, not a failure: exit 0, or the unit latches `failed` and the rotator's restart_pool() resurrects a deliberately stopped manager
+                    logger.info("stop requested during the warm-up: %s", exc)
+                    return
+                raise
             logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
             with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
                 for _ in range(self._concurrency):

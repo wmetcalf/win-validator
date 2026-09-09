@@ -31,6 +31,8 @@ from typing import Any, Callable
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
+
 from .host_runner import HostRunner
 
 # Engine registry. Each entry: name -> callable(path) -> verdict dict. authenticode is the
@@ -169,7 +171,7 @@ _store: JobStore | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _store
-    pool_size = int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2"))
+    pool_size = _pool_size()
     _store = JobStore(max_workers=pool_size)
     if os.environ.get("ORCHESTRATOR_WARM", "1").lower() in ("1", "true", "yes"):
         runner = HostRunner()
@@ -187,7 +189,7 @@ app = FastAPI(title="win-validator orchestrator", lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok", "engines": sorted(ENGINES), "pool_size": int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2"))}
+    return {"status": "ok", "engines": sorted(ENGINES), "pool_size": _pool_size()}
 
 
 @app.post("/scan", status_code=202)
