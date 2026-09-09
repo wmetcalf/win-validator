@@ -380,6 +380,9 @@ class PoolManager:
             job = self._store.get(d.name) if root == JOB_ROOT else None
             if job is not None and job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                 return
+            if job is not None and (getattr(job, "finished_at", None) or 0) > cutoff:
+                return   # a job that sat QUEUED past the window and finished just now: its dir is old but its
+                         # sealed output is being published this moment (the dir's mtime moves once it lands)
             _rm_job_dir(d, root)
             logger.info("retention: removed %s (%s)", d, "no row" if job is None else job.status.value)
         except Exception:  # noqa: BLE001 — one odd entry must not stop the sweep

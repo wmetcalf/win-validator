@@ -120,6 +120,11 @@ def build(base: str = BASE_QCOW2) -> str:
     gr._virsh("destroy", dom); gr._virsh("undefine", dom, "--snapshots-metadata")
     gr._run(["sudo", "rm", "-f", overlay])
     base_is_golden = os.path.realpath(base) == os.path.realpath(gr.GOLDEN_BASE_DISK)
+    if Path(os.path.realpath(base)).parent == Path(os.path.realpath(str(gr.BACKUP_DIR))):
+        # a base chosen from inside the backup dir (an old candidate) is the running build's BACKING file
+        # for hours; a concurrent rotation's preflight prunes candidates older than CANDIDATE_KEEP_DAYS,
+        # and this build holds no lock while it runs — freshen the mtime so the prune leaves it alone
+        gr._run(["sudo", "touch", os.path.realpath(base)])
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:
