@@ -63,13 +63,14 @@ class HostRunner:
             limits=self.limits,
         )
         if rc or not envelope.exists():   # 1 = the envelope could not be written (logged CRITICAL by the harness): there is no verdict to read
-            partial = envelope.exists()
-            if partial:   # a truncated write (ENOSPC mid-file) leaves a file that is not an envelope and would poison the directory for the next run
+            note = ""
+            if envelope.exists():   # a truncated write (ENOSPC mid-file) leaves a file that is not an envelope and would poison the directory for the next run
                 try:
                     envelope.unlink()
-                except OSError:
-                    pass
-            raise RuntimeError(f"run_detonation returned {rc}: no envelope at {envelope}" + (" (a partial file was removed)" if partial else ""))
+                    note = " (a partial file was removed)"
+                except OSError as exc:
+                    note = f" (a partial file is still there and could not be removed: {exc}; remove it before the next run)"
+            raise RuntimeError(f"run_detonation returned {rc}: no envelope at {envelope}{note}")
         return json.loads(envelope.read_text(encoding="utf-8"))
 
     def validate(self, input_path: str | Path) -> dict:

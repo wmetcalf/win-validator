@@ -35,7 +35,7 @@ if printf '%s' "$slirp_probe" | grep -qi "not compiled"; then
     die "'$QEMU' has no slirp (user-mode networking) compiled in — Packer's qemu builder can't reach
        the guest. Install a slirp-enabled qemu, or point QEMU_BINARY at one (e.g. a stock Ubuntu qemu)."
 fi
-[ -w /dev/kvm ] || echo "WARNING: /dev/kvm not writable — the build will be very slow (no KVM accel)." >&2
+[ -w /dev/kvm ] || { echo "ERROR: /dev/kvm is not writable. The template needs KVM (accelerator = \"kvm\", -cpu host; there is no TCG fallback): run on a KVM-capable host, or add this user to the kvm group." >&2; exit 1; }
 
 # ---- inputs ---------------------------------------------------------------------------------------
 ISO="${ISO_PATH:-iso/windows.iso}"
@@ -71,11 +71,18 @@ if [ ! -f keys/build_key ]; then
 fi
 PUBKEY="$(cat keys/build_key.pub)"
 
-# ---- render the answer file (literal substitution — safe for any password/key chars) --------------
+# ---- render the answer file (XML-escaped substitution, then parsed back: an operator ADMIN_PASSWORD with
+#      & < or > used to land raw in two <Value> elements, and Windows Setup silently ignores an unparseable
+#      Autounattend — the failure surfaced only as packer waiting out ssh_timeout) ---------------------
 PUBKEY="$PUBKEY" ADMIN_PW="$ADMIN_PW" python3 - <<'PY'
-import os
+import os, sys, xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 t = open("answer/Autounattend.xml.tmpl").read()
-t = t.replace("@@SSH_PUBKEY@@", os.environ["PUBKEY"]).replace("@@ADMIN_PASSWORD@@", os.environ["ADMIN_PW"])
+t = t.replace("@@SSH_PUBKEY@@", escape(os.environ["PUBKEY"])).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"]))
+try:
+    ET.fromstring(t)
+except ET.ParseError as exc:
+    sys.exit(f"rendered Autounattend.xml is not well-formed XML ({exc}); refusing to build with it")
 open("answer/Autounattend.xml", "w").write(t)
 PY
 say "rendered answer/Autounattend.xml"

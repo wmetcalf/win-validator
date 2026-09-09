@@ -24,7 +24,9 @@ downstream step.
   even when it is compiled out, so it proves nothing.) `build.sh` runs this same probe and fails early.
 - **xorriso** (or `genisoimage`/`mkisofs`) — for the answer CD.
 - **openssh-client** + **python3** — key generation + answer-file rendering.
-- Read/write **`/dev/kvm`** (for acceleration; the build works without it but is very slow).
+- Read/write **`/dev/kvm`** — **required**: the template sets `accelerator = "kvm"` and `-cpu host`, and neither
+  qemu nor the packer qemu plugin falls back to TCG, so without KVM (a nested VM, a CI container) the build fails
+  after the ISO download with an opaque qemu exit. `build.sh` refuses up front.
 
 On Debian/Ubuntu: `apt-get install qemu-system-x86 qemu-utils xorriso openssh-client python3` (+ Packer).
 
