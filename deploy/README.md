@@ -42,7 +42,7 @@ sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.ex
 # Set-Content: the whole authorised list). Build the image first, in its own checkout, per
 # golden-packer/README.md; PACKER is that checkout (output/ and keys/ are gitignored, so the
 # /opt/win-validator clone never has them).
-PACKER=~/win-golden-packer
+PACKER=~/win-golden-packer/golden-packer   # the golden-packer DIRECTORY inside that checkout (build.sh, keys/, output/ live there)
 sudo install -m 0600 "$PACKER/keys/build_key" /etc/winval/win_golden        # AUTHENTICODE_SSH_KEY: the only key the image accepts
 
 # unprivileged tiers: ingress + Postgres. The password is minted ONCE and written into the env
@@ -136,8 +136,11 @@ temporal-trust ladder (workers sync real time + do live CRL on restore, so they 
 against *now*); the point is fail-safe rebakes:
 
 ```
-build_candidate()  private copy of the promoted golden (the master before any promotion, and every GOLDEN_MAX_CHAIN cycles) --overlay clone--> refresh trust state (myatg --refresh: disallowed
+build_candidate()  private copy of the promoted golden --overlay clone--> refresh trust state (myatg --refresh: disallowed
                    kill-list + CRL cache + roots/CTL) --> flatten --> candidate.qcow2
+                   EVERY GOLDEN_MAX_CHAIN cycles (and always with GOLDEN_REBAKE_FROM=master) the cycle is instead the FULL
+                   golden_build bake from the packer master: it stages and COMPILES the agent from MYATG_SRC (/opt/myatg —
+                   whatever that checkout holds ships to every worker), installs the task and ACLs, refreshes, gates, promotes
 validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
 

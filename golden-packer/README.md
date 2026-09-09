@@ -27,7 +27,7 @@ On Debian/Ubuntu: `apt-get install qemu-system-x86 qemu-utils xorriso openssh-cl
 ## Use it
 
 ```sh
-git clone <this-repo> win-golden-packer && cd win-golden-packer
+git clone <this-repo> win-golden-packer && cd win-golden-packer/golden-packer   # this directory of the win-validator repo
 
 # 1. Drop your Windows Server 2025 ISO here (eval or retail):
 cp /path/to/Windows_Server_2025.iso iso/windows.iso     # or: export ISO_PATH=/path/to.iso

@@ -30,6 +30,9 @@ import sys
 import time
 from pathlib import Path
 
+if __name__ == "__main__":   # golden_build does `import golden_rotate`: hand it THIS module, not a second copy whose
+    sys.modules["golden_rotate"] = sys.modules[__name__]   # NothingPublished would be a different class from main()'s handler
+
 logger = logging.getLogger("winval.golden_rotate")
 
 def _tighten_lock(fd: int) -> None:
@@ -279,7 +282,7 @@ def _existing_ancestor(path: str) -> Path:
     return p
 
 
-def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False) -> None:
+def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False, keep: str | None = None) -> None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
     samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
@@ -312,7 +315,7 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
                 time.sleep(5)
         _sweep_own_temps()   # UNDER the lock (nothing is in flight): a promotion killed mid-copy strands a
                              # golden-sized temporary beside a base, and the space check below would fail forever
-        _prune_backups()     # likewise the expired candidates and surplus backups: pruned only after a
+        _prune_backups(keep)   # likewise the expired candidates and surplus backups: pruned only after a
                              # promotion, they could fill the store so that no promotion ever passes this check
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
@@ -678,17 +681,24 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
-def _prune_backups() -> None:
+def _prune_backups(keep: str | None = None) -> None:
+    """``keep``: a candidate this run is about to promote (the retry CLI's argument) — never
+    reclaimed here however old it is, nor its .chain sidecar."""
+    keep_paths = {str(Path(keep)), str(Path(keep)) + ".chain"} if keep else set()
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one
     # a candidate kept for a retry (NothingPublished) is reclaimed after CANDIDATE_KEEP_DAYS
     cutoff = time.time() - CANDIDATE_KEEP_DAYS * 86400
     for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
+        if str(c) in keep_paths:
+            continue
         if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and (_mtime(c) or float("inf")) < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)
+        if str(sc) in keep_paths:
+            continue
         if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
@@ -811,7 +821,7 @@ def _main(cmd: str, argv: list[str]) -> int:
         # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
         # the larger of the candidate and the golden the promotion backs up, with the candidate's own
         # allocation already spent
-        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True)
+        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c))
         rotate(argv[1])
         restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0

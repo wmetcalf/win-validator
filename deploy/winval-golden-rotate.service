@@ -3,6 +3,9 @@
 # validates the candidate (benign==Valid + revoked==Revoked), and promotes it ONLY if it passes,
 # keeping the last N goldens as rollback backups. A failing gate keeps the current golden + exits
 # non-zero (surfaced by systemd). Restarts the pool-manager on success to re-warm off the new base.
+# Every GOLDEN_MAX_CHAIN cycles (and always with GOLDEN_REBAKE_FROM=master) the cycle is the FULL
+# golden_build bake from the packer master: it COMPILES the agent from MYATG_SRC (below) — whatever
+# that checkout holds is what ships to every worker.
 [Unit]
 Description=win-validator golden refresh + validation-gated rotation
 After=libvirtd.service winval-pool-manager.service
@@ -24,6 +27,7 @@ Environment=GOLDEN_KEEP_N=5
 # Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
 #   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
+Environment=MYATG_SRC=/opt/myatg
 EnvironmentFile=-/etc/winval/winval.env
 # the gate samples live under /var/lib/winval/samples (root-owned), never /tmp
 PrivateTmp=true
