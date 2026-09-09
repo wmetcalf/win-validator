@@ -416,11 +416,15 @@ def build_candidate(src: str | None = None) -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
-    src, src_copy, at = snapshot_source(ts, src)   # the source the caller decided on (never re-decided here: a promotion in between could flip it to the agent-less master); may raise (lock wait, missing source): nothing else exists yet
+    xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
+    os.close(xfd)   # BEFORE the golden-sized private copy: a failure here must strand nothing
+    try:
+        src, src_copy, at = snapshot_source(ts, src)   # the source the caller decided on (never re-decided here: a promotion in between could flip it to the agent-less master); may raise (lock wait, missing source)
+    except BaseException:
+        os.unlink(xml_path)
+        raise
     depth = 0 if src == MASTER_QCOW2 else at + 1   # the source's depth as read under the copy's lock; the sidecar is written once the candidate exists (below)
     logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
-    xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
-    os.close(xfd)
     built = False
     try:   # from here every exit — a failed overlay, XML, define or start included — destroys the domain + overlay
         assert _run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", src_copy, "-F", "qcow2",
