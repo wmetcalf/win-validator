@@ -89,11 +89,16 @@ async def scan(file: UploadFile = File(...)) -> dict:
     try:
         _store.create(job)
     except Exception:   # the row is what makes the spool a job: without it the upload (up to the cap) and its dir would sit rowless until the retention sweep
-        for d_ in (path, indir, Path(job.result_dir)):
-            try:
-                path.unlink() if d_ is path else d_.rmdir()
-            except OSError:
-                pass
+        try:   # an AMBIGUOUS failure (the commit landed, the acknowledgement did not): the job is live, its input must stay
+            committed = _store.get(job.job_id) is not None
+        except Exception:  # noqa: BLE001 — the store is unreachable either way: assume nothing landed
+            committed = False
+        if not committed:
+            for d_ in (path, indir, Path(job.result_dir)):
+                try:
+                    path.unlink() if d_ is path else d_.rmdir()
+                except OSError:
+                    pass
         raise
     return {"job_id": job.job_id, "status": job.status.value}
 

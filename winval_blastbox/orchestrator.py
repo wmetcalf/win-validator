@@ -273,7 +273,9 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     except Exception as exc:  # noqa: BLE001 — raised by the executor AFTER the item was queued (a worker thread could not start — a RuntimeError
         # too, which is why the pre-queue case is a class of its own): the job IS queued and an idle worker may already be running it, so
         # the request succeeded — say so (a 500 here, with the upload deleted, let a worker run an engine on a missing file and report done)
-        _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run", jid, exc)
+        alive = len(getattr(_store._pool, "_threads", ()) or ())
+        _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run%s", jid, exc,
+                     "" if alive else " — once a worker thread can start (none is alive now: the process limit?)")
     return {"job_id": jid, "status": "queued", "engines": sel}
 
 
