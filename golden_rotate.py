@@ -63,7 +63,10 @@ def _load_env_file(path: str) -> None:
         k = k.strip()
         v = v.strip()
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            quote = v[0]
             v = v[1:-1]
+            if quote == '"':   # systemd.exec(5): inside double quotes a backslash escapes a backslash or a quote
+                v = re.sub(r'\\([\\"])', r'\1', v)
         if k:
             seen[k] = v   # the LAST assignment wins, as it does for systemd — a hand run must read the file the units read
     for k, v in seen.items():
@@ -285,7 +288,7 @@ def _existing_ancestor(path: str) -> Path:
 
 
 def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False, keep: str | None = None,
-                       source_copy: bool = True) -> None:
+                       source_copy: bool = True, gate_samples: bool = True) -> None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
     samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
@@ -338,9 +341,9 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
     if BACKUP_DIR.exists():
         _sweep_stranded_sources()   # BEFORE the space check below, which a stranded copy would fail forever
-    if not BENIGN or not Path(BENIGN).is_file():   # the gate ALWAYS validates the benign sample
+    if gate_samples and (not BENIGN or not Path(BENIGN).is_file()):   # the gate ALWAYS validates the benign sample — but a promotion-only retry/rollback never runs the gate
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
-    if REVOKED and not Path(REVOKED).is_file():
+    if gate_samples and REVOKED and not Path(REVOKED).is_file():
         raise NothingPublished(f"GOLDEN_REVOKED_SAMPLE={REVOKED} does not exist: the gate could not run, so the build would be wasted")
     if estimate_bytes is None:
         estimate_bytes = max((Path(p).stat().st_size for p in (GOLDEN_BASE_DISK, MASTER_QCOW2) if Path(p).exists()), default=0)
@@ -844,7 +847,7 @@ def _main(cmd: str, argv: list[str]) -> int:
         # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
         # the larger of the candidate and the golden the promotion backs up, with the candidate's own
         # allocation already spent
-        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False)
+        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False, gate_samples=False)
         rotate(argv[1])
         restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0
