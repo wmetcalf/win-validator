@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -52,6 +53,8 @@ def _retention_days() -> float:
     raw = os.environ.get("WINVAL_JOB_RETENTION_DAYS", "7").strip()
     try:
         days = float(raw or "7")
+        if not math.isfinite(days):   # 'nan' passes float() and every comparison below: it would sweep EVERYTHING
+            raise ValueError(raw)
     except ValueError:
         logger.warning("WINVAL_JOB_RETENTION_DAYS=%r is not a number of days: using 7", raw)
         return 7.0
@@ -215,7 +218,9 @@ class PoolManager:
             job_fd = _open_under(JOB_ROOT, _rel_parts(Path(job.result_dir or ""), what), what)
             try:
                 in_dirfd = os.open("input", _DIR, dir_fd=job_fd)
-                in_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=in_dirfd)
+                # O_NONBLOCK: a FIFO the ingress mkfifo'd here (no capability needed) would otherwise park this
+                # claim thread in open(2) until a writer appeared — forever — and the type check below never ran
+                in_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=in_dirfd)
             except FileNotFoundError:
                 raise FileNotFoundError(f"spooled input missing: {Path(job.result_dir) / 'input' / filename}") from None
             st = os.fstat(in_fd)
@@ -361,6 +366,11 @@ class PoolManager:
             self._stop.wait(SWEEP_S)
 
     def run(self) -> None:
+        wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
+        if wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr):
+            # the JOB_ROOT sweep would otherwise remove the scratch root as a rowless job dir, and an ingress
+            # result_dir could name a directory inside the manager's own scratch tree
+            raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} and WINVAL_JOB_ROOT {JOB_ROOT} must be disjoint")
         WORK_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
         if WORK_ROOT.is_symlink() or WORK_ROOT.stat().st_uid != os.geteuid():
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} must be a directory owned by this process (uid {os.geteuid()})")

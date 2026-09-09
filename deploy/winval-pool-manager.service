@@ -7,7 +7,10 @@
 #     sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator && cd /opt/win-validator
 #     sudo python3 -m venv --system-site-packages .venv && sudo .venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 #     sudo git clone https://github.com/wmetcalf/myatg /opt/myatg   # MYATG_SRC: the agent golden_build.py compiles   # ROOT-owned: this unit runs as root
-#     sudo install -d -m 0700 /etc/winval && sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env  # ROOT-ONLY (DB password); first time only, then edit
+#     sudo install -d -m 0700 /etc/winval   # ROOT-ONLY (DB password)
+#     sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env   # first time only, then edit
+#       (two statements on purpose: `A && B || C` would run C — overwriting a live winval.env and the Postgres
+#        password it alone holds — whenever A failed, not only when the file was missing)
 #     sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs   # WINVAL_JOB_ROOT, shared with the ingress container
 #     # Postgres + ingress (the unit claims jobs from that Postgres): mint the DB password once (a hex one needs no encoding —
 #     # deploy/README.md derives compose.env for any other), write compose.env from it, then bring the compose up
