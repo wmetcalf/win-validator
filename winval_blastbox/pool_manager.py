@@ -34,6 +34,46 @@ from .host_runner import HostRunner
 logger = logging.getLogger("winval.pool_manager")
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
+RETENTION_DAYS = float(os.environ.get("WINVAL_JOB_RETENTION_DAYS", "7"))   # a finished (or rowless) job directory is removed after this
+SWEEP_S = 3600.0
+
+
+def _confine(p: Path, what: str) -> Path:
+    """A path this ROOT process will read, write through or unlink must lie under JOB_ROOT with NO symlink
+    in any component below it: the ingress owns job_root (uid 10001) and a compromised ingress could
+    otherwise replace <job>/input or <job>/output with a symlink and steer this process anywhere. The
+    resolved path is returned; the walk below refuses intermediate links (blastbox's retention sweeper
+    keeps the same rule: symlinks are never followed out of job_root)."""
+    root = JOB_ROOT.resolve()
+    rp = p.resolve()
+    if not rp.is_relative_to(root):
+        raise ValueError(f"{what} escapes JOB_ROOT: {p}")
+    cur = root
+    for part in rp.relative_to(root).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"{what}: symlink in path refused: {cur}")
+    return rp
+
+
+def _rm_job_dir(d: Path) -> None:
+    """Remove one job directory tree, never following symlinks (they are unlinked as links)."""
+    d = _confine(d, "job dir")
+    for root_, dirs, files in os.walk(d, topdown=False, followlinks=False):
+        for f in files + [x for x in dirs if (Path(root_) / x).is_symlink()]:
+            try:
+                (Path(root_) / f).unlink()
+            except OSError:
+                pass
+        for x in dirs:
+            try:
+                (Path(root_) / x).rmdir()
+            except OSError:
+                pass
+    try:
+        d.rmdir()
+    except OSError:
+        pass
 POLL_S = float(os.environ.get("WINVAL_CLAIM_POLL_S", "0.5"))
 
 
@@ -77,12 +117,10 @@ class PoolManager:
             filename = Path(job.filename or "").name
             if not filename:
                 raise ValueError(f"job {job.job_id}: empty/invalid filename")
-            result_dir = Path(job.result_dir or "").resolve()
-            if not result_dir.is_relative_to(JOB_ROOT.resolve()):
-                raise ValueError(f"job {job.job_id}: result_dir escapes JOB_ROOT: {job.result_dir!r}")
-            in_path = result_dir / "input" / filename
-            out_dir = result_dir / "output"
-            if not in_path.exists():
+            result_dir = _confine(Path(job.result_dir or ""), f"job {job.job_id}: result_dir")
+            in_path = _confine(result_dir / "input" / filename, f"job {job.job_id}: input")
+            out_dir = _confine(result_dir / "output", f"job {job.job_id}: output") if (result_dir / "output").exists() else result_dir / "output"
+            if not in_path.is_file():
                 raise FileNotFoundError(f"spooled input missing: {in_path}")
             env = self._runner.validate_to_dir(in_path, out_dir)
             summary = _extract_verdict(env)
@@ -144,17 +182,43 @@ class PoolManager:
                     logger.warning("job %s was RUNNING at start (abandoned by the previous pool-manager): marked FAILED", job.job_id)
                     # the spooled input a lost terminal write KEPT (see _process) is consumed here, once the row is terminal
                     name = Path(job.filename or "").name
-                    rd = Path(job.result_dir or "").resolve()
-                    if name and rd.is_relative_to(JOB_ROOT.resolve()):
+                    if name:
                         try:
-                            (rd / "input" / name).unlink()
-                        except OSError:
+                            _confine(Path(job.result_dir or "") / "input" / name, "orphan input").unlink()
+                        except (OSError, ValueError):
                             pass
             except Exception:  # noqa: BLE001
                 logger.warning("orphan recovery: job %s could not be updated", job.job_id, exc_info=True)
 
+    def _sweep_job_root(self) -> None:
+        """Retention for WINVAL_JOB_ROOT (nothing else has any): a job directory older than RETENTION_DAYS
+        whose row is terminal — or has no row at all (an upload the ingress rejected after mkdir) — is
+        removed; RUNNING/QUEUED rows are kept whatever their age; symlinked entries are never followed."""
+        cutoff = time.time() - RETENTION_DAYS * 86400
+        try:
+            entries = list(JOB_ROOT.iterdir())
+        except OSError:
+            return
+        for d in entries:
+            try:
+                if d.is_symlink() or not d.is_dir() or d.stat().st_mtime > cutoff:
+                    continue
+                job = self._store.get(d.name)
+                if job is not None and job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                    continue
+                _rm_job_dir(d)
+                logger.info("retention: removed job dir %s (%s)", d.name, "no row" if job is None else job.status.value)
+            except Exception:  # noqa: BLE001 — one odd entry must not stop the sweep
+                logger.warning("retention: could not sweep %s", d, exc_info=True)
+
+    def _sweep_loop(self) -> None:
+        while not self._stop.is_set():
+            self._sweep_job_root()
+            self._stop.wait(SWEEP_S)
+
     def run(self) -> None:
         self._recover_orphans()
+        threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         self._runner.warmup()
         logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
