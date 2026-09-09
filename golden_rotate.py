@@ -721,7 +721,10 @@ def _record_chain(candidate: str) -> None:
     if _write_small(str(_chain_file()), str(depth)):
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
     else:   # the sidecar stays: it is the only surviving record of this golden's provenance
-        logger.error("chain depth %s NOT recorded for %s; the record still reads %s (the previous golden's depth), so the master rebake may come up to one cycle late — check the store: the preflight proved it writable at the start of this run", depth, GOLDEN_BASE_DISK, chain_length())
+        if _chain_file().exists():
+            logger.error("chain depth %s NOT recorded for %s: the images store refused a small write (read-only? full?); the record still reads %s (the previous golden's depth), so the master rebake may come up to one cycle late", depth, GOLDEN_BASE_DISK, chain_length())
+        else:
+            logger.error("chain depth %s NOT recorded for %s: the images store refused a small write (read-only? full?) and NO record remains — the count restarts at 0, so the master rebake is up to %d cycles away; fix the store and write %s to %s by hand", depth, GOLDEN_BASE_DISK, MAX_CHAIN, depth, _chain_file())
 
 
 def restart_pool() -> bool:
@@ -803,6 +806,8 @@ def _main(cmd: str, argv: list[str]) -> int:
     if cmd == "validate" and len(argv) > 1:
         return 0 if validate_golden(argv[1]) else 1
     if cmd == "rotate" and len(argv) > 1:
+        c = Path(argv[1])
+        rotation_preflight(estimate_bytes=c.stat().st_size if c.is_file() else None)   # the retry is a promoting entry point too: root, lock, space, a writable chain record
         rotate(argv[1])
         restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         return 0

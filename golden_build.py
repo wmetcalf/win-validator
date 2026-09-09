@@ -136,13 +136,16 @@ def build(base: str = BASE_QCOW2) -> str:
         Path(xml).write_text(rt._domain_xml(dom, overlay))
         assert gr._virsh("define", xml).returncode == 0
         assert gr._virsh("start", dom).returncode == 0
-        mac = gr._mac(dom); ip = None; dl = time.time() + 240
+        mac = gr._mac(dom); ip = None; ready = False; dl = time.time() + 240
         while time.time() < dl:
             ip = gr._ip_for_mac(mac) if mac else None
             if ip and "READY" in gr._ssh_ps(ip, "'READY'", 15):
+                ready = True
                 break
             time.sleep(5)
-        assert ip, "guest never reachable"
+        if not ready:   # an address without an answer is the usual shape of a WRONG KEY, said so here rather than as scp's 'Permission denied'
+            raise gr.NothingPublished(f"guest {ip or 'never got an address'} did not answer over ssh within 240s: is {gr.SSH_KEY} the key the image authorises "
+                                      "(the packer build's keys/build_key — the image accepts no other)?")
         # the packer image has no agent directory: scp cannot create a parent, so the first upload
         # of a build from the master failed before any step ran
         gr._ssh_ps(ip, f"New-Item -Force -ItemType Directory '{AGENT_DIR}' | Out-Null", 60, check=True)
@@ -191,7 +194,10 @@ def build_and_promote(base: str = BASE_QCOW2) -> int:
     # (on a first-run host there is no golden and no master to estimate from)
     if not Path(base).is_file():
         raise gr.NothingPublished(f"build base {base} is not a file: set GOLDEN_BUILD_BASE in winval.env (or pass the path) to the post-OS-install image")
-    gr.rotation_preflight(estimate_bytes=Path(base).stat().st_size)
+    # the run's peak is the larger of the base being built and the GOLDEN the promotion backs up
+    # (grown by the agent, ngen images and every cycle's trust state — the lean packer master understates it)
+    golden = Path(gr.GOLDEN_BASE_DISK)
+    gr.rotation_preflight(estimate_bytes=max(Path(base).stat().st_size, golden.stat().st_size if golden.is_file() else 0))
     candidate = build(base)
     if not gr.validate_golden(candidate):
         logger.error("BUILD REJECTED: candidate %s failed the gate; not promoted", candidate)

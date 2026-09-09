@@ -37,7 +37,13 @@ sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/job
 sudo git clone https://github.com/wmetcalf/myatg /opt/myatg   # the in-guest agent's sources (MYATG_SRC), compiled by golden_build.py
 sudo install -d -m 0700 /etc/winval
 sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env   # first time only (the test runs as root: the dir is 0700); then edit
-sudo install -m 0600 ~/.ssh/win_golden /etc/winval/win_golden               # the key the golden was built with
+# the golden's ssh key is the PACKER BUILD's key: the image authorises exactly one public key, the
+# throwaway keys/build_key(.pub) golden-packer/build.sh generated (Autounattend writes it with
+# Set-Content: the whole authorised list). Build the image first, in its own checkout, per
+# golden-packer/README.md; PACKER is that checkout (output/ and keys/ are gitignored, so the
+# /opt/win-validator clone never has them).
+PACKER=~/win-golden-packer
+sudo install -m 0600 "$PACKER/keys/build_key" /etc/winval/win_golden        # AUTHENTICODE_SSH_KEY: the only key the image accepts
 
 # unprivileged tiers: ingress + Postgres. The password is minted ONCE and written into the env
 # file the pool-manager reads — it is baked into the Postgres volume at first start and cannot
@@ -88,7 +94,7 @@ sudo systemctl daemon-reload
 # weekly rebake also returns to every GOLDEN_MAX_CHAIN cycles — then bake the golden from it once:
 # build -> gate (the benign sample validates) -> promote; ~30-60 min. It logs "NOT in service"
 # because the pool is not running yet — the next line starts it.
-sudo install -m 0644 golden-packer/output/winserver2025-core.qcow2 /var/lib/libvirt/images/winserver2025-core.qcow2
+sudo install -m 0644 "$PACKER/output/winserver2025-core.qcow2" /var/lib/libvirt/images/winserver2025-core.qcow2   # the packer checkout's output (PACKER, set above)
 sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote   # from GOLDEN_MASTER (or GOLDEN_BUILD_BASE / an explicit path)
 sudo systemctl enable --now winval-pool-manager
 ```
