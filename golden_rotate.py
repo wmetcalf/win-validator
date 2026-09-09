@@ -110,6 +110,17 @@ def _chain_file() -> Path:
     return Path(GOLDEN_BASE_DISK + ".chain")
 
 
+def _agent_port() -> int:
+    """AUTHENTICODE_AGENT_PORT read tolerantly (the same rule as winval_blastbox.knobs.agent_port; this
+    script runs standalone, so the reader is local)."""
+    raw = os.environ.get("AUTHENTICODE_AGENT_PORT", "").strip()
+    try:
+        return max(1, int(raw)) if raw else 8765
+    except ValueError:
+        logger.warning("AUTHENTICODE_AGENT_PORT=%r is not a whole number: using 8765", raw)
+        return 8765
+
+
 def _mirror_file() -> Path:
     return Path(CHAIN_MIRROR)
 
@@ -126,19 +137,23 @@ def _read_depth(p: Path):
 
 
 def chain_length() -> int:
-    """The promoted golden's rebake depth: the HIGHEST of the record beside the golden, the mirror off
-    the images store and the newest `.chain.unrecorded` marker (see below for why highest, not newest),
-    else 0 (a golden that predates the chain keeps rebaking from itself until MAX_CHAIN, as before)."""
-    # When the copies disagree the HIGHEST depth wins, not the newest: a store that refused the record
-    # leaves the old (lower) record in place, and a record restored without its mtime (cp, rsync -t-less)
-    # is stale but looks newest. Erring high costs at most one early master rebake (a wasted full bake);
-    # erring low postpones the rebake MAX_CHAIN exists to force — the direction that accumulates
-    # withdrawn kill-list entries. A marker is only ever a promotion's depth; the prune ages it out once
-    # a newer record exists.
-    depths = [d for p in (_chain_file(), _mirror_file(), _newest_orphan_sidecar())
-              if p is not None and (d := _read_depth(p)) is not None]
-    if depths:
-        return max(depths)
+    """The promoted golden's rebake depth: the NEWEST of the record beside the golden, the mirror off
+    the images store and the newest `.chain.unrecorded` marker (see below), else 0 (a golden that
+    predates the chain keeps rebaking from itself until MAX_CHAIN, as before)."""
+    # When the copies disagree the NEWEST wins: the last promotion wrote it. _record_chain REMOVES a copy it
+    # could not write (a stale copy must never outlive a master reset — "highest wins" latched a full bake
+    # every cycle once a mirror store refused writes), so a disagreement is only ever a copy whose remove
+    # failed too (a read-only store), and there the surviving fresh copy is the newer one. A marker is
+    # touched at promotion time. The preflight then brings the older copies up to the newest, so a record
+    # restored without its mtime is repaired the moment it is older than the mirror — and a copy that is
+    # both stale and newest (a plain `cp` restore of the record alone) reads as the depth until the next
+    # promotion rewrites both: the operator's restore is trusted, as before this branch.
+    copies = []
+    for p in (_chain_file(), _mirror_file(), _newest_orphan_sidecar()):
+        if p is not None and (d := _read_depth(p)) is not None:
+            copies.append((_mtime(p) or 0, d))
+    if copies:
+        return max(copies, key=lambda t: t[0])[1]
     return 0   # the count starts here — the preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
 
 
@@ -407,10 +422,10 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             if not _write_small(probe, "probe"):
                 raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
             _run(["sudo", "rm", "-f", probe])
-            # seed a missing record — and REWRITE a stale one: after an images-store outage the record beside the
-            # golden holds an old depth while the mirror holds the real one; chain_length() picks the highest, and
-            # the record is brought up to it so a lost mirror (a rebuilt root filesystem) cannot hand the stale
-            # depth back; the mirror is brought up the same way
+            # seed a missing record — and REWRITE a differing one: after an images-store outage the record beside
+            # the golden may be gone or stale while the mirror holds the real one; chain_length() picks the newest,
+            # and both copies are brought to it so a lost mirror (a rebuilt root filesystem) cannot hand a stale
+            # depth back
             want = chain_length()
             if _read_depth(_chain_file()) != want and not _write_small(str(_chain_file()), str(want)):
                 raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
@@ -571,7 +586,7 @@ def validate_golden(qcow2: str) -> bool:
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
     from winval_blastbox.vm_pool import agent_validate
     from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
-    spec = VmWorkerSpec(name="goldgate", image=VmImageSpec(golden=qcow2), agent_port=int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765")))   # the port the golden was BAKED to listen on (the pool's knob)
+    spec = VmWorkerSpec(name="goldgate", image=VmImageSpec(golden=qcow2), agent_port=_agent_port())   # the port the golden was BAKED to listen on (the pool's knob)
     rt = spec.runtime()
     try:
         slot = rt.spawn_ready(timeout_s=240)
@@ -861,9 +876,11 @@ def _record_chain(candidate: str) -> None:
     if _write_small(str(_chain_file()), str(depth)):
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
         if not mirrored:
-            logger.warning("chain depth %s recorded beside the golden but NOT in the mirror %s (root filesystem refused a small write?)", depth, _mirror_file())
+            _run(["sudo", "rm", "-f", str(_mirror_file())])   # a mirror that cannot be REWRITTEN must not keep an old depth (a reset to 0 would be outranked forever)
+            logger.warning("chain depth %s recorded beside the golden but NOT in the mirror %s (root filesystem refused a small write?); the stale mirror was removed", depth, _mirror_file())
         return
     if mirrored:
+        _run(["sudo", "rm", "-f", str(_chain_file())])   # same: a stale record must not outlive the promotion (the preflight re-seeds it from the mirror)
         logger.warning("chain depth %s NOT recorded beside %s: the images store refused a small write (read-only? full?); the mirror %s holds it, chain_length() reads it, and the next rotation re-seeds the store's record from it", depth, GOLDEN_BASE_DISK, _mirror_file())
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
         return

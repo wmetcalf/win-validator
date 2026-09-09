@@ -29,12 +29,13 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # import the sibling golden_rotate (libvirt/SSH helpers + gate + rotate)
 import golden_rotate as gr
+from winval_blastbox.knobs import agent_port
 
 logger = logging.getLogger("winval.golden_build")
 
 BASE_QCOW2 = os.environ.get("GOLDEN_BUILD_BASE") or gr.MASTER_QCOW2   # the packer's output (golden-packer -> winserver2025-core.qcow2), installed as GOLDEN_MASTER: the ONLY image the repo produces
 AGENT_DIR = "C:\\agent"
-AGENT_PORT = int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765"))   # the pool's knob: the golden LISTENS on it (URL ACL, firewall, task), so changing it means a rebake
+AGENT_PORT = agent_port()   # the pool's knob: the golden LISTENS on it (URL ACL, firewall, task), so changing it means a rebake
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 # The myatg validator sources compiled in-guest. Point MYATG_SRC at a myatg checkout
 # (github.com/wmetcalf/myatg); defaults to a sibling `../myatg` clone next to this repo.
@@ -70,6 +71,7 @@ STEPS: list[tuple[str, str]] = [
         'qemu-ga ' + [bool](Get-Service QEMU-GA -ErrorAction SilentlyContinue)"""),   # optional: the pool falls back to SSH for the clock
     ("compile-myatg", f"""
         & '{_CSC}' /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:{AGENT_DIR}\\myatg.exe {AGENT_DIR}\\myatg.cs {AGENT_DIR}\\rdp_validate.cs {AGENT_DIR}\\http_serve.cs {AGENT_DIR}\\service.cs 2>&1 | Out-File {AGENT_DIR}\\build.log
+        if ($LASTEXITCODE -ne 0) {{ throw "myatg compile failed ($LASTEXITCODE): see {AGENT_DIR}\\build.log" }}   # csc is native: on a base that already carries an agent, Test-Path alone passed with the OLD binary
         if (-not (Test-Path {AGENT_DIR}\\myatg.exe)) {{ throw 'myatg compile failed' }}
         'compiled ' + (Test-Path {AGENT_DIR}\\myatg.exe)"""),
     ("refresh-trust", gr.refresh_ps(GV_ARG, WARM_PS)),   # fails hard in-guest; counts checked below

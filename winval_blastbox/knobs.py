@@ -32,3 +32,9 @@ def upload_mb() -> int:
     """AUTHENTICODE_MAX_UPLOAD_MB: the bound the ingress enforces on an upload AND the bound the host
     pool-manager enforces on the spooled input it copies — set it the same in both tiers' environments."""
     return env_int("AUTHENTICODE_MAX_UPLOAD_MB", 1024, floor=1)
+
+
+def agent_port() -> int:
+    """AUTHENTICODE_AGENT_PORT: the port the golden LISTENS on (baked into its URL ACL, firewall rule and
+    task), read by the pool, the builder and the engine alike."""
+    return env_int("AUTHENTICODE_AGENT_PORT", 8765, floor=1)

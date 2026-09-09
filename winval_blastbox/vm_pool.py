@@ -25,7 +25,7 @@ import urllib.request
 from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
 
-from .knobs import env_int
+from .knobs import agent_port, env_int
 
 logger = logging.getLogger("winval.vm_pool")
 
@@ -90,7 +90,7 @@ def authenticode_spec() -> VmWorkerSpec:
     return VmWorkerSpec(
         name="authenticode",
         image=VmImageSpec(golden=os.environ.get("AUTHENTICODE_GOLDEN_BASE", "/dev/shm/golden-base.qcow2")),
-        agent_port=int(os.environ.get("AUTHENTICODE_AGENT_PORT", "8765")),
+        agent_port=agent_port(),
         warm_size=pool_size(),
         egress=egress,
         routing=routing,

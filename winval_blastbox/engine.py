@@ -31,6 +31,7 @@ from blastbox.contract import Warning as BbWarning
 from blastbox.limits import Limits
 from blastbox.worker.engine import DetonationResult
 
+from .knobs import env_int
 from .vm_pool import WarmVmPool
 
 # ---------------------------------------------------------------------------
@@ -62,8 +63,7 @@ def get_pool(stop_event=None) -> WarmVmPool:
                 # snapshot-revert ("clear the job") after EVERY validation (max isolation, ~6-8s/job)
                 # vs reuse-then-recycle for throughput. Smoke gating is independent (AUTHENTICODE_
                 # SMOKE_SAMPLE → health_check runs before the snapshot + after every recycle).
-                jpr = int(os.environ.get("AUTHENTICODE_JOBS_PER_RECYCLE",
-                                         getattr(AuthenticodeEngine, "jobs_per_recycle", 1)))
+                jpr = env_int("AUTHENTICODE_JOBS_PER_RECYCLE", int(getattr(AuthenticodeEngine, "jobs_per_recycle", 1)), floor=1)
                 pool = WarmVmPool(jobs_per_recycle=jpr)
                 pool.start(stop_event=stop_event)   # reaps its own workers on every failed exit; nothing else can
                 _POOL = pool
