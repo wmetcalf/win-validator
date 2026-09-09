@@ -234,6 +234,8 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     name = Path(file.filename or "input").name
     if not name or name in (".", "..") or "\x00" in name:   # a NUL made mkstemp raise ValueError as a 500
         raise HTTPException(status_code=400, detail="filename has no usable name")
+    if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX, as the ingress twin bounds it: the row stored and served a 4 KB name verbatim
+        raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
     # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
     # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
     stem, ext = os.path.splitext(name)
@@ -254,7 +256,7 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
             pass
         raise
     try:
-        jid = _store.create(file.filename or "input", sel)
+        jid = _store.create(name, sel)   # the sanitised basename, as the ingress records it — not ../../evil.exe verbatim
     except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
         try:
             os.unlink(path)

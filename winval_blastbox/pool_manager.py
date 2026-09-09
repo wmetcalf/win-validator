@@ -233,6 +233,7 @@ class PoolManager:
         in_fd = None
         work = None
         recorded = False   # whether a terminal status reached the store: only then is the spooled input consumed
+        keep_input = False   # a spool kept as evidence (a sha256 mismatch) is never unlinked by this run
         try:
             # INSIDE the guard: a hostile row is exactly what the sanitiser exists for, and raising
             # outside it ended the claim thread for the life of the process (the unit stayed "active")
@@ -269,7 +270,9 @@ class PoolManager:
                         raise PublicError(f"input grew past the pool-manager's {MAX_INPUT_BYTES}-byte bound while being copied (AUTHENTICODE_MAX_UPLOAD_MB)")
                     dst.write(chunk)
             if job.input_sha256 and digest.hexdigest() != job.input_sha256:   # the ingress hashed what it spooled: a copy that reads differently is not the sample it recorded
-                raise PublicError("the spooled input does not match the sha256 the ingress recorded for it (changed after it was spooled?)")
+                keep_input = True   # the evidence stays where it is: a consumed-and-unlinked spool would delete the answer to the question below
+                logger.warning("job %s: spooled input sha256 %s differs from the ingress's %s; the spool is kept for inspection", job.job_id, digest.hexdigest(), job.input_sha256)
+                raise PublicError("the spooled input does not match the sha256 the ingress recorded for it (changed after it was spooled?); the spool is kept for inspection")
             env = self._runner.validate_to_dir(work / "input" / filename, work / "output")
             summary = _extract_verdict(env)
             status = (JobStatus.FAILED if summary.get("envelope_status") == "engine_error"
@@ -307,7 +310,7 @@ class PoolManager:
             if in_fd is not None:
                 os.close(in_fd)
             if in_dirfd is not None:
-                if in_fd is not None and recorded:
+                if in_fd is not None and recorded and not keep_input:
                     try:  # the sample is consumed; drop the spooled input BY NAME in the pinned directory (keep the sealed output)
                         os.unlink(filename, dir_fd=in_dirfd)
                     except OSError:
