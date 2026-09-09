@@ -156,8 +156,10 @@ def build(base: str = BASE_QCOW2) -> str:
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
         rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base_src))   # the same image the overlay is backed by
         Path(xml).write_text(rt._domain_xml(dom, overlay))
-        assert gr._virsh("define", xml).returncode == 0
-        assert gr._virsh("start", dom).returncode == 0
+        for step, args in (("define", (xml,)), ("start", (dom,))):   # virsh's own words, as one logged line — never a bare assert
+            r = gr._virsh(step, *args)
+            if r.returncode != 0:
+                raise gr.NothingPublished(f"virsh {step} failed for the build domain {dom} (rc {r.returncode}): {(r.stderr or '').strip()[-400:]}")
         mac = gr._mac(dom); ip = None; ready = False; dl = time.time() + 240
         while time.time() < dl:
             ip = gr._ip_for_mac(mac) if mac else None
@@ -202,7 +204,8 @@ def build(base: str = BASE_QCOW2) -> str:
             raise gr.NothingPublished(f"guest {dom} did not shut off within 180s (domstate: {state.strip() or 'unknown'}); refusing to flatten a running domain into a candidate")
         logger.info("flattening -> %s", candidate)
         rc = gr._run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], gr.CONVERT_TIMEOUT_S).returncode
-        assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % gr.CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
+        if rc != 0:
+            raise gr.NothingPublished(f"flatten (qemu-img convert) {'timed out after %ds' % gr.CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}")
         gr._run(["sudo", "chmod", "644", candidate])
         built = True
     finally:

@@ -22,6 +22,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from blastbox.host.netwire import parse_egress_ports, parse_strict_bool
 from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
 
@@ -65,8 +66,6 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
         return json.loads(r.read())
 
 
-def _ports(v: str | None) -> tuple[int, ...] | None:
-    return tuple(int(x) for x in v.replace(",", " ").split()) if v else None
 
 
 def authenticode_spec() -> VmWorkerSpec:
@@ -77,8 +76,10 @@ def authenticode_spec() -> VmWorkerSpec:
     if exit_driver:
         egress = VmEgressPolicy(
             exit_driver=exit_driver,
-            egress_ports=_ports(os.environ.get("AUTHENTICODE_EGRESS_PORTS")),
-            block_internal=os.environ.get("AUTHENTICODE_BLOCK_INTERNAL", "").lower() in ("1", "true", "yes"),
+            # blastbox's own fail-closed parsers: a typo in a SECURITY knob must raise (BLOCK_INTERNAL=treu) or be
+            # dropped (a port outside 1..65535), never read as "off" or written into a broken --dports
+            egress_ports=parse_egress_ports(os.environ.get("AUTHENTICODE_EGRESS_PORTS")),
+            block_internal=parse_strict_bool(os.environ.get("AUTHENTICODE_BLOCK_INTERNAL")),
         )
         routing = ExitRouting(
             vpn_table=os.environ.get("AUTHENTICODE_VPN_TABLE", "vpn"),

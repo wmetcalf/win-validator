@@ -557,16 +557,21 @@ def build_candidate(src: str | None = None) -> str:
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
         rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=src_copy))
         Path(xml_path).write_text(rt._domain_xml(dom, overlay))
-        assert _virsh("define", xml_path).returncode == 0, "define failed"
-        assert _virsh("start", dom).returncode == 0, "start failed"
+        for step, args in (("define", (xml_path,)), ("start", (dom,))):   # virsh's own words, as one logged line — never a bare assert
+            r = _virsh(step, *args)
+            if r.returncode != 0:
+                raise NothingPublished(f"virsh {step} failed for the rebake domain {dom} (rc {r.returncode}): {(r.stderr or '').strip()[-400:]}; golden NOT promoted (nothing published)")
         mac = _mac(dom)
-        ip, dl = None, time.time() + 240
+        ip, ready, dl = None, False, time.time() + 240
         while time.time() < dl:
             ip = _ip_for_mac(mac) if mac else None
             if ip and "READY" in _ssh_ps(ip, "'READY'", 15):
+                ready = True
                 break
             time.sleep(5)
-        assert ip, "candidate guest never reachable"
+        if not ready:   # an ADDRESS is not an ANSWER: a guest with a lease that never answers is the usual shape of a wrong key (golden_build's twin says the same)
+            raise NothingPublished(f"guest {ip or 'never got an address'} did not answer over ssh within 240s: is {SSH_KEY} the key the image authorises "
+                                   "(the packer build's keys/build_key — the image accepts no other)?; golden NOT promoted (nothing published)")
         logger.info("refreshing trust state in %s (myatg --refresh)…", ip)
         gv = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""
         warm = f'C:\\agent\\myatg.exe --warm-cache "{WARM_DIR}" {gv} | Out-Null;' if WARM_DIR else ""
@@ -583,7 +588,8 @@ def build_candidate(src: str | None = None) -> str:
             raise NothingPublished(f"guest {dom} did not shut off within 180s (domstate: {state.strip() or 'unknown'}); refusing to flatten a running domain into a candidate")
         logger.info("flattening overlay -> candidate %s", candidate)
         rc = _run(["sudo", "qemu-img", "convert", "-O", "qcow2", overlay, candidate], CONVERT_TIMEOUT_S).returncode
-        assert rc == 0, f"flatten (qemu-img convert) {'timed out after %ds' % CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}"
+        if rc != 0:
+            raise NothingPublished(f"flatten (qemu-img convert) {'timed out after %ds' % CONVERT_TIMEOUT_S if rc == 124 else 'failed (rc=%s)' % rc}; golden NOT promoted (nothing published)")
         _run(["sudo", "chmod", "644", candidate])
         _write_small(str(candidate_depth_file(candidate)), str(depth))   # travels with the candidate into rotate()
         built = True
@@ -603,10 +609,15 @@ def validate_golden(qcow2: str) -> bool:
     """Boot a throwaway worker off ``qcow2`` and assert the validation gate: a benign signed sample
     is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
-    from winval_blastbox.vm_pool import agent_validate
-    from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
-    spec = VmWorkerSpec(name="goldgate", image=VmImageSpec(golden=qcow2), agent_port=_agent_port())   # the port the golden was BAKED to listen on (the pool's knob)
-    rt = spec.runtime()
+    import dataclasses
+    from winval_blastbox.vm_pool import agent_validate, authenticode_spec, _sync_clock
+    from blastbox.host.runtime.vm_compose import VmImageSpec
+    # the PRODUCTION spec (egress policy, exit routing, agent port) with the candidate as its image: the gate must
+    # judge the candidate under the network posture the workers will run with, and with the same clock sync at
+    # ready (a golden without qemu-ga gets its clock ONLY from that hook — and the two verdicts are clock-bound).
+    # The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP.
+    spec = dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
+    rt = spec.runtime(on_ready=_sync_clock)
     try:
         slot = rt.spawn_ready(timeout_s=240)
     except Exception as exc:

@@ -231,6 +231,6 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
 async function cert(tbs){const r=await jget('/cert/'+tbs);
   $('#detail').innerHTML=`<h3>cert <span class="mono">${esc(tbs)}</span></h3>
     <p class="muted">files signed by / chaining to this cert in the last ${r.scanned} scans (${r.seen_in.length})${r.truncated?' — older scans not searched':''}:</p>
-    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in the last ${r.scanned} scans</div>'}`;}
+    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):`<div class="empty">none in the last ${r.scanned} scans</div>`}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
