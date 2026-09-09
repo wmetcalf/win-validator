@@ -112,7 +112,7 @@ def build(base: str = BASE_QCOW2) -> str:
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
     # master is depth 0, the live golden is its depth + 1, anything else is unknown provenance
     if base_is_golden:
-        depth = gr.chain_length() + 1
+        depth = -1   # read under the copy's lock below (an unlocked read could pair a new golden with the old depth)
     elif os.path.realpath(base) in (os.path.realpath(BASE_QCOW2), os.path.realpath(gr.MASTER_QCOW2)):
         depth = 0
     else:
@@ -125,7 +125,8 @@ def build(base: str = BASE_QCOW2) -> str:
         # the live golden is a promotion target another process can rename over (qcow2 backs by
         # PATH): overlay a private copy of it, as golden_rotate does; the packer base is never renamed
         if base_is_golden:
-            _, base_src = gr.snapshot_source(ts, base)
+            _, base_src, at = gr.snapshot_source(ts, base)
+            depth = at + 1
         else:
             base_src = base
         assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base_src, "-F", "qcow2", overlay], 120).returncode == 0

@@ -131,7 +131,7 @@ def _sweep_stranded_sources() -> None:
     check, and again before each snapshot — after STRANDED_SOURCE_HOURS (a live rebake is younger)."""
     cutoff = time.time() - STRANDED_SOURCE_HOURS * 3600
     for c in BACKUP_DIR.glob("golden-base.rebake-src-*.qcow2"):
-        if c.stat().st_mtime < cutoff:
+        if (_mtime(c) or float("inf")) < cutoff:   # a builder deletes its copy without the lock
             logger.warning("removing stranded rebake-source copy %s (a killed run left it)", c.name)
             _run(["sudo", "rm", "-f", str(c)])
 
@@ -144,13 +144,15 @@ def _rm_candidate(candidate: str) -> None:
     _run(["sudo", "rm", "-f", candidate, str(candidate_depth_file(candidate))])
 
 
-def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
+def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str, int]:
     """A PRIVATE copy of the rebake source in the backup dir, taken under the rotation lock.
     qcow2 records its backing file BY PATH: an overlay off the live GOLDEN_BASE_DISK would be
     re-parented to whatever a concurrent promotion renames into that path (the retry command
     or build-and-promote can run while the timer's rebake is in flight), and the flattened
     candidate would silently mix two goldens. A copy nothing renames keeps the invariant the
-    frozen master used to provide. Returns (source_used, private_copy)."""
+    frozen master used to provide. Returns (source_used, private_copy, chain_depth) — the depth
+    read UNDER the same lock as the copy: a promotion between an unlocked chain_length() and the
+    copy would pair the new golden's bytes with the old golden's depth."""
     import fcntl
     if src is None:
         src = rebake_source()
@@ -171,6 +173,7 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
                 if time.time() >= deadline:
                     raise NothingPublished(f"lock {ROTATE_LOCK} still held after {PREFLIGHT_LOCK_WAIT_S}s while taking the rebake-source copy") from e
                 time.sleep(5)
+        depth = chain_length()   # with the lock held: the record and the golden cannot change under us
         want = Path(src).stat().st_size
         r = _run(["sudo", "cp", "--reflink=auto", src, copy], 3600)
         got = Path(copy).stat().st_size if Path(copy).exists() else -1
@@ -179,7 +182,7 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
             raise RuntimeError(f"snapshot of the rebake source {src} -> {copy} failed (rc={r.returncode}, {got} of {want} bytes)")
     finally:
         os.close(fd)
-    return src, copy
+    return src, copy, depth
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
 # would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
@@ -308,6 +311,8 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
                 time.sleep(5)
         _sweep_own_temps()   # UNDER the lock (nothing is in flight): a promotion killed mid-copy strands a
                              # golden-sized temporary beside a base, and the space check below would fail forever
+        _prune_backups()     # likewise the expired candidates and surplus backups: pruned only after a
+                             # promotion, they could fill the store so that no promotion ever passes this check
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
@@ -393,8 +398,8 @@ def build_candidate() -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
-    src, src_copy = snapshot_source(ts)   # may raise (lock wait, missing source): nothing else exists yet
-    depth = 0 if src == MASTER_QCOW2 else chain_length() + 1   # the sidecar is written once the candidate exists (below)
+    src, src_copy, at = snapshot_source(ts)   # may raise (lock wait, missing source): nothing else exists yet
+    depth = 0 if src == MASTER_QCOW2 else at + 1   # the source's depth as read under the copy's lock; the sidecar is written once the candidate exists (below)
     logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
     os.close(xfd)
@@ -715,7 +720,7 @@ def _record_chain(candidate: str) -> None:
     if _write_small(str(_chain_file()), str(depth)):
         _run(["sudo", "rm", "-f", str(candidate_depth_file(candidate))])
     else:   # the sidecar stays: it is the only surviving record of this golden's provenance
-        logger.error("chain depth %s NOT recorded for %s; the next rebake will treat the golden as unknown provenance (master rebake)", depth, GOLDEN_BASE_DISK)
+        logger.error("chain depth %s NOT recorded for %s; the record still reads %s (the previous golden's depth), so the master rebake may come up to one cycle late — check the store: the preflight proved it writable at the start of this run", depth, GOLDEN_BASE_DISK, chain_length())
 
 
 def restart_pool() -> bool:
