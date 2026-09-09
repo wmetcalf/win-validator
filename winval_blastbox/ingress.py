@@ -26,7 +26,8 @@ from fastapi.responses import HTMLResponse
 from .knobs import upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
-MAX_BYTES = upload_mb() * 1024 * 1024   # the pool-manager enforces the same bound on what it copies: set both tiers alike
+MAX_BYTES = upload_mb() * 1024 * 1024
+CERT_SCAN_LIMIT = 2000   # /cert/{tbs} searches the newest rows only: it answers "seen in this session's history", not a full-table query   # the pool-manager enforces the same bound on what it copies: set both tiers alike
 ENGINE = "authenticode"
 
 _store = build_job_store_from_env()
@@ -106,7 +107,7 @@ def jobs(limit: int = 80) -> dict:
 def cert(tbs_sha256: str) -> dict:
     tbs = tbs_sha256.lower()
     hits = []
-    for j in _store.list():  # whole set; fine for the session-scale histories this serves
+    for j in _store.list(limit=CERT_SCAN_LIMIT, newest_first=True):  # bounded: an unauthenticated caller must not make the ingress read the whole table (88 MiB at 10k rows)
         v = _verdict(j)
         certs = []
         s = v.get("signer") or {}

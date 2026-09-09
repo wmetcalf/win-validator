@@ -149,7 +149,9 @@ def build(base: str = BASE_QCOW2) -> str:
             depth = at + 1
         else:
             base_src = base
-        assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base_src, "-F", "qcow2", overlay], 120).returncode == 0
+        r = gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base_src, "-F", "qcow2", overlay], 120)
+        if r.returncode != 0:   # a missing/unreadable base fails HERE, before any domain is defined: say so, with qemu-img's own words
+            raise SystemExit(f"cannot create the build overlay on {base_src} (rc {r.returncode}): {(r.stderr or '').strip()[-400:]}")
         gr._run(["sudo", "chmod", "644", overlay])
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
         rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base_src))   # the same image the overlay is backed by

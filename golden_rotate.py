@@ -648,7 +648,7 @@ def rotate(candidate: str) -> None:
     import fcntl
     c = Path(candidate)
     if c.is_symlink() or not c.is_file():   # BEFORE the lock and before an hour-long backup copy
-        raise RuntimeError(f"candidate {candidate} is not a regular file; golden NOT promoted (nothing published, no backup taken)")
+        raise NothingPublished(f"candidate {candidate} is not a regular file; golden NOT promoted (nothing published, no backup taken)")   # a RuntimeError escaped main() as a traceback
     try:
         lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         _tighten_lock(lock_fd)

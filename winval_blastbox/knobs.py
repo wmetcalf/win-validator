@@ -28,6 +28,23 @@ def env_int(name: str, default: int, floor: int | None = None) -> int:
     return n
 
 
+def env_float(name: str, default: float, floor: float | None = None) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number: using %s", name, raw, default)
+        return default
+    if floor is not None and v < floor:
+        logger.warning("%s=%r is below %s: using %s", name, raw, floor, floor)
+        return floor
+    return v
+
+
 def upload_mb() -> int:
     """AUTHENTICODE_MAX_UPLOAD_MB: the bound the ingress enforces on an upload AND the bound the host
     pool-manager enforces on the spooled input it copies — set it the same in both tiers' environments."""

@@ -98,6 +98,8 @@ class JobStore:
 
     def _update(self, jid: str, **kw: Any) -> None:
         with self._lock:
+            if jid not in self._jobs:
+                raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid].update(kw)
 
     def _update_engine(self, jid: str, engine: str, value: dict) -> None:
@@ -108,8 +110,8 @@ class JobStore:
         self._pool.submit(self._run, jid, path, engines)
 
     def _run(self, jid: str, path: str, engines: list[str]) -> None:
-        self._update(jid, status="running")
-        try:
+        try:   # the finally owns the upload temp file whatever happens — a job evicted by the max_jobs cap while queued raised KeyError before the old try, leaking the file
+            self._update(jid, status="running")
             for e in engines:
                 runner = ENGINES.get(e)
                 if runner is None:

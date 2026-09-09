@@ -34,7 +34,7 @@ from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .host_runner import HostRunner
-from .knobs import upload_mb
+from .knobs import env_float, upload_mb
 from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
@@ -180,7 +180,7 @@ def _rm_job_dir(d: Path, root: Path = JOB_ROOT) -> None:
         os.close(parent)
 
 
-POLL_S = float(os.environ.get("WINVAL_CLAIM_POLL_S", "0.5"))
+POLL_S = env_float("WINVAL_CLAIM_POLL_S", 0.5, floor=0.05)   # the last bare float(): an emptied line crashed the manager, a negative one busy-spun the claim loop
 
 
 def _extract_verdict(env: dict) -> dict:
@@ -377,6 +377,8 @@ class PoolManager:
         try:
             if d.is_symlink() or not d.is_dir() or d.stat().st_mtime > cutoff:
                 return
+            if d.name == "lost+found":
+                return   # a job root that is its own filesystem carries one; it is nobody's job directory
             job = self._store.get(d.name) if root == JOB_ROOT else None
             if job is not None and job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                 return
