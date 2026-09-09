@@ -53,37 +53,52 @@ AGENT_RESPONSE_MAX = env_int("WINVAL_AGENT_RESPONSE_MB", 64, floor=1) * (1 << 20
 
 
 def read_sample(path: str) -> bytes:
-    """The sample's bytes, read on the HOST before any worker is claimed: a missing file or a read error is
-    the caller's problem, never evidence about a worker (it was read inside the try that files worker faults)."""
     with open(path, "rb") as fh:
         return fh.read()
 
 
+def check_sample(path: str) -> None:
+    """Open, stat and close the sample on the HOST before any worker is claimed: a missing file, a directory or
+    an unreadable one is the caller's problem, never evidence about a worker (it used to be read inside the try
+    that files worker faults). No read here: the bytes are read once, by agent_validate."""
+    with open(path, "rb") as fh:
+        os.fstat(fh.fileno())
+
+
 try:
     from blastbox.host.pool import release_kwargs   # the subset of dirty/fault THIS pool's release accepts (blastbox >= 0.1.33)
-except ImportError:   # an older blastbox: release() takes no evidence; say so once rather than swap the real exception for an ImportError in the error path
+except ImportError:   # an older blastbox: pass what ITS release() accepts (0.1.26 takes dirty but no fault) rather than swap the real exception for an ImportError in the error path
+    import inspect
+
     def release_kwargs(fn, *, dirty: bool, fault: str | None = None, fault_stage: str | None = None) -> dict:   # type: ignore[misc]
-        return {}
-    logger.warning("this blastbox has no release_kwargs: validation failures cannot be filed as worker/job evidence (install blastbox >= 0.1.33)")
+        try:
+            accepted = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        return {k: v for k, v in (("dirty", dirty), ("fault", fault), ("fault_stage", fault_stage)) if k in accepted}
+    logger.warning("this blastbox has no release_kwargs: only what its release() accepts is passed (install blastbox >= 0.1.33 for worker/job evidence)")
 
 
 def fault_of(exc: BaseException) -> str:
     """Whose evidence a failed validation is, for blastbox's release(dirty=True, fault=...).
-    'worker': the agent could not be reached at all (connection refused, host unreachable, a connect timeout)
-    — nothing about the sample explains that, and two in a row evict the worker.
-    'job': the agent ANSWERED — an HTTP error status, an oversize or unparsable verdict, or a read timeout
-    (a sample can make myatg slow through the AIA/CRL/OCSP URLs it embeds) — evidence about the sample:
-    the worker is snapshot-reverted (dirty) but never evicted for it. Filing these as worker faults let
-    four crafted samples through the unauthenticated ingress empty the warm pool every ten minutes."""
+    'worker': the agent could not be reached at all (connection refused, host unreachable, a connect timeout —
+    urllib wraps those in URLError; a frozen guest or one that lost its IP) — nothing about the sample explains
+    that, and two in a row evict the worker.
+    'job': the agent ANSWERED — an HTTP error status, an oversize or unparsable verdict — evidence about the
+    sample: the worker is snapshot-reverted (dirty) but never evicted for it. Filing these as worker faults let
+    four crafted samples through the unauthenticated ingress empty the warm pool every ten minutes.
+    'unknown': a READ timeout (a bare TimeoutError: the connection was accepted, no verdict came) is NO answer —
+    a wedged agent and a sample that makes myatg slow through its AIA/CRL/OCSP URLs look the same. blastbox's
+    'job' is positive proof of health (it resets the worker's streak and cancels a base rebuild), so a wedged
+    agent filed as 'job' was never evicted and erased its siblings' evidence; 'unknown' reverts the worker and
+    leaves every streak as it was."""
     if isinstance(exc, urllib.error.HTTPError):
         return "job"
     if isinstance(exc, (TimeoutError, socket.timeout)):
-        return "job"
-    if isinstance(exc, urllib.error.URLError):   # no HTTP answer at all: refused, unreachable, a connect timeout wrapped as URLError
-        return "job" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "worker"
-    if isinstance(exc, OSError):
+        return "unknown"
+    if isinstance(exc, OSError):   # URLError (refused, unreachable, connect timeout), RemoteDisconnected, ECONNRESET
         return "worker"
-    return "job"   # RuntimeError (oversize verdict), ValueError (not JSON): the agent answered
+    return "job"   # RuntimeError (oversize verdict), ValueError (not JSON), http.client's BadStatusLine/IncompleteRead: the agent answered
 
 
 def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
@@ -324,7 +339,7 @@ class WarmVmPool:
         return left
 
     def validate(self, path: str, params: dict | None = None) -> dict:
-        read_sample(path)   # a host-side read error is answered before a worker is claimed (see read_sample)
+        check_sample(path)   # a host-side open error is answered before a worker is claimed (see check_sample)
         slot = self._pool.claim(timeout_s=self._claim_timeout_s)
         if slot is None:
             raise RuntimeError("no warm VM worker available")
