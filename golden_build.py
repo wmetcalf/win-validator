@@ -127,7 +127,7 @@ def build(base: str = BASE_QCOW2) -> str:
         assert gr._run(["sudo", "qemu-img", "create", "-f", "qcow2", "-b", base_src, "-F", "qcow2", overlay], 120).returncode == 0
         gr._run(["sudo", "chmod", "644", overlay])
         from blastbox.host.runtime.libvirt_vm import LibvirtVmConfig, LibvirtVmRuntime
-        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base))
+        rt = LibvirtVmRuntime(LibvirtVmConfig(golden_base=base_src))   # the same image the overlay is backed by
         Path(xml).write_text(rt._domain_xml(dom, overlay))
         assert gr._virsh("define", xml).returncode == 0
         assert gr._virsh("start", dom).returncode == 0
