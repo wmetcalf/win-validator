@@ -84,8 +84,7 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
-    Warm --> Reprovision: after M recycles (recycles_per_reprovision)
-    Reprovision --> [*]: destroy + undefine + rebuild
+    Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
 
 - **`snapshot-revert`** restores a warm baseline (agent up, CRL cache primed) in ~5–8 s, wiping any
@@ -120,7 +119,10 @@ corrupted image is rejected and the current golden is kept.
 
 ## Locked-down egress — why it matters here
 
-The worker's network is a **class policy, not a host allowlist**: an anonymizing exit
+**Opt-in:** the network policy below applies once `AUTHENTICODE_EXIT` names an exit driver. The shipped
+`deploy/winval.env.example` leaves every egress line commented out, and a worker started without it reaches
+whatever the libvirt network allows (plain NAT, RFC1918 included) — set it before the ingress is exposed.
+With it set, the worker's network is a **class policy, not a host allowlist**: an anonymizing exit
 (VPN/SOCKS, tor optional) + **DNS/HTTP/HTTPS only (53/80/443)** + **block all RFC1918/internal**,
 fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
 and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RFC3161 timestamp). So we
@@ -158,8 +160,7 @@ curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict
 - **`authenticode` engine + orchestrator: built and validated end-to-end** (engine → myatg VM pool
   → sealed envelope; verdicts match the reference corpus). myatg is baked into the golden (no per-boot
   compile); the disposable-VM primitive is upstreamed into blastbox's `libvirt_vm` runtime.
-- **Follow-ups:** plumb per-job params (`--rev`/`--gv`/`--scripts`) through the guest-agent transport;
-  parameterize the remaining toolz3-specific paths; the designed **ember-legacy / ember-2024** ML
+- **Follow-ups:** the designed **ember-legacy / ember-2024** ML
   engines (the orchestrator already fans out to them and returns per-engine verdicts side-by-side —
   it reports components, not a single opinion).
 
@@ -167,6 +168,7 @@ curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict
 
 This project exists to handle **untrusted, frequently-malicious files**. It never *executes* a
 sample — it only parses signatures (WinVerifyTrust / catalog / SignedCms) — so residual risk is a
-signature-*parser* exploit, contained to a throwaway, egress-locked VM that resets every few jobs.
+signature-*parser* exploit, contained to a throwaway VM that resets every few jobs and is egress-locked
+once `AUTHENTICODE_EXIT` is set (above).
 Do not repurpose the workers to detonate samples without revisiting that model. Malware corpora,
 VM images, keys, and infra config are excluded from this repo by `.gitignore` — keep them out.

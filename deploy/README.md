@@ -5,7 +5,7 @@ Two tiers, separated so the thing handling untrusted HTTP never holds `root`/lib
 ```
    client ──HTTP──> [ ingress container ]                         [ host pool-manager ]
                      unprivileged, read-only                       libvirt + iptables + the VM pool
-                     no libvirt / no socket                        (egress + tunnel kill-switch)
+                     no libvirt / no socket                        (egress + tunnel kill-switch — once AUTHENTICODE_EXIT is set)
                           │                                                 ▲
                           │   Postgres JobStore (queue/meta/results)        │ claim_next()
                           └────────────  +  shared job_root dir  ───────────┘
@@ -136,7 +136,9 @@ UI + API at <http://localhost:8099/>.
 - **Postgres** (not sqlite) is the cross-boundary store — a real broker beats a sqlite file shared
   over a container/host bind-mount. Redis also works (`BLASTBOX_DATABASE_URL=redis://…`).
 - **VPN/tor egress + the tunnel kill-switch** live with the pool-manager (host iptables), so a
-  worker still fails closed on a tunnel drop regardless of the ingress.
+  worker still fails closed on a tunnel drop regardless of the ingress — once `AUTHENTICODE_EXIT`
+  names an exit driver. The example env ships with every egress line commented out: a pool-manager
+  started that way gives its workers the libvirt network's plain NAT. Set it before exposing the ingress.
 
 ## Rolling golden (freshness re-bake + rollback backups)
 
