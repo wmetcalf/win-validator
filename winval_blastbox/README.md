@@ -46,9 +46,9 @@ curl http://127.0.0.1:8099/scan/<job_id>                       # -> per-engine v
 `POST /scan` accepts a file + optional `engines=authenticode,...` (default `authenticode`);
 unbuilt engines (`ember-legacy`/`ember-2024`, P4) return `status:"unavailable"`. The
 authenticode result is the parsed myatg verdict (status / signer / chain / graveyard) plus
-the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns the scanned
-files whose signer or chain carries that cert, searching the newest 2000 scans only (`scanned` /
-`truncated` in the answer say how far it looked).
+the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns every scanned
+file (the orchestrator's own in-memory store) whose signer or chain carries that cert. The ingress's
+`/cert/{tbs}` is the bounded one — see `deploy/README.md`.
 
 ## Output (payload `Record` fields)
 

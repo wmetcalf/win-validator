@@ -293,9 +293,16 @@ class WarmVmPool:
         if slot is None:
             raise RuntimeError("no warm VM worker available")
         try:
-            return agent_validate(slot.endpoint, path, params=params)  # type: ignore[attr-defined]
-        finally:
-            self._pool.release(slot)
+            verdict = agent_validate(slot.endpoint, path, params=params)  # type: ignore[attr-defined]
+        except BaseException:
+            # the AGENT did not answer (transport, HTTP, a wedged guest): evidence about the WORKER. A bare
+            # release counted every such failure as proof of health — it reset the slot's streak and its
+            # siblings' — so a wedged guest was never evicted and served up to 24 more samples between reverts
+            from blastbox.host.pool import release_kwargs   # the subset of dirty/fault THIS pool's release accepts
+            self._pool.release(slot, **release_kwargs(self._pool.release, dirty=True, fault="worker"))
+            raise
+        self._pool.release(slot)
+        return verdict
 
     def shutdown(self) -> None:
         self._reap("shutdown")

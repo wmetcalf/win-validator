@@ -84,7 +84,7 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
-    Warm --> Respawn: 2 consecutive job failures on one worker<br/>(blastbox max_consecutive_failures — a wedged agent is destroyed and a fresh overlay booted, no rotation involved)
+    Warm --> Respawn: 2 consecutive agent failures on one worker (the agent did not answer: transport, HTTP, a wedged guest)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved; a sample the agent judged is never worker evidence)
     Respawn --> Warm
     Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
@@ -129,7 +129,12 @@ With it set, the worker's network is a **class policy, not a host allowlist**: a
 fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
 and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RFC3161 timestamp). So we
 anonymize that beacon, protocol-limit it, and block SSRF/lateral movement. An unreachable responder
-just yields `revocation_checked="unknown"`.
+just yields `revocation_checked="unknown"`. **Two hops the policy does not cover on its own:** (1) worker to
+worker on the same libvirt bridge is switched, not routed, so the FORWARD-chain rules never see it unless the
+host has `net.bridge.bridge-nf-call-iptables=1` (`br_netfilter` loaded) — set it, or a compromised worker
+reaches its siblings' agent port 8765, which the golden's firewall rule opens to any source; (2) the host's own
+services on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound, not egress — see
+`deploy/README.md`.
 
 ## Repo layout
 
@@ -155,8 +160,9 @@ curl -F file=@suspect.dll 'http://127.0.0.1:8099/scan'   # -> {job_id, status: q
 curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict(s)
 ```
 
-`GET /cert/{tbs_sha256}` returns the scanned files whose signer or chain carries that cert, searching the
-newest 2000 scans only (`scanned` / `truncated` in the answer say how far it looked).
+`GET /cert/{tbs_sha256}` on the orchestrator returns every scanned file (its own in-memory store) whose signer or
+chain carries that cert; the ingress's `/cert/{tbs}` searches its store's newest 2000 scans only and says so
+(`scanned` / `truncated`), see `deploy/README.md`.
 
 ## Status
 
