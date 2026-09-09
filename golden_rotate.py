@@ -469,11 +469,15 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if gate_samples and REVOKED and not Path(REVOKED).is_file():
         raise NothingPublished(f"GOLDEN_REVOKED_SAMPLE={REVOKED} does not exist: the gate could not run, so the build would be wasted")
+    try:   # EVERY promoting entry point restarts the pool-manager afterwards, the retry/rollback CLI (no gate) included: the
+        # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
+        from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
+        validate_egress_posture(authenticode_spec())
+    except (ValueError, RuntimeError) as exc:
+        raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     if gate_samples:   # the gate boots under the PRODUCTION spec: a knob blastbox's fail-closed parsers refuse (AUTHENTICODE_BLOCK_INTERNAL=treu) must fail HERE, not as a traceback after the hour-long build
         try:
             _gate_spec("/dev/null")
-            from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
-            validate_egress_posture(authenticode_spec())   # the PRODUCTION spec too: the gate drops the pinned IP pool, the pool-manager will start with it
         except (ValueError, RuntimeError) as exc:
             raise NothingPublished(f"the worker spec the gate would boot with is invalid ({exc}): fix the AUTHENTICODE_* knobs; the build would be wasted") from exc
     if estimate_bytes is None:
@@ -851,9 +855,13 @@ def _promote(candidate: str) -> None:
                    f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
     if intact:
         # the prune runs on EVERY rotation and every preflight: under GOLDEN_KEEP_N=0 the next night's would remove the
-        # copy this message names. A keep sidecar beside it is honoured by every prune until the operator removes it
-        _run(["sudo", "touch", intact + ".keep"])
-        how += f"; then remove {intact}.keep (it holds the backup out of the prune until you do)"
+        # copy this message names. A keep sidecar is honoured by every prune until the operator removes it — written
+        # beside the backup, else beside the chain mirror (the root filesystem: the store just refused a write), CHECKED
+        mark = _mark_kept(intact)
+        if mark:
+            how += f"; then remove {mark} (it holds the backup out of the prune until you do)"
+        else:
+            how += f"; the backup could NOT be marked kept (both sidecar writes failed): copy it off {BACKUP_DIR} NOW, the next prune removes it"
     raise SplitState(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
                      f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden; {how}. "
                      f"Restart winval-pool-manager after clearing /dev/shm to enact the new golden instead.", backup=intact)
@@ -869,6 +877,26 @@ def _mtime(p: Path) -> float | None:
         return None
 
 
+def _keep_sidecars() -> list[Path]:
+    """Every <backup>.keep sidecar, beside the backups or beside the chain mirror (where _mark_kept falls back to)."""
+    out: list[Path] = []
+    for d in (BACKUP_DIR, _mirror_file().parent):
+        out.extend(d.glob("golden-base.*.qcow2.keep"))
+    return out
+
+
+def _mark_kept(bak: str) -> str | None:
+    """Hold ``bak`` out of every prune: a checked sidecar beside it, else beside the chain mirror; None when neither
+    could be written (the message must then say the copy is NOT held, not name a sidecar that does not exist)."""
+    for d in (BACKUP_DIR, _mirror_file().parent):
+        sc = d / (Path(bak).name + ".keep")
+        _run(["sudo", "mkdir", "-p", str(d)])
+        if _run(["sudo", "touch", str(sc)]).returncode == 0 and sc.exists():
+            return str(sc)
+        logger.error("could not write the keep sidecar %s", sc)
+    return None
+
+
 def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> None:
     """``keep``: a candidate this run is about to promote (the retry CLI's argument) — never
     reclaimed here however old it is, nor its .chain sidecar. ``also_keep``: the backup a split
@@ -876,8 +904,8 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
     keep_paths = {str(Path(keep).resolve()), str(Path(keep).resolve()) + ".chain"} if keep else set()   # resolved: a relative retry argument must still match the glob's absolute paths
     if also_keep:
         keep_paths.add(str(Path(also_keep).resolve()))
-    for kp in BACKUP_DIR.glob("golden-base.*.qcow2.keep"):   # a split state's recovery copy (SplitState): held until the operator removes the sidecar
-        keep_paths.add(str(Path(str(kp)[:-len(".keep")]).resolve()))
+    for kp in _keep_sidecars():   # a split state's recovery copy (SplitState): held until the operator removes the sidecar
+        keep_paths.add(str((BACKUP_DIR / kp.name[:-len(".keep")]).resolve()))
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one
