@@ -83,11 +83,13 @@ sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.
 sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
 sudo systemctl daemon-reload
 # the golden the pool boots from does not exist yet: the pool-manager refuses to start with neither a
-# golden (GOLDEN_BASE_DISK) nor a master (GOLDEN_MASTER) on disk. Bake it once from the post-OS-install
-# image (the packer/autounattend WS2025 base — GOLDEN_BUILD_BASE in winval.env, or the argument here):
-# build -> gate (the benign sample validates) -> promote; ~30-60 min. It logs "NOT in service" because
-# the pool is not running yet — the next line starts it.
-sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote /var/lib/libvirt/images/winserver2025-base.qcow2
+# golden (GOLDEN_BASE_DISK) nor a master (GOLDEN_MASTER) on disk. Install the packer's output
+# (golden-packer/README.md: output/winserver2025-core.qcow2) as GOLDEN_MASTER — the frozen master the
+# weekly rebake also returns to every GOLDEN_MAX_CHAIN cycles — then bake the golden from it once:
+# build -> gate (the benign sample validates) -> promote; ~30-60 min. It logs "NOT in service"
+# because the pool is not running yet — the next line starts it.
+sudo install -m 0644 golden-packer/output/winserver2025-core.qcow2 /var/lib/libvirt/images/winserver2025-core.qcow2
+sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote   # from GOLDEN_MASTER (or GOLDEN_BUILD_BASE / an explicit path)
 sudo systemctl enable --now winval-pool-manager
 ```
 

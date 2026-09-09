@@ -6,7 +6,7 @@ workers:
   authenticode:
     image:
       golden: /dev/shm/golden-base.qcow2                                # what workers boot (overlay COW)
-      base_qcow2: /var/lib/libvirt/images/winserver2025-base.qcow2      # post-OS-install WS2025
+      base_qcow2: /var/lib/libvirt/images/winserver2025-core.qcow2      # the packer's output, installed as GOLDEN_MASTER
       builder: qemu
       provisioners:
         # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups).
@@ -14,7 +14,7 @@ workers:
         # Point MYATG_SRC at a myatg checkout (defaults to ../myatg beside this repo).
         # NOTHING parses this file: the base is passed to the builder explicitly (or set
         # GOLDEN_BUILD_BASE in winval.env) — keep it equal to image.base_qcow2 above.
-        - "sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote /var/lib/libvirt/images/winserver2025-base.qcow2"
+        - "sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote /var/lib/libvirt/images/winserver2025-core.qcow2"
 
     # domain shape
     mem_mb: 4096

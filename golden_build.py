@@ -32,7 +32,7 @@ import golden_rotate as gr
 
 logger = logging.getLogger("winval.golden_build")
 
-BASE_QCOW2 = os.environ.get("GOLDEN_BUILD_BASE", "/var/lib/libvirt/images/winserver2025-base.qcow2")
+BASE_QCOW2 = os.environ.get("GOLDEN_BUILD_BASE") or gr.MASTER_QCOW2   # the packer's output (golden-packer -> winserver2025-core.qcow2), installed as GOLDEN_MASTER: the ONLY image the repo produces
 AGENT_DIR = "C:\\agent"
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 # The myatg validator sources compiled in-guest. Point MYATG_SRC at a myatg checkout
