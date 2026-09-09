@@ -74,12 +74,9 @@ def shutdown_pool() -> None:
             _POOL = None
 
 
-# Per-job param keys a client may set (forwarded by the orchestrator through the
-# blastbox allowlist as BLASTBOX_ENGINE_AUTHENTICODE_PARAM_KEYS). These tune the
-# in-guest myatg invocation; see host_runner / the design doc §3a.
-PARAM_KEYS = frozenset(
-    {"AUTHENTICODE_REV", "AUTHENTICODE_SCRIPTS", "AUTHENTICODE_GV", "AUTHENTICODE_TIER"}
-)
+# Per-job parameters are NOT forwarded by either tier: /scan takes the file (and an engine list on the orchestrator) only,
+# and detonate() reads AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS from the process environment — one operator-wide value for
+# every job. A request naming AUTHENTICODE_GV or AUTHENTICODE_TIER gets a param_not_forwarded warning (below).
 
 # Extension → (detection label, mime) for the file-type tag on the envelope.
 _EXT_TYPE = {

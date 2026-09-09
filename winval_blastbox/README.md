@@ -67,15 +67,10 @@ a `graveyard_hit` warning.
 | `AUTHENTICODE_GOLDEN_BASE` | golden qcow2 (default `/dev/shm/golden-base.qcow2`) |
 | `MYATG_SRC` | (build only) dir holding the myatg `*.cs` sources to compile in-guest — a myatg checkout; default `../myatg` beside this repo |
 
-Per-job param keys are declared in `engine.PARAM_KEYS` and gated by the orchestrator allowlist
-(`BLASTBOX_ENGINE_AUTHENTICODE_PARAM_KEYS`):
-
-- **`AUTHENTICODE_REV`** / **`AUTHENTICODE_SCRIPTS`** → **forwarded per request** as `?rev=` / `?scripts=`
-  on the agent HTTP call (myatg validates the value and falls back to its startup default on an
-  unknown one).
-- **`AUTHENTICODE_GV`** (graveyard) is **server-global** — loaded once into the golden's
-  `--serve-http` startup — so it can't be varied per job; **`AUTHENTICODE_TIER`** isn't a myatg
-  parameter. A request that sets either gets an honest `param_not_forwarded` warning.
+Per-job parameters are not forwarded by either tier: `/scan` takes the file (and, on the orchestrator, an engine
+list) only, and the engine reads `AUTHENTICODE_REV` / `AUTHENTICODE_SCRIPTS` from its process environment — one
+operator-wide value for every job. `AUTHENTICODE_GV` is baked into the golden's serve startup and `AUTHENTICODE_TIER`
+is not a myatg parameter; a request that sets either gets an honest `param_not_forwarded` warning.
 
 ## Status
 

@@ -45,6 +45,7 @@ JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
 # The pool-manager's OWN scratch root (mode 0700, this uid): the engine reads its input copy from and
 # writes its sealed output into a tree the ingress cannot touch; results are then PUBLISHED into
 # <job>/output by directory descriptor with O_EXCL (see _publish). Never place it under WINVAL_JOB_ROOT.
+ENGINE = "authenticode"   # the engine this tier claims and recovers (the ingress creates rows with the same name)
 WORK_ROOT = Path(os.environ.get("WINVAL_WORK_ROOT", "/var/lib/winval/work"))
 SWEEP_S = 3600.0
 # The same bound the ingress enforces on an upload (AUTHENTICODE_MAX_UPLOAD_MB, read by the same tolerant
@@ -327,7 +328,7 @@ class PoolManager:
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                job = self._store.claim_next()
+                job = self._store.claim_next(engine=ENGINE)   # THIS tier's engine only: on a store shared with another engine's tier, an unfiltered claim ran its samples through the myatg VM
             except Exception:  # noqa: BLE001 — a transient store error must not kill the loop
                 logger.warning("claim_next failed", exc_info=True)
                 job = None
@@ -345,7 +346,7 @@ class PoolManager:
         a lost terminal write). blastbox's retention never touches RUNNING rows and there is no reaper, so
         they would sit RUNNING forever — the UI polling them without end. Mark them FAILED, by name."""
         try:
-            stale = list(self._store.list(status=JobStatus.RUNNING))
+            stale = [j for j in self._store.list(status=JobStatus.RUNNING) if getattr(j, "engine", ENGINE) == ENGINE]   # another engine's RUNNING row is its own tier's, not an orphan of this one
         except Exception:  # noqa: BLE001 — recovery is best effort; the claim loops will surface a broken store
             logger.warning("orphan recovery: could not list RUNNING jobs", exc_info=True)
             return
