@@ -126,19 +126,19 @@ def _read_depth(p: Path):
 
 
 def chain_length() -> int:
-    """The promoted golden's rebake depth: the record beside the golden, the mirror off the images
-    store (the newer of the two when they disagree — a promotion whose store write failed leaves the
-    OLD record beside the golden and the new depth in the mirror), else a `.chain.unrecorded` marker,
+    """The promoted golden's rebake depth: the HIGHEST of the record beside the golden, the mirror off
+    the images store and the newest `.chain.unrecorded` marker (see below for why highest, not newest),
     else 0 (a golden that predates the chain keeps rebaking from itself until MAX_CHAIN, as before)."""
-    # the NEWEST of the three copies is the promotion that actually happened: a store that refused the
-    # record leaves the old record in place, and a marker written when both stores refused is newer
-    # than both (it is touched at promotion time); a later successful record is newer than any marker
-    copies = []
-    for p in (_chain_file(), _mirror_file(), _newest_orphan_sidecar()):
-        if p is not None and (d := _read_depth(p)) is not None:
-            copies.append((_mtime(p) or 0, d))
-    if copies:
-        return max(copies, key=lambda t: t[0])[1]
+    # When the copies disagree the HIGHEST depth wins, not the newest: a store that refused the record
+    # leaves the old (lower) record in place, and a record restored without its mtime (cp, rsync -t-less)
+    # is stale but looks newest. Erring high costs at most one early master rebake (a wasted full bake);
+    # erring low postpones the rebake MAX_CHAIN exists to force — the direction that accumulates
+    # withdrawn kill-list entries. A marker is only ever a promotion's depth; the prune ages it out once
+    # a newer record exists.
+    depths = [d for p in (_chain_file(), _mirror_file(), _newest_orphan_sidecar())
+              if p is not None and (d := _read_depth(p)) is not None]
+    if depths:
+        return max(depths)
     return 0   # the count starts here — the preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
 
 
@@ -408,11 +408,15 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
                 raise NothingPublished(f"cannot write beside the chain record {_chain_file()}: the master-rebake schedule could not be kept")
             _run(["sudo", "rm", "-f", probe])
             # seed a missing record — and REWRITE a stale one: after an images-store outage the record beside the
-            # golden holds an old depth while the mirror holds the real one; chain_length() picks the newer, but a
-            # lost mirror (a rebuilt root filesystem) or a touched record would hand the stale depth back
+            # golden holds an old depth while the mirror holds the real one; chain_length() picks the highest, and
+            # the record is brought up to it so a lost mirror (a rebuilt root filesystem) cannot hand the stale
+            # depth back; the mirror is brought up the same way
             want = chain_length()
             if _read_depth(_chain_file()) != want and not _write_small(str(_chain_file()), str(want)):
                 raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
+            if _read_depth(_mirror_file()) != want:
+                _run(["sudo", "mkdir", "-p", str(_mirror_file().parent)])
+                _write_small(str(_mirror_file()), str(want))   # best effort: the mirror probe below reports a store that cannot take it
             # the mirror (the copy that survives the images store refusing writes) is proved the same way, but
             # its loss is a WARNING every run, not a refusal: the record beside the golden is the primary
             _run(["sudo", "mkdir", "-p", str(_mirror_file().parent)])

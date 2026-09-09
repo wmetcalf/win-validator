@@ -74,16 +74,24 @@ STEPS: list[tuple[str, str]] = [
         'compiled ' + (Test-Path {AGENT_DIR}\\myatg.exe)"""),
     ("refresh-trust", gr.refresh_ps(GV_ARG, WARM_PS)),   # fails hard in-guest; counts checked below
     ("netsvc-acls", fr"""
+        # icacls is a NATIVE command: PowerShell 5.1 raises on its stderr only when redirected, and its exit
+        # code is never a terminating error — test $LASTEXITCODE after each, or a failed grant would ship
+        # (the agent runs as NETWORK SERVICE: unreadable graveyard = no graveyard hits, silently)
         icacls {AGENT_DIR} /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "icacls {AGENT_DIR} failed ($LASTEXITCODE)" }}
         icacls C:\certgraveyard /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "icacls C:\certgraveyard failed ($LASTEXITCODE)" }}
         New-Item -Force -ItemType Directory C:\scan | Out-Null
         icacls C:\scan /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "icacls C:\scan failed ($LASTEXITCODE)" }}
         New-Item -Force -ItemType Directory C:\ProgramData\myatg\uploads | Out-Null
         icacls C:\ProgramData\myatg /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null   # the agent's upload dir (http_serve.cs): without a grant its write probe fails and it falls back to a %TEMP% path no Defender exclusion covers
+        if ($LASTEXITCODE -ne 0) {{ throw "icacls C:\ProgramData\myatg failed ($LASTEXITCODE)" }}
         'acls ok'"""),
     ("http-acl", fr"""
         cmd /c "netsh http delete urlacl url=http://+:{AGENT_PORT}/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete
         netsh http add urlacl url=http://+:{AGENT_PORT}/ user="NT AUTHORITY\NETWORK SERVICE" | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "netsh http add urlacl failed ($LASTEXITCODE)" }}   # native: see netsvc-acls
         New-NetFirewallRule -DisplayName valagent-{AGENT_PORT} -Direction Inbound -Protocol TCP -LocalPort {AGENT_PORT} -Action Allow -ErrorAction SilentlyContinue | Out-Null
         'http-acl ok'"""),
     ("onstart-agent", fr"""

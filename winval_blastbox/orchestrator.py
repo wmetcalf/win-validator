@@ -303,7 +303,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="detail" class="panel"><div class="empty">Submit a file or pick a scan to see its verdict.</div></div>
 </div>
 <script>
-const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), js=s=>esc(JSON.stringify(String(s==null?'':s)));
 const pill=(s,extra='')=>`<span class="pill ${esc(s||'unknown')}">${esc(s||'—')}</span>${extra}`;
 let chosen=null, poll=null;
 async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json();}
@@ -320,7 +320,7 @@ $('#go').onclick=async()=>{if(!chosen)return;$('#go').disabled=true;
 function watch(id){clearInterval(poll);const tick=async()=>{const j=await jget('/scan/'+id);render(j);
   if(j.status==='done'||j.status==='error'){clearInterval(poll);refresh();}};tick();poll=setInterval(tick,1200);}
 async function refresh(){try{const {jobs}=await jget('/jobs?limit=80');
-  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch('${j.job_id}')">
+  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch(${js(j.job_id)})">
     <span class="fn" title="${esc(j.filename)}">${esc(j.filename)}</span>
     ${pill(j.verdict||j.status)}${j.graveyard_hit?' <span class="flag bad">graveyard</span>':''}</div>`).join('')
     :'<div class="empty">none yet</div>';}catch(e){}}
@@ -333,7 +333,7 @@ function flags(c){const f=[];const F=(ok,t,bad)=>f.push(`<span class="flag ${ok?
 function certRow(c){const cn=c.subject_cn||c.subject||'—';
   return `<li><b>${esc(cn)}</b> ${c.self_signed?'<span class="flag bad">self-signed</span>':''}
     <div class="muted">issuer: ${esc(c.issuer_cn||c.issuer||'—')}${c.not_after?' · expires '+esc(c.not_after.slice(0,10)):''}</div>
-    ${c.tbs_sha256?`<div class="mono"><a onclick="cert('${c.tbs_sha256}')">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
+    ${c.tbs_sha256?`<div class="mono"><a onclick="cert(${js(c.tbs_sha256)})">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
 function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac.warnings||[];
   if(ac.status==='queued'||ac.status==='running'||j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||j.status)} <span class="muted">validating…</span>`;return;}
@@ -351,7 +351,7 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
-  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert('${s.tbs_sha256}')">${esc(s.tbs_sha256)}</a></span>`);
+  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);
   if(ch.chain&&ch.chain.length) row('chain ('+ch.chain.length+')',`<div>${flags(ch)}</div><ul class="chain">${ch.chain.map(certRow).join('')}</ul>`);
   else if(Object.keys(ch).length) row('chain',flags(ch));
   if(v.timestamped) row('timestamp',`${esc((v.sign_time||'').replace('T',' ').slice(0,19))} ${v.sign_time_verified?'<span class="flag ok">verified</span>':'<span class="flag">unverified</span>'}<div class="muted">${esc((v.timestamper||{}).subject_cn||'')}</div>`);
@@ -362,6 +362,6 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
 async function cert(tbs){const r=await jget('/cert/'+tbs);
   $('#detail').innerHTML=`<h3>cert <span class="mono">${esc(tbs)}</span></h3>
     <p class="muted">files signed by / chaining to this cert (${r.seen_in.length}):</p>
-    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch('${x.job_id}')"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
+    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
