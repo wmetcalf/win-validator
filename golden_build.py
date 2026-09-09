@@ -70,6 +70,9 @@ STEPS: list[tuple[str, str]] = [
         }
         'qemu-ga ' + [bool](Get-Service QEMU-GA -ErrorAction SilentlyContinue)"""),   # optional: the pool falls back to SSH for the clock
     ("compile-myatg", f"""
+        cmd /c "schtasks /end /tn valagent >nul 2>&1"   # a base that already carries an agent (the live golden, an old candidate) started it at boot: csc cannot overwrite a running myatg.exe
+        Stop-Process -Name myatg -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
         & '{_CSC}' /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:{AGENT_DIR}\\myatg.exe {AGENT_DIR}\\myatg.cs {AGENT_DIR}\\rdp_validate.cs {AGENT_DIR}\\http_serve.cs {AGENT_DIR}\\service.cs 2>&1 | Out-File {AGENT_DIR}\\build.log
         if ($LASTEXITCODE -ne 0) {{ throw "myatg compile failed ($LASTEXITCODE): see {AGENT_DIR}\\build.log" }}   # csc is native: on a base that already carries an agent, Test-Path alone passed with the OLD binary
         if (-not (Test-Path {AGENT_DIR}\\myatg.exe)) {{ throw 'myatg compile failed' }}

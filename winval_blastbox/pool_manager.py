@@ -395,7 +395,7 @@ class PoolManager:
             self._sweep_job_root()
             self._stop.wait(SWEEP_S)
 
-    def run(self) -> None:
+    def run(self) -> int:
         wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
         wrr, jrr = wr.resolve(), jr.resolve()   # lexically AND through links: a job root symlinked into the scratch root is one directory tree
         if wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr) or wrr == jrr or wrr.is_relative_to(jrr) or jrr.is_relative_to(wrr):
@@ -412,11 +412,12 @@ class PoolManager:
         try:
             try:
                 self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
-            except RuntimeError as exc:
+            except (RuntimeError, ValueError) as exc:
                 if self._stop.is_set():   # the operator's stop, not a failure: exit 0, or the unit latches `failed` and the rotator's restart_pool() resurrects a deliberately stopped manager
                     logger.info("stop requested during the warm-up: %s", exc)
-                    return
-                raise
+                    return 0
+                logger.error("the pool cannot start: %s", exc)   # one line the journal shows eight times, not a nine-frame traceback each restart
+                return 1
             logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
             with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
                 for _ in range(self._concurrency):
@@ -425,6 +426,7 @@ class PoolManager:
         finally:
             self._runner.shutdown()   # on EVERY exit, a failed warm-up included: whatever workers exist are destroyed
         logger.info("pool-manager stopped")
+        return 0
 
     def stop(self, *_: object) -> None:
         self._stop.set()
@@ -435,8 +437,7 @@ def main() -> int:
     pm = PoolManager()
     signal.signal(signal.SIGTERM, pm.stop)
     signal.signal(signal.SIGINT, pm.stop)
-    pm.run()
-    return 0
+    return pm.run()
 
 
 if __name__ == "__main__":

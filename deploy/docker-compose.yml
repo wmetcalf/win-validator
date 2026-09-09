@@ -51,7 +51,7 @@ services:
     user: "10001:10001"
     read_only: true            # defense-in-depth: only the job_root volume + /tmp are writable
     tmpfs:
-      - /tmp
+      - /tmp:size=2g   # the multipart spool: bounded per request by the body cap (AUTHENTICODE_MAX_UPLOAD_MB), here for all of them at once — a third max-size upload gets ENOSPC, not the host's RAM
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     depends_on:

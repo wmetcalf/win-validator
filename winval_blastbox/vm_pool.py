@@ -79,7 +79,7 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 
 def _egress_ports(raw: str | None) -> tuple[int, ...] | None:
     ports = parse_egress_ports(raw)
-    if ports is None and raw and raw.strip():
+    if ports is None and raw is not None:   # PRESENT but parsing to nothing (blank included) is CLOSED, as vm_compose._ports reads a YAML value
         logger.error("AUTHENTICODE_EGRESS_PORTS=%r parses to no port at all (comma- or space-separated numbers 1..65535): the allowlist is CLOSED, not open", raw)
         return ()
     return ports
@@ -92,6 +92,12 @@ def validate_egress_posture(spec: VmWorkerSpec) -> None:
     refuses it before booting a VM. The rooter's own check stays the enforcement; this only moves the error
     earlier (the exit sets are imported from blastbox so the two cannot drift apart)."""
     from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
+    from blastbox.host.runtime.libvirt_vm import _parse_ip_pool
+    if spec.worker_ip_pool:   # parsed only inside LibvirtVmRuntime.__init__ otherwise: the one AUTHENTICODE_* knob that could still fail after the build
+        try:
+            _parse_ip_pool(spec.worker_ip_pool)
+        except ValueError as exc:
+            raise ValueError(f"AUTHENTICODE_IP_POOL={spec.worker_ip_pool!r} is not a usable range ({exc})") from exc
     pol, rt = spec.egress, spec.routing
     if pol is None:
         return

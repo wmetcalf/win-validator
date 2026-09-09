@@ -23,6 +23,7 @@ from blastbox.host.jobs.factory import build_job_store_from_env
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .body_cap import FRAMING_SLACK, BodyCap
 from .knobs import upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
@@ -78,6 +79,11 @@ async def scan(file: UploadFile = File(...)) -> dict:
             path.unlink()
         except OSError:
             pass
+        for d in (indir, Path(job.result_dir)):   # no rowless job dir left for the retention sweep (empty after the unlink)
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         raise
     job.input_sha256 = h.hexdigest()
     _store.create(job)
@@ -234,3 +240,6 @@ async function cert(tbs){const r=await jget('/cert/'+tbs);
     ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):`<div class="empty">none in the last ${r.scanned} scans</div>`}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
+
+_inner_app = app
+app = BodyCap(_inner_app, MAX_BYTES + FRAMING_SLACK)   # what uvicorn serves: the cap runs BEFORE the multipart parser spools a part

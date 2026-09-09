@@ -32,6 +32,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .body_cap import FRAMING_SLACK, BodyCap
 from .knobs import upload_mb
 
 _log = logging.getLogger("winval.orchestrator")
@@ -385,3 +386,6 @@ async function cert(tbs){const r=await jget('/cert/'+tbs);
     ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
+
+_inner_app = app
+app = BodyCap(_inner_app, upload_mb() * 1024 * 1024 + FRAMING_SLACK)   # the cap runs BEFORE the multipart parser spools a part

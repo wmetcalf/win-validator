@@ -472,6 +472,8 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     if gate_samples:   # the gate boots under the PRODUCTION spec: a knob blastbox's fail-closed parsers refuse (AUTHENTICODE_BLOCK_INTERNAL=treu) must fail HERE, not as a traceback after the hour-long build
         try:
             _gate_spec("/dev/null")
+            from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
+            validate_egress_posture(authenticode_spec())   # the PRODUCTION spec too: the gate drops the pinned IP pool, the pool-manager will start with it
         except (ValueError, RuntimeError) as exc:
             raise NothingPublished(f"the worker spec the gate would boot with is invalid ({exc}): fix the AUTHENTICODE_* knobs; the build would be wasted") from exc
     if estimate_bytes is None:
@@ -847,6 +849,11 @@ def _promote(candidate: str) -> None:
             intact = bak
             how = (f"the automatic rollback from {bak} FAILED ({type(e).__name__}: {e}; the backup itself is intact) — "
                    f"restore the disk twin by hand: sudo cp {bak} {GOLDEN_BASE_DISK}")
+    if intact:
+        # the prune runs on EVERY rotation and every preflight: under GOLDEN_KEEP_N=0 the next night's would remove the
+        # copy this message names. A keep sidecar beside it is honoured by every prune until the operator removes it
+        _run(["sudo", "touch", intact + ".keep"])
+        how += f"; then remove {intact}.keep (it holds the backup out of the prune until you do)"
     raise SplitState(f"promotion rename -> {GOLDEN_BASE} failed (rc={r.returncode}) AFTER the disk twin was published: "
                      f"DISK {GOLDEN_BASE_DISK} = new golden, RAM {GOLDEN_BASE} = old golden; {how}. "
                      f"Restart winval-pool-manager after clearing /dev/shm to enact the new golden instead.", backup=intact)
@@ -869,6 +876,8 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
     keep_paths = {str(Path(keep).resolve()), str(Path(keep).resolve()) + ".chain"} if keep else set()   # resolved: a relative retry argument must still match the glob's absolute paths
     if also_keep:
         keep_paths.add(str(Path(also_keep).resolve()))
+    for kp in BACKUP_DIR.glob("golden-base.*.qcow2.keep"):   # a split state's recovery copy (SplitState): held until the operator removes the sidecar
+        keep_paths.add(str(Path(str(kp)[:-len(".keep")]).resolve()))
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one
