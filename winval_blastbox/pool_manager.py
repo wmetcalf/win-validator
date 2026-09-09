@@ -108,9 +108,9 @@ def _open_under(root: Path, parts, what: str) -> int:
             os.close(fd)
             fd = nfd
         return fd
-    except OSError as exc:
+    except (OSError, ValueError) as exc:   # ValueError: a NUL in a component (os.open refuses it before any syscall) — the walked descriptor must not leak either way
         os.close(fd)
-        raise ValueError(f"{what}: {root / Path(*parts)}: {exc.strerror}") from exc
+        raise ValueError(f"{what}: {root / Path(*parts)}: {getattr(exc, 'strerror', None) or exc}") from exc
 
 
 def _copy_tree_into(src_dir: Path, dst_fd: int) -> None:
