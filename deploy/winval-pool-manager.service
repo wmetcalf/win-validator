@@ -67,6 +67,9 @@ Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 # then the present-base check sees what it published. golden_rotate releases the lock before it
 # restarts this unit, so the restart cannot wait on itself.
 Environment=GOLDEN_ROTATE_LOCK=/run/winval-golden-rotate.lock
+# the lock must be 0600 BEFORE flock creates it (0644 under umask 022): flock(2) needs only a readable
+# descriptor, so a world-readable lock lets any local user hold it and stall every rotation and start
+ExecStartPre=/bin/sh -c 'umask 077; : >> "$GOLDEN_ROTATE_LOCK" && chmod 0600 "$GOLDEN_ROTATE_LOCK"'
 ExecStartPre=/usr/bin/flock -w 1800 ${GOLDEN_ROTATE_LOCK} /bin/sh -c 'b="$AUTHENTICODE_GOLDEN_BASE"; if [ -L "$b" ] || [ -d "$b" ]; then echo "refusing RAM base $b: a symlink or a directory, not a regular file (/dev/shm is world-writable)" >&2; exit 1; fi; if [ -f "$b" ]; then [ "$(stat -c %%u "$b")" = "$(id -u)" ] && exit 0; echo "refusing RAM base $b: owned by uid $(stat -c %%u "$b"), not by this unit (/dev/shm is world-writable)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; echo "materialising RAM base from $src"; for f in "$b".??????; do [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %%u "$f")" = "$(id -u)" ] && rm -f "$f"; done; t="$(mktemp "$b.XXXXXX")" || exit 1; cp "$src" "$t" && [ "$(stat -c %%s "$t")" = "$(stat -c %%s "$src")" ] && chmod 0644 "$t" && mv -fT "$t" "$b" || { rm -f "$t"; exit 1; }'
 # The start job = up to 30 min waiting for a rotation to release the lock (flock -w 1800 above)
 # PLUS the copy itself (an 18 GB image at a cold cache on a slow store can take 20 min), so the

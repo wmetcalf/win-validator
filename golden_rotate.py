@@ -32,6 +32,16 @@ from pathlib import Path
 
 logger = logging.getLogger("winval.golden_rotate")
 
+def _tighten_lock(fd: int) -> None:
+    """The rotation lock must be 0600: flock(2) needs only a READABLE descriptor, so a 0644 lock
+    (what `flock <path>` in the pool-manager unit creates under umask 022) lets any local user hold
+    the exclusive lock and stall every rotation and pool start. Our own opens create it 0600; this
+    repairs one another creator left wider (the owner check stays with the callers)."""
+    st = os.fstat(fd)
+    if st.st_uid == os.geteuid() and st.st_mode & 0o077:
+        os.fchmod(fd, 0o600)
+
+
 def _load_env_file(path: str) -> None:
     """Read the units' EnvironmentFile the way systemd does (KEY=VALUE, # comments, optional
     quotes) and apply it to any variable NOT already in the environment — so a hand-run
@@ -41,6 +51,7 @@ def _load_env_file(path: str) -> None:
         lines = Path(path).read_text().splitlines()
     except OSError:
         return
+    seen: dict[str, str] = {}
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -50,7 +61,10 @@ def _load_env_file(path: str) -> None:
         v = v.strip()
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
             v = v[1:-1]
-        if k and k not in os.environ:
+        if k:
+            seen[k] = v   # the LAST assignment wins, as it does for systemd — a hand run must read the file the units read
+    for k, v in seen.items():
+        if k not in os.environ:
             os.environ[k] = v
 
 
@@ -140,6 +154,7 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str]:
     _sweep_stranded_sources()
     copy = str(BACKUP_DIR / f"golden-base.rebake-src-{ts}-{os.getpid()}.qcow2")   # both builders call this: the second alone is not unique
     fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    _tighten_lock(fd)
     try:
         # bounded like the preflight's wait (a pool-manager start holds the lock for minutes; a
         # rotation for hours): never an unbounded block inside a oneshot with no start timeout
@@ -271,6 +286,7 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
     import fcntl
     try:
         fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        _tighten_lock(fd)
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror})") from e
     try:
@@ -286,6 +302,8 @@ def rotation_preflight(estimate_bytes: int | None = None) -> None:
                 if time.time() >= deadline:
                     raise NothingPublished(f"lock {ROTATE_LOCK} still held after {PREFLIGHT_LOCK_WAIT_S}s (a rotation in progress, or a pool-manager start materialising the RAM base)") from e
                 time.sleep(5)
+        _sweep_own_temps()   # UNDER the lock (nothing is in flight): a promotion killed mid-copy strands a
+                             # golden-sized temporary beside a base, and the space check below would fail forever
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
@@ -472,6 +490,7 @@ def rotate(candidate: str) -> None:
         raise RuntimeError(f"candidate {candidate} is not a regular file; golden NOT promoted (nothing published, no backup taken)")
     try:
         lock_fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        _tighten_lock(lock_fd)
     except OSError as e:
         raise NothingPublished(f"cannot open the rotation lock {ROTATE_LOCK} ({e.strerror}); golden NOT promoted (nothing published)") from e
     try:
@@ -636,6 +655,13 @@ def _promote(candidate: str) -> None:
 _BACKUP_NAME = re.compile(r"^golden-base\.\d{8}-\d{6}\.qcow2$")
 
 
+def _mtime(p: Path) -> float | None:
+    try:
+        return p.stat().st_mtime
+    except OSError:   # removed between the glob and the stat (a builder reclaiming its own failed candidate is not under the rotation lock)
+        return None
+
+
 def _prune_backups() -> None:
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
@@ -643,11 +669,11 @@ def _prune_backups() -> None:
     # a candidate kept for a retry (NothingPublished) is reclaimed after CANDIDATE_KEEP_DAYS
     cutoff = time.time() - CANDIDATE_KEEP_DAYS * 86400
     for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
-        if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and c.stat().st_mtime < cutoff:
+        if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and (_mtime(c) or float("inf")) < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)
-        if not Path(str(sc)[:-len(".chain")]).exists() and sc.stat().st_mtime < time.time() - 3600:
+        if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
@@ -699,6 +725,10 @@ def restart_pool() -> bool:
         r = _run(["sudo", "systemctl", "try-restart", svc], 3600)
     if r.returncode != 0:
         logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
+        return False
+    active = _run(["sudo", "systemctl", "is-active", svc]).stdout.strip()
+    if active not in ("active", "activating"):   # try-restart of a stopped unit is a successful no-op
+        logger.warning("%s is %s (deliberately stopped?): nothing was restarted; the promoted golden is NOT in service until it is started", svc, active or "not active")
         return False
     return True
 

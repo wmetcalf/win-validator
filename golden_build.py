@@ -79,12 +79,12 @@ STEPS: list[tuple[str, str]] = [
         icacls C:\scan /grant "NETWORK SERVICE:(OI)(CI)M" | Out-Null
         'acls ok'"""),
     ("http-acl", r"""
-        netsh http delete urlacl url=http://+:8765/ 2>$null | Out-Null
+        cmd /c "netsh http delete urlacl url=http://+:8765/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete
         netsh http add urlacl url=http://+:8765/ user="NT AUTHORITY\NETWORK SERVICE" | Out-Null
         New-NetFirewallRule -DisplayName valagent-8765 -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -ErrorAction SilentlyContinue | Out-Null
         'http-acl ok'"""),
     ("onstart-agent", fr"""
-        schtasks /delete /tn valagent /f 2>$null | Out-Null
+        cmd /c "schtasks /delete /tn valagent /f >nul 2>&1"   # same: a fresh image has no valagent task, and its 'cannot find the file' would end the step
         # --% hands the rest of the line to schtasks VERBATIM: PowerShell 5.1 neither escapes nor preserves quotes
         # embedded in a native argument (a `" inside "..." reaches schtasks unescaped and splits /tr), so the line
         # is written in schtasks' own syntax — /tr "... --gv \"path\"" — with no PowerShell string in between
