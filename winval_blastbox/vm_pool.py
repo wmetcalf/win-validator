@@ -25,6 +25,8 @@ import urllib.request
 from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
 
+from .knobs import env_int
+
 logger = logging.getLogger("winval.vm_pool")
 
 
@@ -32,16 +34,7 @@ def pool_size() -> int:
     """AUTHENTICODE_POOL_SIZE — the ONE reader for the warm size and the claim concurrency: an empty or
     non-numeric value is a warning plus the default (2) instead of a bare traceback that latches the
     unit failed; 0 or less (a pool that could never warm) is raised to 1."""
-    raw = os.environ.get("AUTHENTICODE_POOL_SIZE", "2").strip()
-    try:
-        n = int(raw or "2")
-    except ValueError:
-        logger.warning("AUTHENTICODE_POOL_SIZE=%r is not a whole number: using 2", raw)
-        return 2
-    if n < 1:
-        logger.warning("AUTHENTICODE_POOL_SIZE=%r is below 1: using 1", raw)
-        return 1
-    return n
+    return env_int("AUTHENTICODE_POOL_SIZE", 2, floor=1)
 
 
 # Per-job myatg overrides that are safe to vary per REQUEST (myatg exposes them as query params on

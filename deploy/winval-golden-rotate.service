@@ -27,6 +27,9 @@ Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 Environment=GOLDEN_BACKUP_DIR=/var/lib/libvirt/images/golden-backups
 Environment=GOLDEN_KEEP_N=5
+# a second copy of the golden's chain-depth record OFF the images store (the copy that survives that store
+# refusing writes at promotion time); the preflight warns every run it cannot be written
+Environment=GOLDEN_CHAIN_MIRROR=/var/lib/winval/golden-base.chain
 # The benign signed sample the rotation gate validates (benign==Valid, and revoked==Revoked when
 # GOLDEN_REVOKED_SAMPLE is set): set both in /etc/winval/winval.env (see the deploy README).
 # Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):

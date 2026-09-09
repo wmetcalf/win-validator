@@ -23,8 +23,10 @@ from blastbox.host.jobs.factory import build_job_store_from_env
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .knobs import upload_mb
+
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
-MAX_BYTES = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
+MAX_BYTES = upload_mb() * 1024 * 1024   # the pool-manager enforces the same bound on what it copies: set both tiers alike
 ENGINE = "authenticode"
 
 _store = build_job_store_from_env()

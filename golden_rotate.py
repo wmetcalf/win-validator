@@ -125,17 +125,15 @@ def chain_length() -> int:
     store (the newer of the two when they disagree — a promotion whose store write failed leaves the
     OLD record beside the golden and the new depth in the mirror), else a `.chain.unrecorded` marker,
     else 0 (a golden that predates the chain keeps rebaking from itself until MAX_CHAIN, as before)."""
-    rec, mir = _read_depth(_chain_file()), _read_depth(_mirror_file())
-    if rec is not None and mir is not None and rec != mir:
-        return rec if (_mtime(_chain_file()) or 0) >= (_mtime(_mirror_file()) or 0) else mir
-    if rec is not None:
-        return rec
-    if mir is not None:
-        return mir
-    orphan = _newest_orphan_sidecar()
-    if orphan is not None:
-        d = _read_depth(orphan)
-        return MAX_CHAIN if d is None else d
+    # the NEWEST of the three copies is the promotion that actually happened: a store that refused the
+    # record leaves the old record in place, and a marker written when both stores refused is newer
+    # than both (it is touched at promotion time); a later successful record is newer than any marker
+    copies = []
+    for p in (_chain_file(), _mirror_file(), _newest_orphan_sidecar()):
+        if p is not None and (d := _read_depth(p)) is not None:
+            copies.append((_mtime(p) or 0, d))
+    if copies:
+        return max(copies, key=lambda t: t[0])[1]
     return 0   # the count starts here — the preflight proves the record CAN be written, so a stuck counter is refused up front, not pinned
 
 
@@ -203,6 +201,8 @@ def _keep_as_unrecorded(candidate: str) -> bool:
         return unrecorded_marker(candidate).exists()
     r = _run(["sudo", "mv", "-f", str(sidecar), str(unrecorded_marker(candidate))])
     ok = getattr(r, "returncode", 1) == 0 and unrecorded_marker(candidate).exists()
+    if ok:
+        _run(["sudo", "touch", str(unrecorded_marker(candidate))])   # mv keeps the BUILD time: the marker must date from the promotion, the newest copy chain_length() picks
     if not ok:
         logger.error("the depth sidecar %s could not be kept as %s (the store refuses even a rename)", sidecar, unrecorded_marker(candidate))
     return ok
@@ -404,6 +404,14 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             _run(["sudo", "rm", "-f", probe])
             if not _chain_file().exists() and not _write_small(str(_chain_file()), str(chain_length())):
                 raise NothingPublished(f"cannot write the chain record {_chain_file()}: the master-rebake schedule could not be kept")
+            # the mirror (the copy that survives the images store refusing writes) is proved the same way, but
+            # its loss is a WARNING every run, not a refusal: the record beside the golden is the primary
+            _run(["sudo", "mkdir", "-p", str(_mirror_file().parent)])
+            mprobe = str(_mirror_file()) + ".probe"
+            if _write_small(mprobe, "probe"):
+                _run(["sudo", "rm", "-f", mprobe])
+            else:
+                logger.warning("the chain-record mirror %s cannot be written (GOLDEN_CHAIN_MIRROR; root filesystem full or an unmounted path?): a promotion during an images-store outage would then lose its depth", _mirror_file())
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
@@ -798,9 +806,10 @@ def _prune_backups(keep: str | None = None) -> None:
             continue
         if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
-    if _chain_file().exists():   # the record exists again: the markers it superseded age out (never while it is absent — they ARE the record then)
+    rec_t = _mtime(_chain_file())
+    if rec_t is not None:   # a marker OLDER than the record was superseded by it: age it out (a newer marker IS the record until a newer record lands)
         for mk in BACKUP_DIR.glob("*.chain.unrecorded"):
-            if (_mtime(mk) or float("inf")) < time.time() - 3600:
+            if (_mtime(mk) or float("inf")) < min(rec_t, time.time() - 3600):
                 _run(["sudo", "rm", "-f", str(mk)])
     baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")

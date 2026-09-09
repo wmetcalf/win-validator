@@ -31,6 +31,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .knobs import upload_mb
 from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
 from .host_runner import HostRunner
@@ -200,7 +201,7 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     # Stream the upload to a private temp file in chunks with a hard size cap, so a huge (or
     # slow-loris many-concurrent) upload can't be buffered whole into RAM and OOM the service.
     # Clean up the temp file on any failure before the job is queued (only _run unlinks otherwise).
-    max_bytes = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
+    max_bytes = upload_mb() * 1024 * 1024
     fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + Path(file.filename or "input").name)
     try:
         written = 0

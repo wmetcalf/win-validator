@@ -64,6 +64,9 @@ Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
 # ingress-owned job_root directly; sealed outputs are published into <job>/output by descriptor afterwards
 Environment=WINVAL_WORK_ROOT=/var/lib/winval/work
 Environment=AUTHENTICODE_POOL_SIZE=2
+# The upload bound is enforced TWICE — by the ingress container (deploy/docker-compose.yml sets the same
+# variable there) and by this manager on the spooled input it copies into its scratch tree: raise both
+Environment=AUTHENTICODE_MAX_UPLOAD_MB=1024
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 EnvironmentFile=-/etc/winval/winval.env

@@ -34,6 +34,7 @@ from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .host_runner import HostRunner
+from .knobs import upload_mb
 from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
@@ -44,9 +45,15 @@ JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
 # <job>/output by directory descriptor with O_EXCL (see _publish). Never place it under WINVAL_JOB_ROOT.
 WORK_ROOT = Path(os.environ.get("WINVAL_WORK_ROOT", "/var/lib/winval/work"))
 SWEEP_S = 3600.0
-# The same bound the ingress enforces on an upload (AUTHENTICODE_MAX_UPLOAD_MB): a compromised ingress can
-# spool ANY size, and the copy into WORK_ROOT must not be how the manager's disk is exhausted
-MAX_INPUT_BYTES = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024") or "1024") * 1024 * 1024
+# The same bound the ingress enforces on an upload (AUTHENTICODE_MAX_UPLOAD_MB, read by the same tolerant
+# reader): a compromised ingress can spool ANY size, and the copy into WORK_ROOT must not be how the
+# manager's disk is exhausted. Raised on the ingress alone, large uploads fail HERE, by name in the row.
+MAX_INPUT_BYTES = upload_mb() * 1024 * 1024
+
+
+class PublicError(ValueError):
+    """A refusal whose text is safe to show the submitter in the job row (no host paths): the ingress UI
+    renders j.error, which otherwise carries only the exception's type name."""
 
 
 def _retention_days() -> float:
@@ -232,7 +239,7 @@ class PoolManager:
                 raise FileNotFoundError(f"spooled input missing: {Path(job.result_dir) / 'input' / filename}") from None
             st = os.fstat(in_fd)
             if st.st_size > MAX_INPUT_BYTES:
-                raise ValueError(f"job {job.job_id}: spooled input is {st.st_size} bytes, over the {MAX_INPUT_BYTES}-byte upload bound")
+                raise PublicError(f"input is {st.st_size} bytes, over the pool-manager's {MAX_INPUT_BYTES}-byte bound (AUTHENTICODE_MAX_UPLOAD_MB, set alike on the ingress and the host)")
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 # a hard link to a root-owned file would pass O_NOFOLLOW and S_ISREG (fs.protected_hardlinks
                 # forbids the ingress making one, but that is a per-host sysctl this code cannot assert)
@@ -248,7 +255,7 @@ class PoolManager:
                         break
                     copied += len(chunk)
                     if copied > MAX_INPUT_BYTES:
-                        raise ValueError(f"job {job.job_id}: spooled input grew past the {MAX_INPUT_BYTES}-byte upload bound while being copied")
+                        raise PublicError(f"input grew past the pool-manager's {MAX_INPUT_BYTES}-byte bound while being copied (AUTHENTICODE_MAX_UPLOAD_MB)")
                     dst.write(chunk)
             env = self._runner.validate_to_dir(work / "input" / filename, work / "output")
             summary = _extract_verdict(env)
@@ -274,7 +281,8 @@ class PoolManager:
             try:   # the recovery write uses the same store that may have just failed (a Postgres restart): it must not escape either
                 recorded = bool(self._store.update_if_status(
                     job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
-                    status=JobStatus.FAILED, finished_at=time.time(), error=type(exc).__name__))
+                    status=JobStatus.FAILED, finished_at=time.time(),
+                    error=str(exc)[:300] if isinstance(exc, PublicError) else type(exc).__name__))
                 if not recorded:
                     logger.warning("job %s: failure NOT recorded — the row was no longer RUNNING under claim %s; input kept", job.job_id, job.claim_id)
             except Exception:  # noqa: BLE001
