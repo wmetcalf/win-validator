@@ -4,8 +4,8 @@ A **portable, reproducible** builder for a hardened **Windows Server 2025 (Core)
 (`qcow2`) — for KVM/libvirt hosts. Clone, drop in an ISO, run one script. No host-specific setup.
 
 The image installs unattended, enables in-box **OpenSSH** (key-only), and bakes a hardened feature
-set via ordered PowerShell provisioners (cert-store sync, Windows Update, WDAC/AppLocker, Defender,
-CIS-ish hardening, eval-rearm). It's the *OS base*; layering an application/agent on top is a separate
+set via ordered PowerShell provisioners (cert-store sync, one Windows Update pass, WDAC/AppLocker,
+Defender, CIS-ish hardening, an eval-licence status log). It's the *OS base*; layering an application/agent on top is a separate
 downstream step.
 
 ## Prerequisites
@@ -69,9 +69,9 @@ output/                         build output qcow2  (gitignored)
 2. Packer boots the ISO with the answer file on an **OEMDRV** CD → unattended WS2025-Core install →
    first-boot enables OpenSSH and installs the build pubkey.
 3. Packer connects over SSH (via slirp port-forward, **key-only**) and runs the provisioners: OpenSSH
-   hardening, then **Windows Update in an install→reboot loop** (so cumulative/servicing-stack updates
-   fully apply), then the feature-bake steps, ending with **95-freeze-windows-update** which disables WU
-   in the image.
+   hardening, then **one best-effort Windows Update pass + one reboot** (the checkpoint cumulative is
+   excluded — see Notes; the golden is not fully patched), then the feature-bake steps, ending with
+   **95-freeze-windows-update** which disables WU in the image.
 4. Clean shutdown → `output/winserver2025-core.qcow2`.
 
 The keypair is **per-build and disposable** — nothing is hardcoded. Rotate the golden's real access

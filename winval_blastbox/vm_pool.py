@@ -155,7 +155,12 @@ class WarmVmPool:
             # warm" — the error would never say why
             raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} does not exist; put a benign signed sample there or unset it")
         health_check = _smoke if smoke_sample else None
-        pre_snapshot = _warm_crl if os.environ.get("AUTHENTICODE_WARM_DIR") else None
+        warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
+        if warm_dir and not os.path.isdir(warm_dir):
+            # the same rule as the smoke sample: set but missing must fail HERE, by name — _warm_crl
+            # would otherwise skip silently and every snapshot would carry a cold CRL/OCSP cache
+            raise RuntimeError(f"AUTHENTICODE_WARM_DIR={warm_dir!r} is not a directory; put the benign signed samples there or unset it")
+        pre_snapshot = _warm_crl if warm_dir else None
         self._pool = authenticode_spec().build_pool(
             jobs_per_recycle=jobs_per_recycle, health_check=health_check,
             pre_snapshot=pre_snapshot, on_ready=_sync_clock)
