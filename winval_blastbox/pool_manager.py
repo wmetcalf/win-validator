@@ -44,16 +44,20 @@ def _confine(p: Path, what: str) -> Path:
     otherwise replace <job>/input or <job>/output with a symlink and steer this process anywhere. The
     resolved path is returned; the walk below refuses intermediate links (blastbox's retention sweeper
     keeps the same rule: symlinks are never followed out of job_root)."""
-    root = JOB_ROOT.resolve()
-    rp = p.resolve()
-    if not rp.is_relative_to(root):
+    ap = Path(os.path.abspath(p))          # LEXICAL: resolve() would erase the very links being refused,
+    for base in (Path(os.path.abspath(JOB_ROOT)), JOB_ROOT.resolve()):   # so a link into ANOTHER job's dir passed
+        if ap.is_relative_to(base):
+            break
+    else:
         raise ValueError(f"{what} escapes JOB_ROOT: {p}")
-    cur = root
-    for part in rp.relative_to(root).parts:
+    cur = base
+    for part in ap.relative_to(base).parts:
         cur = cur / part
         if cur.is_symlink():
             raise ValueError(f"{what}: symlink in path refused: {cur}")
-    return rp
+    if not ap.resolve().is_relative_to(JOB_ROOT.resolve()):
+        raise ValueError(f"{what} escapes JOB_ROOT: {p}")
+    return ap
 
 
 def _rm_job_dir(d: Path) -> None:
