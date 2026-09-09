@@ -77,13 +77,15 @@ PUBKEY="$(cat keys/build_key.pub)"
 PUBKEY="$PUBKEY" ADMIN_PW="$ADMIN_PW" python3 - <<'PY'
 import os, sys, xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
-t = open("answer/Autounattend.xml.tmpl").read()
-t = t.replace("@@SSH_PUBKEY@@", escape(os.environ["PUBKEY"])).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"]))
+t = open("answer/Autounattend.xml.tmpl", encoding="utf-8").read()
+pubkey = os.environ["PUBKEY"].replace("'", "''")   # the key lands inside a PowerShell single-quoted string: an apostrophe in a supplied key's comment doubles
+t = t.replace("@@SSH_PUBKEY@@", escape(pubkey)).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"]))
 try:
     ET.fromstring(t)
-except ET.ParseError as exc:
-    sys.exit(f"rendered Autounattend.xml is not well-formed XML ({exc}); refusing to build with it")
-open("answer/Autounattend.xml", "w").write(t)
+    data = t.encode("utf-8")   # a value the environment could not decode (not UTF-8) is refused here, not as a traceback
+except (ET.ParseError, UnicodeError) as exc:
+    sys.exit(f"rendered Autounattend.xml is not well-formed UTF-8 XML ({exc}); refusing to build with it")
+open("answer/Autounattend.xml", "wb").write(data)
 PY
 say "rendered answer/Autounattend.xml"
 
