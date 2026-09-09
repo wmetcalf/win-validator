@@ -218,8 +218,11 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     name = Path(file.filename or "input").name
     if not name or name in (".", ".."):
         raise HTTPException(status_code=400, detail="filename has no usable name")
-    # the client's name is only a HINT in the temp name: bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as a 500 (the ingress twin answers 400)
-    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + name.encode("utf-8", "surrogateescape")[:120].decode("utf-8", "ignore"))
+    # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
+    # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
+    stem, ext = os.path.splitext(name)
+    hint = stem.encode("utf-8", "surrogateescape")[:100].decode("utf-8", "ignore") + ext.encode("utf-8", "surrogateescape")[:20].decode("utf-8", "ignore")
+    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + hint)
     try:
         written = 0
         with os.fdopen(fd, "wb") as f:
