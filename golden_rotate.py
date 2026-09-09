@@ -388,7 +388,7 @@ def _ip_for_mac(mac: str) -> str | None:
     return None
 
 
-def build_candidate() -> str:
+def build_candidate(src: str | None = None) -> str:
     """Clone the rebake source (a private copy of the promoted golden, or of the master), boot
     it, refresh the trust state in-guest, flatten -> a candidate qcow2.
 
@@ -403,7 +403,7 @@ def build_candidate() -> str:
     _virsh("destroy", dom)
     _virsh("undefine", dom, "--snapshots-metadata")
     _run(["sudo", "rm", "-f", overlay])
-    src, src_copy, at = snapshot_source(ts)   # may raise (lock wait, missing source): nothing else exists yet
+    src, src_copy, at = snapshot_source(ts, src)   # the source the caller decided on (never re-decided here: a promotion in between could flip it to the agent-less master); may raise (lock wait, missing source): nothing else exists yet
     depth = 0 if src == MASTER_QCOW2 else at + 1   # the source's depth as read under the copy's lock; the sidecar is written once the candidate exists (below)
     logger.info("rebake source: %s (private copy %s) -> overlay %s", src, src_copy, overlay)
     xfd, xml_path = tempfile.mkstemp(prefix=f"{dom}-", suffix=".xml")   # O_EXCL, unpredictable: never a /tmp path another user can pre-create
@@ -531,7 +531,7 @@ def _rotate_locked(candidate: str) -> None:
         _promote(candidate)
         _record_chain(candidate)   # BEFORE the prune: it could reclaim an old candidate together with the sidecar this reads
     finally:
-        _prune_backups()   # on EVERY outcome
+        _prune_backups(candidate)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
 
 
 def _backup_current() -> str | None:
@@ -684,20 +684,20 @@ def _mtime(p: Path) -> float | None:
 def _prune_backups(keep: str | None = None) -> None:
     """``keep``: a candidate this run is about to promote (the retry CLI's argument) — never
     reclaimed here however old it is, nor its .chain sidecar."""
-    keep_paths = {str(Path(keep)), str(Path(keep)) + ".chain"} if keep else set()
+    keep_paths = {str(Path(keep).resolve()), str(Path(keep).resolve()) + ".chain"} if keep else set()   # resolved: a relative retry argument must still match the glob's absolute paths
     # ONLY real backups (golden-base.<YYYYmmdd-HHMMSS>.qcow2) are counted and pruned: a
     # golden_rotate candidate (.candidate-<ts>), a golden_build image (.built-<ts>) or anything
     # else sharing the directory is neither kept as a rollback golden nor allowed to evict one
     # a candidate kept for a retry (NothingPublished) is reclaimed after CANDIDATE_KEEP_DAYS
     cutoff = time.time() - CANDIDATE_KEEP_DAYS * 86400
     for c in BACKUP_DIR.glob("golden-base.*.qcow2"):
-        if str(c) in keep_paths:
+        if str(c.resolve()) in keep_paths:
             continue
         if (".candidate-" in c.name or ".built-" in c.name or ".rebake-src-" in c.name) and (_mtime(c) or float("inf")) < cutoff:
             logger.info("pruning stale candidate %s", c.name)
             _run(["sudo", "rm", "-f", str(c)])
     for sc in BACKUP_DIR.glob("golden-base.*.qcow2.chain"):   # a sidecar whose candidate is gone (and not a build in flight)
-        if str(sc) in keep_paths:
+        if str(sc.resolve()) in keep_paths:
             continue
         if not Path(str(sc)[:-len(".chain")]).exists() and (_mtime(sc) or float("inf")) < time.time() - 3600:
             _run(["sudo", "rm", "-f", str(sc)])
@@ -769,7 +769,8 @@ def refresh_and_rotate() -> int:
     """The full gated cycle: build a refreshed candidate, validate it, and ONLY promote if it passes.
     A failing gate keeps the current golden and returns non-zero (surfaced to the cron/alert)."""
     rotation_preflight()   # root, lock, space — BEFORE the hour-long build and gate
-    if rebake_source() == MASTER_QCOW2:
+    src = rebake_source()   # decided ONCE for this cycle
+    if src == MASTER_QCOW2:
         # the master is the PACKER image (the bring-up installs it as GOLDEN_MASTER): no agent, no
         # task, no ACLs — a trust refresh alone would fail at C:\agent\myatg.exe. The chain reset
         # (and GOLDEN_REBAKE_FROM=master) is therefore the full reproducible bake: install + compile
@@ -777,7 +778,7 @@ def refresh_and_rotate() -> int:
         logger.info("rebake from the master %s: running the full golden_build bake (the master carries no agent)", MASTER_QCOW2)
         import golden_build   # sibling module; imported lazily (it imports this one)
         return golden_build.build_and_promote(MASTER_QCOW2)
-    candidate = build_candidate()
+    candidate = build_candidate(src)
     if not validate_golden(candidate):
         logger.error("REBAKE REJECTED: keeping current golden %s; candidate %s discarded",
                      GOLDEN_BASE_DISK, candidate)
