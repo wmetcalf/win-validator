@@ -931,8 +931,10 @@ def validate_graveyard(path: str) -> None:
         return
     d = __import__("ntpath").dirname(path)
     if not re.match(r"^[A-Za-z]:\\[^\\]", d) or any(c in path for c in "$`\"'"):
-        raise ValueError(f"GOLDEN_GRAVEYARD={path!r} must be an absolute Windows drive path inside a directory, without $ ` or quotes "
-                         f"(its directory {d!r} is granted to the agent verbatim in PowerShell); UNC, forward-slash and relative paths are refused")
+        hint = (" — the value reads without its backslashes: in winval.env single-quote the whole value, as the file says, or the loader eats them"
+                if re.match(r"^[A-Za-z]:[^\\\\]", path) else "")
+        raise ValueError(f"GOLDEN_GRAVEYARD={path!r} must be an absolute Windows drive path inside a directory, whose own characters include no $ ` or quote "
+                         f"(its directory {d!r} is granted to the agent verbatim in PowerShell); UNC, forward-slash and relative paths are refused{hint}")
 
 
 def validate_warm_dir(path: str) -> None:
@@ -942,7 +944,9 @@ def validate_warm_dir(path: str) -> None:
     if not path:
         return
     if not re.match(r"^[A-Za-z]:\\[^\\]", path) or any(c in path for c in "$`\"'"):
-        raise ValueError(f"GOLDEN_WARM_DIR={path!r} must be an absolute Windows drive directory without $ ` or quotes (it is passed verbatim to myatg --warm-cache in PowerShell)")
+        hint = (" — the value reads without its backslashes: in winval.env single-quote the whole value, as the file says, or the loader eats them"
+                if re.match(r"^[A-Za-z]:[^\\\\]", path) else "")
+        raise ValueError(f"GOLDEN_WARM_DIR={path!r} must be an absolute Windows drive directory whose own characters include no $ ` or quote (it is passed verbatim to myatg --warm-cache in PowerShell){hint}")
 
 
 def _proc_start(pid: str) -> str | None:
@@ -1173,9 +1177,9 @@ def _main(cmd: str, argv: list[str]) -> int:
         rotate(argv[1])
         if restart_pool():   # the retry path is a promoting entry point too: warm workers ran the old golden
             logger.info("PROMOTED: golden refreshed and in service")
-            return 0
-        logger.warning("PROMOTED but NOT in service until winval-pool-manager is restarted")
-        return 1
+        else:   # a deliberate no-op (GOLDEN_RESTART_SERVICE empty, a stopped pool at bring-up) is not a failed promotion: 0, as the timer and build-and-promote answer it
+            logger.warning("PROMOTED but NOT in service until winval-pool-manager is restarted")
+        return 0
     print(__doc__)
     return 2
 
