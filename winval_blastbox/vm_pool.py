@@ -81,7 +81,12 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 def _egress_ports(raw: str | None) -> tuple[int, ...] | None:
     ports = parse_egress_ports(raw)
     if ports and raw:
-        dropped = [t for t in re.split(r"[,\s]+", raw.strip()) if t and not (t.isdigit() and int(t) in ports)]
+        def _kept(t: str) -> bool:   # the PARSER's own verdict per token (isdigit()/int() re-derived it wrongly: '²' raised, '+443' was reported dropped though honoured)
+            try:
+                return bool(parse_egress_ports(t))
+            except ValueError:
+                return False
+        dropped = [t for t in re.split(r"[,\s]+", raw.strip()) if t and not _kept(t)]
         if dropped:   # blastbox's parser skips a token it cannot read (a range, a name) silently: the operator must hear which
             logger.warning("AUTHENTICODE_EGRESS_PORTS=%r: %s dropped (comma- or space-separated port NUMBERS 1..65535 only); allowing %s", raw, dropped, list(ports))
     if ports is None and raw is not None:   # PRESENT but parsing to nothing (blank included) is CLOSED, as vm_compose._ports reads a YAML value

@@ -52,7 +52,8 @@ _CSC = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
 GV_ARG = f'--gv "{GRAVEYARD}"' if GRAVEYARD else ""          # the in-guest refresh (quoted; absent when disabled, as in golden_rotate)
 import ntpath
 GV_DIR = ntpath.dirname(GRAVEYARD) if GRAVEYARD else ""       # the directory the serving agent must READ: the grant below follows the knob, not a literal
-GV_GRANT_PS = (f'icacls "{GV_DIR}" /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null\n'
+GV_GRANT_PS = (f'New-Item -Force -ItemType Directory "{GV_DIR}" | Out-Null\n'   # like C:\scan below: a non-default directory the base image never created failed the grant 40 min into the bake
+               f'        icacls "{GV_DIR}" /grant "NETWORK SERVICE:(OI)(CI)RX" | Out-Null\n'
                f'        if ($LASTEXITCODE -ne 0) {{ throw "icacls {GV_DIR} failed ($LASTEXITCODE)" }}') if GV_DIR else ""
 WARM_PS = f'{AGENT_DIR}\\myatg.exe --warm-cache "{gr.WARM_DIR}" {GV_ARG} | Out-Null;' if gr.WARM_DIR else ""   # same CRL warm-up as the rotator's rebake
 GV_TASK = f'--gv \\"{GRAVEYARD}\\"' if GRAVEYARD else ""   # for the --% (stop-parsing) schtasks line below: schtasks' own argv parser reads \" as a literal quote inside /tr, the documented idiom for a quoted path in a task action; absent when disabled (a bare path with a space silently emptied the graveyard)
