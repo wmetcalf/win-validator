@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import datetime
 import json
+import logging
 import os
 import subprocess
 import time
@@ -23,6 +24,8 @@ import urllib.request
 
 from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
+
+logger = logging.getLogger("winval.vm_pool")
 
 
 # Per-job myatg overrides that are safe to vary per REQUEST (myatg exposes them as query params on
@@ -175,7 +178,14 @@ class WarmVmPool:
             if self._pool.idle_count >= 1:  # idle_count is a @property
                 return
             time.sleep(2)
-        raise RuntimeError("WarmVmPool: no worker became warm within timeout")
+        # the pool this call STARTED is reaped here: WarmPool.stop() is the only thing that destroys the
+        # domains its spawn loop already defined and started (overlays on /dev/shm, guest RAM), and the
+        # caller cannot — engine.get_pool() publishes the pool only after this returns
+        try:
+            self._pool.stop()
+        except Exception:  # noqa: BLE001
+            logger.warning("WarmVmPool: stop after a failed warm-up raised", exc_info=True)
+        raise RuntimeError("WarmVmPool: no worker became warm within timeout (the workers it started were stopped)")
 
     def validate(self, path: str, params: dict | None = None) -> dict:
         slot = self._pool.claim(timeout_s=self._claim_timeout_s)

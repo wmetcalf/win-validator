@@ -64,6 +64,22 @@ def _retention_days() -> float:
     return days
 
 
+def _pool_size() -> int:
+    """AUTHENTICODE_POOL_SIZE, hardened like the retention knob: an empty or non-numeric value is a
+    warning plus the default (2) instead of a bare traceback that latches the unit failed; 0 (no
+    worker would ever warm, then the executor would refuse max_workers=0) is raised to 1."""
+    raw = os.environ.get("AUTHENTICODE_POOL_SIZE", "2").strip()
+    try:
+        n = int(raw or "2")
+    except ValueError:
+        logger.warning("AUTHENTICODE_POOL_SIZE=%r is not a whole number: using 2", raw)
+        return 2
+    if n < 1:
+        logger.warning("AUTHENTICODE_POOL_SIZE=%r is below 1: using 1", raw)
+        return 1
+    return n
+
+
 def _rel_parts(p: Path, what: str, root: Path = JOB_ROOT) -> tuple:
     """The components of p below root, LEXICALLY (abspath collapses '..'); nothing here touches the
     filesystem. Every open that follows is done component by component from a descriptor on root
@@ -192,7 +208,7 @@ class PoolManager:
         self._store = build_job_store_from_env()
         self._runner = HostRunner()
         self._stop = threading.Event()
-        self._concurrency = int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2"))
+        self._concurrency = _pool_size()
 
     def _process(self, job) -> None:
         """Validate one claimed job and write its verdict back (CAS-fenced on the claim)."""
@@ -367,7 +383,8 @@ class PoolManager:
 
     def run(self) -> None:
         wr, jr = Path(os.path.abspath(WORK_ROOT)), Path(os.path.abspath(JOB_ROOT))
-        if wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr):
+        wrr, jrr = wr.resolve(), jr.resolve()   # lexically AND through links: a job root symlinked into the scratch root is one directory tree
+        if wr == jr or wr.is_relative_to(jr) or jr.is_relative_to(wr) or wrr == jrr or wrr.is_relative_to(jrr) or jrr.is_relative_to(wrr):
             # the JOB_ROOT sweep would otherwise remove the scratch root as a rowless job dir, and an ingress
             # result_dir could name a directory inside the manager's own scratch tree
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} and WINVAL_JOB_ROOT {JOB_ROOT} must be disjoint")
@@ -378,13 +395,15 @@ class PoolManager:
         self._recover_orphans()
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
-        self._runner.warmup()
-        logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
-        with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
-            for _ in range(self._concurrency):
-                ex.submit(self._worker_loop)
-            self._stop.wait()  # block until SIGTERM/SIGINT
-        self._runner.shutdown()
+        try:
+            self._runner.warmup()
+            logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
+            with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
+                for _ in range(self._concurrency):
+                    ex.submit(self._worker_loop)
+                self._stop.wait()  # block until SIGTERM/SIGINT
+        finally:
+            self._runner.shutdown()   # on EVERY exit, a failed warm-up included: whatever workers exist are destroyed
         logger.info("pool-manager stopped")
 
     def stop(self, *_: object) -> None:
