@@ -313,6 +313,10 @@ def _run(a: list[str], t: float = 120) -> subprocess.CompletedProcess:
         return subprocess.run(a, capture_output=True, text=True, timeout=t)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(a, 124, "", "timeout")
+    except OSError as exc:   # fork/exec failed (ENOMEM, EMFILE — the degraded host that causes a split state): a FAILED result, never a
+        # traceback that replaces the diagnostic in flight (every caller already judges the returncode)
+        logger.error("could not run %s: %s", a[0], exc)
+        return subprocess.CompletedProcess(a, 255, "", f"could not run {a[0]}: {exc}")
 
 
 def _virsh(*a: str, t: float = 120) -> subprocess.CompletedProcess:
@@ -705,8 +709,10 @@ def _rotate_locked(candidate: str) -> None:
         _record_chain(candidate)   # BEFORE the prune: it could reclaim an old candidate together with the sidecar this reads
     except SplitState as e:
         needed = e.backup   # the recovery copy the message names: never pruned, whatever GOLDEN_KEEP_N says
+        prev = chain_length()
         _record_chain(candidate)   # the DISK twin was published: its depth is the candidate's, and the caller removes the candidate next (a record that stayed at the old depth put the master rebake one cycle late, for good)
-        raise
+        raise SplitState(f"{e} The chain record now holds the published twin's depth ({chain_length()}); if you restore the disk twin by hand instead of restarting, "
+                         f"put the previous depth back: sudo sh -c 'printf {prev} > {_chain_file()}; printf {prev} > {_mirror_file()}'.", backup=e.backup) from e
     finally:
         _prune_backups(candidate, also_keep=needed)   # on EVERY outcome — but never the candidate itself: a promotion that failed with NothingPublished KEEPS it for the printed retry, however old it is
 

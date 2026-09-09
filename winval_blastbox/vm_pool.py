@@ -95,8 +95,13 @@ def validate_egress_posture(spec: VmWorkerSpec) -> None:
         from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
         from blastbox.host.runtime.libvirt_vm import _parse_ip_pool
     except ImportError as exc:
-        import importlib.metadata
-        raise RuntimeError(f"the installed blastbox ({importlib.metadata.version('blastbox')}) lacks a name this posture check relies on ({exc}); upgrade blastbox (deploy/README.md pins the minimum)") from exc
+        try:
+            import importlib.metadata
+            ver = importlib.metadata.version("blastbox")
+        except Exception:   # a source checkout on PYTHONPATH has no dist metadata — and PackageNotFoundError IS an ImportError, which must not escape here
+            import blastbox
+            ver = getattr(blastbox, "__version__", None) or f"an unversioned checkout at {os.path.dirname(blastbox.__file__)}"
+        raise RuntimeError(f"the installed blastbox ({ver}) lacks a name this posture check relies on ({exc}); upgrade blastbox (deploy/README.md pins the minimum)") from exc
     if spec.worker_ip_pool:   # parsed only inside LibvirtVmRuntime.__init__ otherwise: the one AUTHENTICODE_* knob that could still fail after the build
         try:
             _parse_ip_pool(spec.worker_ip_pool)
