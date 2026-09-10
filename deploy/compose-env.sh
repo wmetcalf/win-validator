@@ -12,7 +12,11 @@
 # through, and the refusal then came after the tree and the venv had moved).
 set -eu
 ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
-PY=python3; [ -x .venv/bin/python ] && PY=.venv/bin/python   # the deployed venv when run from the tree (it carries psycopg, the ingress's own URL parser)
+# the deployed venv (it carries psycopg, the ingress's own URL parser), found from THIS script's location — never the caller's
+# cwd: root ran <cwd>/.venv/bin/python, a shim planted in any directory an operator happened to be in. Read from a pipe
+# (upgrade.sh's `sh -s`, run from the tree it cd'd into) the cwd IS the tree
+case "$0" in */*) TREE=$(cd "$(dirname "$0")/.." && pwd) ;; *) TREE=$PWD ;; esac
+PY=python3; [ -x "$TREE/.venv/bin/python" ] && PY="$TREE/.venv/bin/python"
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
 if [ -e "$ETC/compose.env" ] && [ ! -f "$ETC/compose.env" ]; then echo "compose-env: $ETC/compose.env is not a regular file (a directory? install would write INTO it and report success)" >&2; exit 1; fi
@@ -101,7 +105,7 @@ try:
     except Exception:
         ok = False
 except ImportError:
-    ok = bool(a and b) and re.fullmatch(r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*", b) is not None and unquote(b) == a
+    ok = bool(a and b) and re.fullmatch(r"(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*", b) is not None and unquote(b) == a   # what libpq takes raw in userinfo: unreserved, sub-delims and ':'; never @ / ? # [ ] or a bare %
 print("plain=" + ("set" if a else "empty"), "urlenc=" + ("set" if b else "empty"), "agree=" + ("yes" if ok else "no"))
 PY
   else
@@ -136,8 +140,19 @@ if [ -n "$PWLINE" ]; then
     OTHER=$(grep -v '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}WINVAL_PG_PASSWORD\(_URLENC\)\{0,1\}[[:space:]]*=' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
     cand=$(mktemp) || exit 1
     { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } > "$cand"   # printf, not echo: dash's echo would eat the backslashes
-    if ! reads=$(compose_reads "$cand") || [ "$reads" != "plain=set urlenc=set agree=yes" ]; then
-      rm -f "$cand"; echo "compose-env: compose could not read the derived $ETC/compose.env (its message above: a broken line among the other lines, or a compose that cannot run); nothing written" >&2; exit 1
+    if ! reads=$(compose_reads "$cand" 2>&1) || [ "$reads" != "plain=set urlenc=set agree=yes" ]; then
+      # compose's message quotes the token it choked on, and a survivor's unbalanced quote swallows the derived password line
+      # into that token: the password, in both forms and its JSON spelling, is redacted before the message is shown
+      rm -f "$cand"; MSG="$reads" PWLINE="$PWLINE" ETC_FILE="$ETC/compose.env" "$PY" - >&2 <<'PY'
+import json, os
+msg, pwline = os.environ["MSG"], os.environ["PWLINE"]
+plain_json = pwline.splitlines()[0].split("=", 1)[1]; enc = pwline.splitlines()[1].split("=", 1)[1]
+plain = json.loads(plain_json.replace("$$", "$"))
+for needle in sorted({plain_json, plain_json.replace("$$", "$"), plain, enc}, key=len, reverse=True):
+    if needle: msg = msg.replace(needle, "<password>")
+print("compose-env: compose could not read the derived " + os.environ.get("ETC_FILE", "compose.env") + " (a broken line among the other lines, or a compose that cannot run); nothing written. compose said: " + msg)
+PY
+      exit 1
     fi
     if cmp -s "$cand" "$ETC/compose.env" 2>/dev/null; then
       rm -f "$cand"; echo "compose-env: $ETC/compose.env already matches winval.env"

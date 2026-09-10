@@ -56,7 +56,7 @@ def _load_env_file(path: str) -> None:
     `sudo … golden_rotate.py` (sudo's env_reset strips every exported GOLDEN_*/AUTHENTICODE_*
     override) sees the SAME paths the timer's rotation used, instead of the defaults."""
     try:
-        lines = Path(path).read_text().splitlines()
+        lines = Path(path).read_text(encoding="utf-8", errors="surrogateescape").splitlines()   # a stray non-UTF-8 byte (a comment) killed the module at import; systemd reads the file fine
     except OSError:
         return
     seen: dict[str, str] = {}
