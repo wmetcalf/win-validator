@@ -59,27 +59,9 @@ if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
   PW=$(openssl rand -hex 16)
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
 fi
-# compose.env carries the SAME password (the URL in winval.env is the source of truth — also when
-# you wrote that line yourself); written 0600 from the first byte, never tee-then-chmod
-# compose.env is DERIVED from winval.env's URL every time it disagrees (missing, written before the
-# encoded form existed, or the URL was edited). Postgres keeps whatever password its volume was
-# initialised with: to change the password for real, `down -v` first, then edit the URL.
-WANT_URLENC=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); print(quote(unquote(u.password), safe="")) if u.password else None')
-if ! sudo test -f /etc/winval/compose.env || [ "$(sudo sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' /etc/winval/compose.env)" != "$WANT_URLENC" ]; then   # a MISSING compose.env is derived too (an undecodable URL compares empty to empty otherwise, and the guidance below never prints)
-  # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char
-  # Postgres must be initialised with; both clients decode it the same way)
-  # two forms: the literal password (Postgres initialises with it; written as a JSON/double-quoted
-  # string — compose's env file understands \" and \\ inside double quotes — with '$' as '$$',
-  # because compose interpolates its env file and a bare '$' would truncate the secret) and the
-  # percent-encoded one (the ingress embeds it in a URL)
-  PWLINE=$(sudo grep '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env | tail -1 | cut -d= -f2- | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
-  if [ -n "$PWLINE" ]; then
-    OTHER=$(sudo grep -v '^WINVAL_PG_PASSWORD' /etc/winval/compose.env 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
-    { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } | sudo install -m 0600 /dev/stdin /etc/winval/compose.env   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change; printf, not echo: dash's echo would eat the backslashes
-  else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
-    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to /etc/winval/compose.env by hand before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted, \$ as \$\$> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
-  fi
-fi
+# compose.env carries the SAME password in the two forms compose needs, DERIVED from winval.env's URL every time it
+# disagrees (missing, written before the encoded form existed, or the URL was edited); deploy/upgrade.sh runs the same script
+sudo sh deploy/compose-env.sh
 # compose.env also takes WINVAL_UPLOAD_MB (the ingress upload cap, default 1024 — set AUTHENTICODE_MAX_UPLOAD_MB in
 # winval.env alike) and WINVAL_SPOOL_SIZE (the ingress spool tmpfs, default 2g, keep it >= 2x the cap); add them by hand
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
@@ -131,26 +113,22 @@ The bring-up above is greenfield: its `git clone` fails on a deployed host and i
 is already there. Upgrade in place instead — and read the list below before the first restart, because the
 preserved `/etc/winval/winval.env` changes meaning under this version:
 
-Every step is chained on the one before: a checkout that cannot fast-forward (local commits, an edited tracked
-file) stops the whole recipe instead of installing new units over old code. Both tiers are upgraded — the
-ingress container is BUILT from this checkout (`Dockerfile.ingress` copies `winval_blastbox/`), so a `git pull`
-alone changes nothing about the container that faces the network, and this version's ingress changes are the
-security ones (the request-body cap, the bounded `/cert` scan).
+`deploy/upgrade.sh` is a script, not a paste: its `set -e` and refusals never touch your shell. It stops on a
+dirty tree, on a checkout that cannot fast-forward, and on a HEAD that is not `origin/<branch>` (local commits
+AHEAD of origin fast-forward "successfully" and would otherwise build the untrusted-facing ingress and install
+root units from an unreviewed tree). It upgrades BOTH tiers — the ingress container is built from this checkout
+(`Dockerfile.ingress` copies `winval_blastbox/`), and this version's ingress changes are the security ones (the
+request-body cap, the bounded `/cert` scan) — and re-derives `compose.env`, which now needs a variable a file
+written before this version does not carry.
 
 ```bash
-set -e; cd /opt/win-validator
-[ -z "$(sudo git status --porcelain)" ] || { echo "local changes in /opt/win-validator: stash or discard them first" >&2; exit 1; }
-sudo git fetch --all --tags
-sudo git checkout <branch>            # a branch; for a tag use `sudo git checkout --detach <tag>` and skip the next line
-sudo git merge --ff-only origin/<branch>
-sudo /opt/win-validator/.venv/bin/pip install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
-sudo diff /etc/winval/winval.env deploy/winval.env.example || true   # every knob named below; new knobs have defaults
-# compose.env: re-run the derivation block from the bring-up ("compose.env is DERIVED from winval.env's URL"):
-# this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry
-sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d   # rebuilds the ingress from this checkout
-sudo install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo systemctl restart winval-pool-manager   # the first start may wait behind a rotation's lock, then re-copy the RAM base (below)
+sudo sh /opt/win-validator/deploy/upgrade.sh <branch>             # code, venv, compose.env; stops before any restart and says what --restart does
+sudo sh /opt/win-validator/deploy/upgrade.sh <branch> --restart   # rebuilds the ingress and restarts the pool-manager
 ```
+
+The `--restart` step drops in-flight uploads and fails every RUNNING job as *orphaned by a pool-manager restart*
+(its sample removed; clients resubmit): drain first if that matters. The pool-manager's first start may wait up
+to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
