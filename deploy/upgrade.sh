@@ -38,7 +38,10 @@ fi
 git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
-diff "$ETC/winval.env" deploy/winval.env.example || true   # every knob the README's upgrade section names; new knobs have defaults
+# every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
+# database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
+REDACT='s/^\(BLASTBOX_DATABASE_URL=\|[A-Za-z_]*\(PASSWORD\|SECRET\|TOKEN\|_KEY\)[A-Za-z_]*=\).*/\1<redacted>/'
+example=$(mktemp) && sed -e "$REDACT" deploy/winval.env.example > "$example" && { sed -e "$REDACT" "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
 if [ "$restart" != yes ]; then
   cat <<MSG
