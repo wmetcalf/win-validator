@@ -115,8 +115,12 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
     # validates (validate_egress_posture: the IP pool, a supported exit name, inetsim's sink, gateway-and-leg together, a well-formed boolean) — a
     # posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
     SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
-    # AUTHENTICODE_IP_POOL is parsed by the posture check BEFORE any exit short-circuit (validate_egress_posture, blastbox's
-    # _parse_ip_pool): 'START-END', both IPv4, END >= START, one /16 — so even AUTHENTICODE_EXIT=none refuses a bad pool
+    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
+    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
+    # AUTHENTICODE_IP_POOL is parsed by the posture check whatever the exit (validate_egress_posture, blastbox's _parse_ip_pool):
+    # 'START-END', both IPv4, END >= START, one /16 — so even AUTHENTICODE_EXIT=none refuses a bad pool. Judged AFTER the unset-exit
+    # refusal, the manager's own order (_refuse_open_egress at start, the posture in the warm-up); the four knobs the posture reads
+    # (pool, sink, gateway, leg) are stripped on both sides, so a whitespace-only value is unset to both
     pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()
     if pool_spec:
         import ipaddress
@@ -128,8 +132,6 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
             if start.strip().split(".")[:2] != end.strip().split(".")[:2]: raise ValueError("must fit in one /16")
         except (ValueError, ipaddress.AddressValueError) as exc:
             print(f"malformed: AUTHENTICODE_IP_POOL is not a usable range ({exc}); the pool-manager refuses that posture at start"); sys.exit(0)
-    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
-    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
     if ex.lower() == "none": print("ok"); sys.exit(0)
     if ex not in SUPPORTED:
         print(f"malformed: AUTHENTICODE_EXIT names an exit the VM rooter does not support (one of {', '.join(SUPPORTED)}); the pool-manager refuses that posture at start"); sys.exit(0)

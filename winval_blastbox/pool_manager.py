@@ -83,13 +83,16 @@ _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authentico
 BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
 
 
-def _refuse_open_egress(workers: int) -> None:
+def _refuse_open_egress(workers: int, *, sysctl: bool = True) -> None:
     """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
     an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
     refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
     bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist)
     AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
-    and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach."""
+    and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach.
+    The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
+    outage); it passes sysctl=False because the unit's own ExecStartPre loads br_netfilter and sets the sysctl on every
+    start, so the kernel half is judged where it is applied, here."""
     raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
     if not raw:
         raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
@@ -103,6 +106,8 @@ def _refuse_open_egress(workers: int) -> None:
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
                          "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
+    if not sysctl:
+        return
     try:
         enabled = Path(BRIDGE_NF_SYSCTL).read_text().strip() == "1"
     except OSError:

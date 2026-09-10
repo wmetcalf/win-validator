@@ -212,9 +212,9 @@ def authenticode_spec() -> VmWorkerSpec:
         routing = ExitRouting(
             vpn_table=os.environ.get("AUTHENTICODE_VPN_TABLE", "vpn"),
             vpn_tun=os.environ.get("AUTHENTICODE_VPN_TUN", "tun0"),
-            fakenet_addr=os.environ.get("AUTHENTICODE_FAKENET_ADDR") or None,
-            gateway=os.environ.get("AUTHENTICODE_GATEWAY") or None,
-            leg=os.environ.get("AUTHENTICODE_LEG") or None,
+            fakenet_addr=(os.environ.get("AUTHENTICODE_FAKENET_ADDR") or "").strip() or None,
+            gateway=(os.environ.get("AUTHENTICODE_GATEWAY") or "").strip() or None,
+            leg=(os.environ.get("AUTHENTICODE_LEG") or "").strip() or None,
         )
     return VmWorkerSpec(
         name="authenticode",
@@ -227,7 +227,7 @@ def authenticode_spec() -> VmWorkerSpec:
         # "192.168.122.200-192.168.122.249", one /16, sized >= POOL_SIZE), blastbox reserves + pins a
         # fixed IP per worker so a root-compromised guest can't re-IP around the egress rooter. Empty
         # ⇒ DHCP-learning (clean-traffic CTRL_IP_LEARNING=dhcp).
-        worker_ip_pool=os.environ.get("AUTHENTICODE_IP_POOL", ""),
+        worker_ip_pool=(os.environ.get("AUTHENTICODE_IP_POOL") or "").strip(),   # stripped like AUTHENTICODE_EXIT (and the sink, gateway and leg above): a whitespace-only value is unset, as the upgrade gate reads it
     )
 
 
