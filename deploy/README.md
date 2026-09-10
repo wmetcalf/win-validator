@@ -140,7 +140,9 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   BEFORE the tree moves when the line is missing; without `--restart` it warns. With more than one worker the start also needs
   `AUTHENTICODE_BLOCK_INTERNAL=1` (or `AUTHENTICODE_EGRESS_PORTS`), or the pool-manager refuses by name (design change #8);
   `upgrade.sh --restart` refuses before the move for that too. The unit itself loads `br_netfilter` and sets
-  `net.bridge.bridge-nf-call-iptables=1` at every start; a host that cannot is refused by name with the remedy. The next golden bake scopes the agent-port firewall rule to the
+  `net.bridge.bridge-nf-call-iptables=1` at every start; a host that cannot load the module is refused by name with the remedy — by
+  `upgrade.sh --restart` before the move and by the rotation preflight before a promotion (both probe with a `modprobe` dry run), and by
+  the pool-manager itself at start. The next golden bake scopes the agent-port firewall rule to the
   pool-manager's address; a bake refuses if it cannot learn that address (`AUTHENTICODE_AGENT_CALLER` names it by hand).
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
