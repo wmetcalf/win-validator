@@ -40,7 +40,7 @@ git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, n
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 # every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
 # database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
-REDACT='s/^\(BLASTBOX_DATABASE_URL=\|[A-Za-z_]*\(PASSWORD\|SECRET\|TOKEN\|_KEY\)[A-Za-z_]*=\).*/\1<redacted>/'
+REDACT='s/^\([[:space:]]*\)\(BLASTBOX_DATABASE_URL=\|[A-Za-z_]*\(PASSWORD\|SECRET\|TOKEN\|API_KEY\|LICENSE\)[A-Za-z_]*=\).*/\1\2<redacted>/'   # an indented line is honoured by systemd; _KEY alone hid AUTHENTICODE_SSH_KEY, a path this branch moved
 example=$(mktemp) && sed -e "$REDACT" deploy/winval.env.example > "$example" && { sed -e "$REDACT" "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
 if [ "$restart" != yes ]; then

@@ -12,12 +12,13 @@
 # through, and the refusal then came after the tree and the venv had moved).
 set -eu
 ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
+PY=python3; [ -x .venv/bin/python ] && PY=.venv/bin/python   # the deployed venv when run from the tree (it carries psycopg, the ingress's own URL parser)
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
 if [ -e "$ETC/compose.env" ] && [ ! -f "$ETC/compose.env" ]; then echo "compose-env: $ETC/compose.env is not a regular file (a directory? install would write INTO it and report success)" >&2; exit 1; fi
 # the candidate file and compose's scratch dir hold the password: removed on EVERY exit, a failed install (read-only /etc,
 # ENOSPC) aborting under set -e included — the rm after the install never ran then, and the plaintext survived in TMPDIR
-cand=""; d=""; trap '[ -z "$cand" ] || rm -f "$cand"; [ -z "$d" ] || rm -rf "$d"' EXIT
+cand=""; trap '[ -z "$cand" ] || rm -f "$cand"' EXIT; trap 'exit 1' INT TERM HUP   # a signal runs no EXIT trap by itself: exit from it, and the trap runs
 # compose lets the PROCESS environment beat the env file, even a set-but-empty variable: a WINVAL_PG_PASSWORD exported into
 # root's shell would make the `up` (run in that same shell) resolve it over compose.env, and the checks below would judge
 # the file while compose used the variable. Refused up front, by name, in every mode
@@ -26,7 +27,35 @@ docker compose version >/dev/null 2>&1 || { echo "compose-env: 'docker compose' 
 for v in WINVAL_PG_PASSWORD WINVAL_PG_PASSWORD_URLENC; do
   if eval "[ -n \"\${$v+x}\" ]"; then echo "compose-env: $v is set in the environment; compose would use it instead of $ETC/compose.env (a set-but-empty one resolves to empty): unset it and rerun" >&2; exit 1; fi
 done
-if ! grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env"; then
+db_url() {   # the value as the SERVICE reads it: the units' EnvironmentFile, read with the rules golden_rotate._load_env_file emulates
+  # (systemd.exec): backslash continuation lines, indented keys, # comments, the LAST assignment wins, matching quotes stripped,
+  # \\ and \" unescaped inside double quotes, any \x unescaped unquoted — grep '^KEY=' | tail -1 with the quotes stripped chose
+  # another line than systemd on an indented or continued file, and the pool-manager was locked out of the ingress's queue
+  "$PY" - "$ETC/winval.env" <<'PY'
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="surrogateescape").read().splitlines()
+def continues(raw):
+    if raw.lstrip().startswith("#"): return False
+    return (len(raw) - len(raw.rstrip("\\"))) % 2 == 1
+joined = []
+for line in lines:
+    if joined and continues(joined[-1]): joined[-1] = joined[-1][:-1] + line
+    else: joined.append(line)
+seen = {}
+for line in joined:
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line: continue
+    k, v = line.split("=", 1); k = k.strip(); v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        quote = v[0]; v = v[1:-1]
+        if quote == '"': v = re.sub(r'\\([\\"])', r'\1', v)
+    else:
+        v = re.sub(r"\\(.)", r"\1", v)
+    if k: seen[k] = v
+print(seen.get("BLASTBOX_DATABASE_URL", ""))
+PY
+}
+if [ -z "$(db_url)" ]; then   # as the service reads it (an indented line counts, a commented one does not)
   if [ "$mint" != yes ]; then
     echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
   fi
@@ -35,19 +64,6 @@ if ! grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env"; then
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" >> "$ETC/winval.env"
   echo "compose-env: minted a database password into $ETC/winval.env (greenfield)"
 fi
-db_url() {   # the value as the SERVICE reads it — systemd's EnvironmentFile parses the value with POSIX shell rules (systemd.exec): matching
-  # double or single quotes are stripped, and backslash escapes are processed (\\ \" \$ \` inside double quotes; any \x unquoted;
-  # none in single quotes) — a quoted URL derived the wrong password, and so did one with a backslash in it (systemd read a\\b as a\b)
-  grep '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" | tail -1 | cut -d= -f2- | python3 -c "$(cat <<'PY'
-import re, sys
-v = sys.stdin.read().strip()
-if len(v) >= 2 and v[0] == v[-1] == '"': v = re.sub(r'\\(["\\$`])', r'\1', v[1:-1])
-elif len(v) >= 2 and v[0] == v[-1] == "'": v = v[1:-1]
-else: v = re.sub(r'\\(.)', r'\1', v)
-print(v)
-PY
-)"
-}
 # the two lines compose needs, derived from the URL. The password is URL-DECODED (a percent-encoded '@' or '#' in the URL
 # is the literal char Postgres must be initialised with; both clients decode it the same way). Two forms: the literal
 # password (written as a JSON/double-quoted string — compose's env file understands \" and \\ inside double quotes — with
@@ -61,14 +77,33 @@ PWLINE=$(db_url | python3 -c 'import sys, json; from urllib.parse import urlspli
 # cannot parse (an unterminated quote) is a refusal HERE, before anything moves — not at the `up` afterwards.
 # Prints "plain=<set|empty> urlenc=<set|empty> agree=<yes|no>" — agree: the URL the ingress builds from the URLENC value
 # (postgresql://winval:<it>@postgres:5432/winval) parses back to user winval, host postgres, db winval and the plain password
-# (a raw '@' or '#' in it makes the ingress see another host or a fragment; compose's config output spells a '$' in a value as
-# '$$', undone before the comparison); a non-zero rc means compose refused the file (its message on stderr).
+# BY LIBPQ'S RULES (psycopg, the ingress's own parser, when the venv carries it; else the strict fallback: every byte either
+# unreserved or a %XX escape — python's lenient unquote let a raw '%' or '@' through that libpq then refused or split at the
+# FIRST '@'). Compose's config output spells a '$' in a value as '$$', undone before the comparison. A non-zero rc means
+# compose refused the file (its message on stderr).
 compose_reads() {
   d=$(mktemp -d) || return 1
+  trap 'rm -rf "$d"' EXIT INT TERM HUP   # this function runs in a command substitution (its own subshell): the parent's trap never sees $d
   printf 'services:\n  p:\n    image: scratch\n    environment:\n      A: ${WINVAL_PG_PASSWORD:-}\n      B: ${WINVAL_PG_PASSWORD_URLENC:-}\n' > "$d/probe.yml"
   if cfg=$(docker compose --env-file "$1" -f "$d/probe.yml" config --format json 2>"$d/err"); then
     rm -rf "$d"
-    printf '%s' "$cfg" | python3 -c 'import json, sys; e = json.load(sys.stdin)["services"]["p"].get("environment") or {}; from urllib.parse import unquote, urlsplit; a = e.get("A") or ""; b = e.get("B") or ""; u = urlsplit("postgresql://winval:" + b + "@postgres:5432/winval"); ok = bool(a and b) and u.username == "winval" and u.hostname == "postgres" and u.port == 5432 and u.path == "/winval" and unquote(u.password or "") == a.replace("$$", "$"); print("plain=" + ("set" if a else "empty"), "urlenc=" + ("set" if b else "empty"), "agree=" + ("yes" if ok else "no"))'
+    CFG="$cfg" "$PY" - <<'PY'
+import json, os, re, sys
+from urllib.parse import unquote
+e = json.loads(os.environ["CFG"])["services"]["p"].get("environment") or {}
+a = (e.get("A") or "").replace("$$", "$"); b = e.get("B") or ""
+url = "postgresql://winval:" + b + "@postgres:5432/winval"
+try:
+    from psycopg.conninfo import conninfo_to_dict
+    try:
+        d = conninfo_to_dict(url)
+        ok = bool(a and b) and d.get("user") == "winval" and d.get("host") == "postgres" and str(d.get("port")) == "5432" and d.get("dbname") == "winval" and d.get("password") == a
+    except Exception:
+        ok = False
+except ImportError:
+    ok = bool(a and b) and re.fullmatch(r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*", b) is not None and unquote(b) == a
+print("plain=" + ("set" if a else "empty"), "urlenc=" + ("set" if b else "empty"), "agree=" + ("yes" if ok else "no"))
+PY
   else
     cat "$d/err" >&2; rm -rf "$d"; return 1
   fi
