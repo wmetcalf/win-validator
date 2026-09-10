@@ -586,6 +586,18 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
         validate_egress_posture(authenticode_spec())
         from winval_blastbox.pool_manager import _refuse_open_egress
+        # the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name): a promotion restarts the pool, and a
+        # unit that is 'active' the instant systemctl returns (Type=simple) fails seconds later on these with nothing in the
+        # rotation's exit code to say so — judged HERE, before anything is published
+        from winval_blastbox.vm_pool import smoke_expect
+        smoke_sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
+        if smoke_sample and not os.path.isfile(smoke_sample):
+            raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} is not a file: the pool-manager would refuse to start")
+        if smoke_sample:
+            smoke_expect()
+        pool_warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
+        if pool_warm_dir and not os.path.isdir(pool_warm_dir):
+            raise RuntimeError(f"AUTHENTICODE_WARM_DIR={pool_warm_dir!r} is not a directory: the pool-manager would refuse to start")
         _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
         # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
         # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
@@ -794,6 +806,7 @@ def validate_golden(qcow2: str) -> bool:
 # that blames a concurrent run — and with fs.protected_regular root cannot even open it
 ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
 PREFLIGHT_LOCK_WAIT_S = _env_int("GOLDEN_PREFLIGHT_LOCK_WAIT_S", 1800, floor=0)
+RESTART_SETTLE_S = _env_int("GOLDEN_RESTART_SETTLE_S", 90, floor=0)   # how long restart_pool watches a restarted unit before calling it up (0: none)
 
 
 def rotate(candidate: str) -> None:
@@ -1218,6 +1231,19 @@ def restart_pool() -> bool:
         # try-restart of a stopped unit is a successful no-op
         logger.warning("%s is %s (deliberately stopped?): nothing was restarted; the promoted golden is NOT in service until it is started", svc, active or "not active")
         return False
+    # Type=simple: the unit is 'active' the instant systemctl returns, before the manager has read a knob or warmed a worker. A
+    # start that fails seconds later shows as the unit's auto-restart (Restart=on-failure counts it in NRestarts, reset by our own
+    # restart) or, once the start limit latches, as 'failed'. Watch it for a settle window before calling the golden in service.
+    deadline = time.time() + RESTART_SETTLE_S
+    while time.time() < deadline:
+        time.sleep(min(5, max(0.0, deadline - time.time())))
+        if _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip() == "failed":
+            raise RestartFailed(f"{svc} went 'failed' within {RESTART_SETTLE_S}s of the restart: its start is failing (journalctl -u {svc}); the pool is DOWN")
+        restarts = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
+        if restarts.isdigit() and int(restarts) > 0:
+            raise RestartFailed(f"{svc} auto-restarted {restarts} time(s) within {RESTART_SETTLE_S}s of the restart: its start is failing (journalctl -u {svc}); the pool is not up")
+    if RESTART_SETTLE_S:
+        logger.info("%s still up %ds after the restart", svc, RESTART_SETTLE_S)
     return True
 
 
