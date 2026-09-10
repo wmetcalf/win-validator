@@ -142,7 +142,6 @@ def _load_env_file(path: str) -> None:
 
 _load_env_file(os.environ.get("WINVAL_ENV_FILE", "/etc/winval/winval.env"))
 
-MASTER_DOMAIN = os.environ.get("GOLDEN_MASTER_DOMAIN", "winserver2025-core")
 MASTER_QCOW2 = os.environ.get("GOLDEN_MASTER", "/var/lib/libvirt/images/winserver2025-core.qcow2")
 # what a rebake is CLONED FROM: the promoted golden (it carries the agent and last cycle's trust
 # state; the refresh runs on top of it) — the frozen master only before any golden was ever

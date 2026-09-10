@@ -113,11 +113,14 @@ preserved `/etc/winval/winval.env` changes meaning under this version:
 
 `deploy/upgrade.sh` is a script, not a paste: its `set -e` and refusals never touch your shell, and every
 refusal happens before the deployed tree moves (the units and the weekly rotation run from it). It refuses a
-dirty tree, a `compose.env` that cannot be derived (`compose-env.sh --check`, nothing written), an argument that
-is not a branch on origin (tags are not supported), a detached HEAD on no origin branch (the checkout would
-orphan it), and a local branch carrying commits that are not on origin (they fast-forward "successfully" and
-would otherwise build the untrusted-facing ingress and install root units from an unreviewed tree). It never
-mints a database password. It upgrades BOTH tiers — the ingress container is built from this checkout
+non-root run, a dirty tree, a `compose.env` that cannot be derived (`compose-env.sh --check`, nothing written), an
+argument that is not a branch on origin (tags are not supported), a target whose tree has no `deploy/compose-env.sh`,
+a detached HEAD on no origin branch (the checkout would orphan it), a local branch carrying commits that are not on
+origin (they fast-forward "successfully" and would otherwise build the untrusted-facing ingress and install root
+units from an unreviewed tree), and — with `--restart` — an egress posture this version's pool-manager refuses at
+start (a warning without). It never mints a database password. The unit files are installed and reloaded in BOTH
+halves (installing a unit restarts nothing): the checked-out code depends on what its unit does at start, so a
+crash or reboot between the halves must not start it under the old unit. It upgrades BOTH tiers — the ingress container is built from this checkout
 (`Dockerfile.ingress` copies `winval_blastbox/`), and this version's ingress changes are the security ones (the
 request-body cap, the bounded `/cert` scan) — and re-derives `compose.env`, which now needs a variable a file
 written before this version does not carry.

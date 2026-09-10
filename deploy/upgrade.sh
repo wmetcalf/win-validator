@@ -2,13 +2,15 @@
 # In-place upgrade of a deployed host: `sudo sh deploy/upgrade.sh <branch> [--restart]`.
 # A SCRIPT, not a paste: `set -e` and every refusal stay in this process, never in the operator's shell.
 # Every refusal happens BEFORE the deployed tree moves: the tree is live (the units run from it, the weekly
-# rotation imports from it), so a refused upgrade must leave HEAD where it was. The five refusals: a dirty tree;
-# a compose.env that could not be derived (compose-env.sh --check, every rule of it, nothing written); an argument
-# that is not a branch on origin (tags are not supported: deploy a branch); a detached HEAD on no origin branch
-# (the checkout would orphan it); a local branch that is not an ancestor of origin's tip (local commits AHEAD of
-# origin fast-forward "successfully" and would build the untrusted-facing ingress and install root units from an
-# unreviewed tree). It never mints a database password: that is the bring-up's, and a fresh one would lock both
-# tiers out of the initialised volume.
+# rotation imports from it), so a refused upgrade must leave HEAD where it was. The refusals, all before the move:
+# not root; a dirty tree; a compose.env that could not be derived (compose-env.sh --check, every rule of it, nothing
+# written); an argument that is not a branch on origin (tags are not supported: deploy a branch); a target whose tree
+# has no deploy/compose-env.sh (a version without these rules); a detached HEAD on no origin branch (the checkout
+# would orphan it); a local branch that is not an ancestor of origin's tip (local commits AHEAD of origin fast-forward
+# "successfully" and would build the untrusted-facing ingress and install root units from an unreviewed tree); and,
+# with --restart, an egress posture this version's pool-manager refuses at start (without --restart, a WARNING).
+# It never mints a database password: that is the bring-up's, and a fresh one would lock both tiers out of the
+# initialised volume.
 # Without --restart it stops before anything restarts and prints what --restart does: restarting both tiers
 # drops in-flight uploads and fails every RUNNING job as orphaned (clients resubmit) — drain first if that matters.
 set -eu
@@ -229,9 +231,14 @@ git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, n
 # next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
 example=$(mktemp) && envfile_py redacted deploy/winval.env.example > "$example" && { envfile_py redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
+# the unit files go in BEFORE the restart gate: installing a unit restarts nothing, and the code just checked out depends on what its
+# unit does at start (the RAM base it materialises, the br_netfilter it loads) — a crash or a reboot between the two halves of the
+# documented upgrade would otherwise start the new code under the old unit and latch the pool-manager failed
+install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
+systemctl daemon-reload
 if [ "$restart" != yes ]; then
   cat <<MSG
-upgrade.sh: code, venv and compose.env are current. Nothing was restarted. To finish:
+upgrade.sh: code, venv, compose.env and the unit files are current. Nothing was restarted. To finish:
   sudo sh deploy/upgrade.sh $branch --restart
 That rebuilds the ingress container (in-flight uploads are dropped) and restarts the pool-manager (every RUNNING
 job is failed as 'orphaned by a pool-manager restart' and its sample removed; clients resubmit) — drain first if
@@ -240,7 +247,5 @@ MSG
   exit 0
 fi
 docker compose --env-file "$ETC/compose.env" -f deploy/docker-compose.yml up --build -d   # rebuilds the ingress from this checkout
-install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
-systemctl daemon-reload
 systemctl restart winval-pool-manager
 echo "upgrade.sh: both tiers restarted on $(git rev-parse --short HEAD)"
