@@ -1,16 +1,22 @@
 #!/bin/sh
-# Derive /etc/winval/compose.env from winval.env's BLASTBOX_DATABASE_URL — run as root (the bring-up and
-# deploy/upgrade.sh both call it). compose.env carries the SAME password in the two forms compose needs
+# Derive /etc/winval/compose.env from winval.env's BLASTBOX_DATABASE_URL — run as root (the bring-up calls it
+# with --mint, deploy/upgrade.sh without). --mint writes a fresh random password INTO winval.env when it has no
+# URL line: greenfield only — on an initialised volume a fresh password locks both tiers out of pgdata, so
+# without --mint a missing URL line is a refusal that touches nothing. compose.env carries the SAME password in the two forms compose needs
 # (the URL in winval.env is the source of truth — also when you wrote that line yourself); written 0600
 # from the first byte, never tee-then-chmod; DERIVED every time it disagrees (missing, written before the
 # encoded form existed, or the URL was edited). Postgres keeps whatever password its volume was initialised
 # with: to change the password for real, `down -v` first, then edit the URL.
 set -eu
-ETC="${WINVAL_ETC:-/etc/winval}"
+ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; [ "${1:-}" = "--mint" ] && mint=yes
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
 if ! grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env"; then
+  if [ "$mint" != yes ]; then
+    echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
+  fi
   PW=$(openssl rand -hex 16)
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" >> "$ETC/winval.env"
+  echo "compose-env: minted a database password into $ETC/winval.env (greenfield)"
 fi
 WANT_URLENC=$(grep '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" | tail -1 | cut -d= -f2- | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); print(quote(unquote(u.password), safe="")) if u.password else None')
 if ! test -f "$ETC/compose.env" || [ "$(sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' "$ETC/compose.env")" != "$WANT_URLENC" ]; then   # a MISSING compose.env is derived too

@@ -1,28 +1,34 @@
 #!/bin/sh
 # In-place upgrade of a deployed host: `sudo sh deploy/upgrade.sh <branch> [--restart]`.
 # A SCRIPT, not a paste: `set -e` and every refusal stay in this process, never in the operator's shell.
-# Stops on a dirty tree, on a checkout that cannot fast-forward, and on a HEAD that is not origin/<branch>
-# (local commits AHEAD of origin fast-forward "successfully" and would build the untrusted-facing ingress
-# and install root units from an unreviewed tree). Without --restart it stops before anything restarts and
-# prints what --restart does: restarting both tiers drops in-flight uploads and fails every RUNNING job as
-# orphaned (clients resubmit) — drain first if that matters.
+# Every refusal happens BEFORE the deployed tree moves: the tree is live (the units run from it, the weekly
+# rotation imports from it), so a refused upgrade must leave HEAD where it was. Refuses on a dirty tree, on an
+# argument that is not a branch on origin (tags are not supported: deploy a branch), and on a local branch that
+# is not an ancestor of origin's tip (local commits AHEAD of origin fast-forward "successfully" and would build
+# the untrusted-facing ingress and install root units from an unreviewed tree). It never mints a database
+# password: that is the bring-up's, and a fresh one would lock both tiers out of the initialised volume.
+# Without --restart it stops before anything restarts and prints what --restart does: restarting both tiers
+# drops in-flight uploads and fails every RUNNING job as orphaned (clients resubmit) — drain first if that matters.
 set -eu
 ROOT="${WINVAL_ROOT:-/opt/win-validator}"; ETC="${WINVAL_ETC:-/etc/winval}"
 branch="${1:-}"; [ -n "$branch" ] || { echo "usage: upgrade.sh <branch> [--restart]" >&2; exit 2; }
 restart=no; [ "${2:-}" = "--restart" ] && restart=yes
-if [ "$(id -u)" != 0 ] && [ -z "${WINVAL_ETC:-}" ]; then echo "upgrade.sh: run as root (sudo): it writes $ETC and /etc/systemd/system" >&2; exit 1; fi
+if [ "$(id -u)" != 0 ] && [ "${WINVAL_SKIP_ROOT_CHECK:-}" != 1 ]; then echo "upgrade.sh: run as root (sudo): it writes $ETC and /etc/systemd/system" >&2; exit 1; fi
 cd "$ROOT"
 [ -z "$(git status --porcelain)" ] || { echo "upgrade.sh: local changes in $ROOT — stash or discard them first:" >&2; git status --short >&2; exit 1; }
-git fetch --all --tags
+git fetch origin   # branches only: --tags fails for good once an upstream tag moves, and nothing here uses a tag
+if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
+  echo "upgrade.sh: '$branch' is not a branch on origin (tags are not supported: deploy a branch); the tree was not moved" >&2; exit 1
+fi
+if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
+  echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1
+fi
 git checkout "$branch"
 git merge --ff-only "origin/$branch"
-if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$branch")" ]; then
-  echo "upgrade.sh: HEAD $(git rev-parse --short HEAD) is not origin/$branch $(git rev-parse --short "origin/$branch") (local commits ahead of origin?): refusing to build the ingress and install units from a tree that is not the reviewed one" >&2
-  exit 1
-fi
+[ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the fast-forward; stopping" >&2; exit 1; }
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 diff "$ETC/winval.env" deploy/winval.env.example || true   # every knob the README's upgrade section names; new knobs have defaults
-sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry
+sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
 if [ "$restart" != yes ]; then
   cat <<MSG
 upgrade.sh: code, venv and compose.env are current. Nothing was restarted. To finish:
@@ -34,6 +40,7 @@ MSG
   exit 0
 fi
 docker compose --env-file "$ETC/compose.env" -f deploy/docker-compose.yml up --build -d   # rebuilds the ingress from this checkout
-install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/ && systemctl daemon-reload
+install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
+systemctl daemon-reload
 systemctl restart winval-pool-manager
 echo "upgrade.sh: both tiers restarted on $(git rev-parse --short HEAD)"

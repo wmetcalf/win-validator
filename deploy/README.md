@@ -55,13 +55,10 @@ sudo install -m 0600 "$PACKER/keys/build_key" /etc/winval/win_golden        # AU
 # would lock both tiers out of the `pgdata` volume that holds the first). To start over:
 # `sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml down -v`
 # and delete the BLASTBOX_DATABASE_URL line from winval.env.
-if ! sudo grep -q '^BLASTBOX_DATABASE_URL=' /etc/winval/winval.env; then
-  PW=$(openssl rand -hex 16)
-  echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" | sudo tee -a /etc/winval/winval.env >/dev/null
-fi
 # compose.env carries the SAME password in the two forms compose needs, DERIVED from winval.env's URL every time it
-# disagrees (missing, written before the encoded form existed, or the URL was edited); deploy/upgrade.sh runs the same script
-sudo sh deploy/compose-env.sh
+# disagrees (missing, written before the encoded form existed, or the URL was edited). --mint writes a fresh random
+# password into winval.env when it has none: greenfield only (deploy/upgrade.sh runs the same script WITHOUT it)
+sudo sh deploy/compose-env.sh --mint
 # compose.env also takes WINVAL_UPLOAD_MB (the ingress upload cap, default 1024 — set AUTHENTICODE_MAX_UPLOAD_MB in
 # winval.env alike) and WINVAL_SPOOL_SIZE (the ingress spool tmpfs, default 2g, keep it >= 2x the cap); add them by hand
 # every compose invocation from now on carries the env file, or a later `up` would recreate the
@@ -113,10 +110,11 @@ The bring-up above is greenfield: its `git clone` fails on a deployed host and i
 is already there. Upgrade in place instead — and read the list below before the first restart, because the
 preserved `/etc/winval/winval.env` changes meaning under this version:
 
-`deploy/upgrade.sh` is a script, not a paste: its `set -e` and refusals never touch your shell. It stops on a
-dirty tree, on a checkout that cannot fast-forward, and on a HEAD that is not `origin/<branch>` (local commits
-AHEAD of origin fast-forward "successfully" and would otherwise build the untrusted-facing ingress and install
-root units from an unreviewed tree). It upgrades BOTH tiers — the ingress container is built from this checkout
+`deploy/upgrade.sh` is a script, not a paste: its `set -e` and refusals never touch your shell, and every
+refusal happens before the deployed tree moves (the units and the weekly rotation run from it). It refuses a
+dirty tree, an argument that is not a branch on origin (tags are not supported), and a local branch carrying
+commits that are not on origin (they fast-forward "successfully" and would otherwise build the untrusted-facing
+ingress and install root units from an unreviewed tree). It never mints a database password. It upgrades BOTH tiers — the ingress container is built from this checkout
 (`Dockerfile.ingress` copies `winval_blastbox/`), and this version's ingress changes are the security ones (the
 request-body cap, the bounded `/cert` scan) — and re-derives `compose.env`, which now needs a variable a file
 written before this version does not carry.
