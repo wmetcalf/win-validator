@@ -152,13 +152,15 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         import os, subprocess
         if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): print("ok"); sys.exit(0)
         # the VERBOSE dry run (the exit code says nothing: with an `install br_netfilter /bin/false` directive `-n` exits 0 for a module it
-        # would not insert): loadable = rc 0, an `insmod .../br_netfilter.ko*` line, no `install` line — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
+        # would not insert): loadable = rc 0 and an `insmod .../br_netfilter.ko*` line (install lines beside it are other modules' in the plan), or the
+        # documented `--ignore-install` self-load idiom — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
         try:
             r = subprocess.run(["modprobe", "-n", "-v", "br_netfilter"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
             lines = [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
-            why = "" if r.returncode == 0 else f"modprobe -n br_netfilter failed (rc {r.returncode})"
-            if not why and any(ln.startswith("install ") for ln in lines): why = "a modprobe.d install directive replaces the insertion"
-            if not why and not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in lines): why = "the dry run names no br_netfilter.ko to insert"
+            why = "" if r.returncode == 0 else f"modprobe -n -v br_netfilter failed (rc {r.returncode}: {' | '.join(lines)[:200]})"
+            installs = [ln for ln in lines if ln.startswith("install ")]
+            if not why and not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in lines) and not any("--ignore-install" in ln for ln in installs):
+                why = f"a modprobe.d install directive replaces the insertion ({installs[0][:120]})" if installs else f"the dry run names no br_netfilter.ko to insert ({' | '.join(lines)[:200] or 'no output'})"
         except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
         if not why: print("ok"); sys.exit(0)
         print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)

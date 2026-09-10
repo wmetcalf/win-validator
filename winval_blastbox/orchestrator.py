@@ -275,6 +275,8 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
             pass
         # a 503, not the bare re-raise's generic 500: the service could not take the job (shutting down, the executor broken) and a
         # retry is the answer; the row it recorded is named so the operator can find it, and the client's next submission is a new job
+        _log.error("job %s: could not queue it (%s); recorded as error, the upload removed, the client told to retry (503)", jid, exc)   # a handled
+        # response logs nothing on its own; the post-queue sibling below logs, this more severe case must too
         raise HTTPException(503, f"could not queue the job (recorded as {jid} with status error): {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — raised by the executor AFTER the item was queued (a worker thread could not start — a RuntimeError
         # too, which is why the pre-queue case is a class of its own): the job IS queued and an idle worker may already be running it, so
@@ -377,7 +379,9 @@ $('#drop').onclick=()=>$('#file').click();
   $('#drop').classList.toggle('over',ev==='dragover');if(ev==='drop'&&e.dataTransfer.files[0])pick(e.dataTransfer.files[0]);}));
 $('#go').onclick=async()=>{if(!chosen)return;$('#go').disabled=true;
   const fd=new FormData();fd.append('file',chosen);
-  try{const r=await(await fetch('/scan',{method:'POST',body:fd})).json();watch(r.job_id);await refresh();}
+  try{const res=await fetch('/scan',{method:'POST',body:fd});const r=await res.json().catch(()=>({}));
+    if(!res.ok||!r.job_id)throw new Error(res.status+(r.detail?': '+(typeof r.detail==='string'?r.detail:JSON.stringify(r.detail)):''));   // a refusal is JSON too (400/413/503): its detail is the message, never a poll on /scan/undefined
+    watch(r.job_id);await refresh();}
   catch(e){$('#detail').innerHTML='<div class="empty">submit failed: '+esc(e)+'</div>';}
   $('#go').disabled=false;};
 function watch(id){clearInterval(poll);const tick=async()=>{const j=await jget('/scan/'+id);render(j);
