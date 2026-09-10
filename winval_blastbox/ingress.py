@@ -126,7 +126,11 @@ def cert(tbs_sha256: str) -> dict:
     tbs = tbs_sha256.lower()
     hits = []
     scanned = 0
-    for j in _store.list(limit=CERT_SCAN_LIMIT, newest_first=True):  # bounded: an unauthenticated caller must not make the ingress read the whole table (88 MiB at 10k rows)
+    truncated = False
+    for j in _store.list(limit=CERT_SCAN_LIMIT + 1, newest_first=True):  # bounded: an unauthenticated caller must not make the ingress read the whole table (88 MiB at 10k rows)
+        if scanned >= CERT_SCAN_LIMIT:   # one row past the window is asked for and NOT scanned: it says whether the table goes on (exactly 2000 rows used to read as truncated)
+            truncated = True
+            break
         scanned += 1
         v = _verdict(j)
         certs = []
@@ -139,7 +143,7 @@ def cert(tbs_sha256: str) -> dict:
         if tbs in certs:
             hits.append({"job_id": j.job_id, "filename": j.filename, "status": v.get("status")})
     # the bound is part of the answer: an older sighting past the window must not read as "never seen"
-    return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": scanned >= CERT_SCAN_LIMIT}
+    return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": truncated}
 
 
 @app.get("/", response_class=HTMLResponse)
