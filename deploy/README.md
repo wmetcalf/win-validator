@@ -131,10 +131,23 @@ The bring-up above is greenfield: its `git clone` fails on a deployed host and i
 is already there. Upgrade in place instead — and read the list below before the first restart, because the
 preserved `/etc/winval/winval.env` changes meaning under this version:
 
+Every step is chained on the one before: a checkout that cannot fast-forward (local commits, an edited tracked
+file) stops the whole recipe instead of installing new units over old code. Both tiers are upgraded — the
+ingress container is BUILT from this checkout (`Dockerfile.ingress` copies `winval_blastbox/`), so a `git pull`
+alone changes nothing about the container that faces the network, and this version's ingress changes are the
+security ones (the request-body cap, the bounded `/cert` scan).
+
 ```bash
-cd /opt/win-validator && sudo git fetch --all && sudo git checkout <branch-or-tag> && sudo git pull --ff-only
+set -e; cd /opt/win-validator
+[ -z "$(sudo git status --porcelain)" ] || { echo "local changes in /opt/win-validator: stash or discard them first" >&2; exit 1; }
+sudo git fetch --all --tags
+sudo git checkout <branch>            # a branch; for a tag use `sudo git checkout --detach <tag>` and skip the next line
+sudo git merge --ff-only origin/<branch>
 sudo /opt/win-validator/.venv/bin/pip install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
-sudo diff /etc/winval/winval.env deploy/winval.env.example   # every knob named below; new knobs have defaults
+sudo diff /etc/winval/winval.env deploy/winval.env.example || true   # every knob named below; new knobs have defaults
+# compose.env: re-run the derivation block from the bring-up ("compose.env is DERIVED from winval.env's URL"):
+# this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry
+sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d   # rebuilds the ingress from this checkout
 sudo install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl restart winval-pool-manager   # the first start may wait behind a rotation's lock, then re-copy the RAM base (below)
 ```
