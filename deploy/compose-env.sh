@@ -151,17 +151,20 @@ try:
     except Exception:
         user = pw = None
 except ImportError:
+    # urlsplit and libpq part ways on a RAW '@' (last vs first), a raw space (refused vs taken), a raw '[' (a traceback), a
+    # raw '#' (a fragment urlsplit strips BEFORE anything can be judged; a password byte to libpq: the tiers split silently)
+    # and a bare '%' (an escape to urlsplit's lenient unquote, a refusal to libpq). Judged on the RAW text after the scheme,
+    # before urlsplit sees it: without libpq to judge, only unreserved characters, sub-delims, the structural @ / ? and
+    # %XX escapes are derived at all
+    import re
+    tail = url.split("://", 1)[1] if "://" in url else url
+    if re.search(r"[#\[\]\s]", tail) or re.search(r"%(?![0-9A-Fa-f]{2})", tail) or tail.count("@") > 1 or not re.fullmatch(r"[\x21-\x7e]*", tail):
+        sys.exit("the URL carries a raw #, @, space, [ ], a bare % or a byte outside printable ASCII that libpq and this fallback would read differently; percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
     try:
         u = urlsplit(url)
-    except ValueError:   # a raw '[' in the netloc: urlsplit raises before anything can be judged
-        sys.exit("the URL cannot be split (a raw [ or ] in it?): percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
+    except ValueError:
+        sys.exit("the URL cannot be split: percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
     if u.scheme.startswith("postgres"):
-        # urlsplit and libpq part ways on a RAW '@' (last vs first), a raw space (refused vs taken) and a raw '[' (a traceback):
-        # without libpq to judge, only a userinfo made of unreserved characters, sub-delims and %XX escapes is derived at all
-        import re
-        userinfo = u.netloc.rsplit("@", 1)[0] if "@" in u.netloc else ""
-        if not re.fullmatch(r"(?:(?![@/?#\[\]\s])[\x21-\x7e]|%[0-9A-Fa-f]{2})*", userinfo) or (u.query and not re.fullmatch(r"(?:(?![@/?#\[\]\s])[\x21-\x7e]|%[0-9A-Fa-f]{2})*", u.query)):
-            sys.exit("the URL's user:password (or query) carries a raw @, space, [ ] or another byte libpq and this fallback would read differently; percent-encode it (this host's python has no psycopg to judge it)")
         q = {}   # by hand, %XX only: libpq's conninfo_uri_decode never reads '+' as a space, parse_qs (form encoding) does
         for part in u.query.split("&"):
             if "=" in part:
