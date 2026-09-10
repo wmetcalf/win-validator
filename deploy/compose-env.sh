@@ -15,7 +15,7 @@ ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
 # the deployed venv (it carries psycopg, the ingress's own URL parser), found from THIS script's location — never the caller's
 # cwd: root ran <cwd>/.venv/bin/python, a shim planted in any directory an operator happened to be in. Read from a pipe
 # (upgrade.sh's `sh -s`, run from the tree it cd'd into) the cwd IS the tree
-case "$0" in */*) TREE=$(cd "$(dirname "$0")/.." && pwd) ;; *) TREE=$PWD ;; esac
+case "$0" in */*) TREE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd) ;; *) TREE=$PWD ;; esac   # readlink -f: a symlink to the script from $HOME/bin resolved to $HOME and found a planted ~/.venv
 PY=python3; [ -x "$TREE/.venv/bin/python" ] && PY="$TREE/.venv/bin/python"
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
@@ -50,6 +50,8 @@ for line in joined:
     line = line.strip()
     if not line or line.startswith("#") or "=" not in line: continue
     k, v = line.split("=", 1); k = k.strip(); v = v.strip()
+    if any("\udc80" <= c <= "\udcff" for c in line):   # a byte that is not UTF-8 in an ASSIGNMENT (a comment is tolerated): systemd rejects the whole file, and the unit (EnvironmentFile=-) starts with none of its knobs
+        sys.exit(f"compose-env: {sys.argv[1]}: the assignment of {k} carries a byte that is not UTF-8; systemd rejects the whole file (the unit would start with none of its knobs) — fix that line first")
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         quote = v[0]; v = v[1:-1]
         if quote == '"': v = re.sub(r'\\([\\"])', r'\1', v)
@@ -59,7 +61,8 @@ for line in joined:
 print(seen.get("BLASTBOX_DATABASE_URL", ""))
 PY
 }
-if [ -z "$(db_url)" ]; then   # as the service reads it (an indented line counts, a commented one does not)
+URL=$(db_url) || exit 1   # read ONCE, as the service reads it (an indented line counts, a commented one does not); a file systemd would reject is a refusal, not 'no URL line' (a crash here read as one, and --mint then wrote a SECOND password)
+if [ -z "$URL" ]; then
   if [ "$mint" != yes ]; then
     echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
   fi
@@ -73,7 +76,8 @@ fi
 # password (written as a JSON/double-quoted string — compose's env file understands \" and \\ inside double quotes — with
 # '$' as '$$', because compose interpolates its env file and a bare '$' would truncate the secret) and the percent-encoded
 # one (the ingress embeds it in a URL)
-PWLINE=$(db_url | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
+[ "$mint" = yes ] && [ -z "$URL" ] && URL=$(db_url)   # the line --mint just wrote
+PWLINE=$(printf '%s' "$URL" | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
 # What compose READS from an env file is decided by compose, not by a re-implementation of its parser here: a hand-rolled
 # reading passed "" (quoted empty), then `"" # comment`, a trailing space, a whitespace-only value and an uninterpolated
 # $VAR as non-empty — each of which compose resolves to its 'winval' fallback, splitting the password between the tiers.
@@ -105,11 +109,14 @@ try:
     except Exception:
         ok = False
 except ImportError:
-    ok = bool(a and b) and re.fullmatch(r"(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*", b) is not None and unquote(b) == a   # what libpq takes raw in userinfo: unreserved, sub-delims and ':'; never @ / ? # [ ] or a bare %
+    ok = bool(a and b) and re.fullmatch(r"(?:(?![@/%])[\x21-\x7e]|%[0-9A-Fa-f]{2})*", b) is not None and unquote(b) == a   # what libpq takes raw in the password: printable ASCII but '@' (ends the userinfo), '/' and a bare '%' (verified per char at round 110); a space is over-strict here
 print("plain=" + ("set" if a else "empty"), "urlenc=" + ("set" if b else "empty"), "agree=" + ("yes" if ok else "no"))
 PY
   else
-    cat "$d/err" >&2; rm -rf "$d"; return 1
+    # compose quotes the token it choked on (Go-quoted: the password, once a survivor's open quote swallowed the password
+    # line, or the operator's own hand-written one): every quoted segment is elided before the message leaves this script
+    MSG="$(cat "$d/err")" "$PY" -c 'import os, re, sys; sys.stderr.write(re.sub(r"\"(?:\\\\.|[^\"\\\\])*\"?", "\"<elided>\"", os.environ["MSG"]) + "\n")'
+    rm -rf "$d"; return 1
   fi
 }
 # both lines present with NON-EMPTY values that AGREE, as compose reads them: what a hand-written compose.env must carry (an
@@ -141,18 +148,15 @@ if [ -n "$PWLINE" ]; then
     cand=$(mktemp) || exit 1
     { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } > "$cand"   # printf, not echo: dash's echo would eat the backslashes
     if ! reads=$(compose_reads "$cand" 2>&1) || [ "$reads" != "plain=set urlenc=set agree=yes" ]; then
-      # compose's message quotes the token it choked on, and a survivor's unbalanced quote swallows the derived password line
-      # into that token: the password, in both forms and its JSON spelling, is redacted before the message is shown
-      rm -f "$cand"; MSG="$reads" PWLINE="$PWLINE" ETC_FILE="$ETC/compose.env" "$PY" - >&2 <<'PY'
-import json, os
-msg, pwline = os.environ["MSG"], os.environ["PWLINE"]
-plain_json = pwline.splitlines()[0].split("=", 1)[1]; enc = pwline.splitlines()[1].split("=", 1)[1]
-plain = json.loads(plain_json.replace("$$", "$"))
-for needle in sorted({plain_json, plain_json.replace("$$", "$"), plain, enc}, key=len, reverse=True):
-    if needle: msg = msg.replace(needle, "<password>")
-print("compose-env: compose could not read the derived " + os.environ.get("ETC_FILE", "compose.env") + " (a broken line among the other lines, or a compose that cannot run); nothing written. compose said: " + msg)
-PY
-      exit 1
+      # attributed WITHOUT the password: the other lines are probed on their own (a message about them cannot contain it);
+      # when they parse alone, one of them leaves a quote open that swallows the derived lines — said in words, no message
+      rm -f "$cand"; others=$(mktemp) || exit 1; { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; } > "$others"
+      if [ -n "$OTHER" ] && ! omsg=$(compose_reads "$others" 2>&1 >/dev/null); then
+        echo "compose-env: compose could not read the derived $ETC/compose.env: a line other than the two password lines is broken — compose said: $omsg; nothing written" >&2
+      else
+        echo "compose-env: compose could not read the derived $ETC/compose.env: the other lines leave a quote open that swallows the derived password lines (compose's message is withheld: it would quote the password), or compose cannot run; nothing written" >&2
+      fi
+      rm -f "$others"; exit 1
     fi
     if cmp -s "$cand" "$ETC/compose.env" 2>/dev/null; then
       rm -f "$cand"; echo "compose-env: $ETC/compose.env already matches winval.env"

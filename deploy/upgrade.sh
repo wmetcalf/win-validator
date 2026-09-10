@@ -55,7 +55,7 @@ for line in lines:
     else: joined.append(line)
 pat = re.compile(r"^(\s*)(BLASTBOX_DATABASE_URL=|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*=).*$")   # _KEY alone hid AUTHENTICODE_SSH_KEY, a path this branch moved
 for line in joined:
-    print(pat.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", line))
+    sys.stdout.buffer.write((pat.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", line) + "\n").encode("utf-8", "surrogateescape"))   # bytes out as bytes in: a stray non-UTF-8 byte must not end the diff in a traceback
 PY
 }
 example=$(mktemp) && redacted deploy/winval.env.example > "$example" && { redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"

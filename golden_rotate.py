@@ -78,6 +78,9 @@ def _load_env_file(path: str) -> None:
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip()
+        if any("\udc80" <= c <= "\udcff" for c in line):   # a byte that is not UTF-8 in an ASSIGNMENT: systemd rejects the WHOLE file (a comment is tolerated), and the unit starts with none of its knobs — read the file the way the units did
+            logging.getLogger("golden_rotate").warning("%s: the assignment of %s carries a byte that is not UTF-8; systemd rejects the whole file, so none of it is applied here either", path, k)
+            return
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
             quote = v[0]
             v = v[1:-1]
