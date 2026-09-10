@@ -112,13 +112,32 @@ except ValueError as exc:
 if sys.argv[1] == "get":
     print(env.get(sys.argv[3], "")); sys.exit(0)
 if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads the env: _refuse_open_egress (#7/#8) AND the posture the warm-up
-    # validates (a supported exit name, a well-formed boolean) — a posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
+    # validates (validate_egress_posture: the IP pool, a supported exit name, inetsim's sink, gateway-and-leg together, a well-formed boolean) — a
+    # posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
     SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
+    # AUTHENTICODE_IP_POOL is parsed by the posture check BEFORE any exit short-circuit (validate_egress_posture, blastbox's
+    # _parse_ip_pool): 'START-END', both IPv4, END >= START, one /16 — so even AUTHENTICODE_EXIT=none refuses a bad pool
+    pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()
+    if pool_spec:
+        import ipaddress
+        start, _, end = pool_spec.partition("-")
+        try:
+            if not end: raise ValueError("must be 'START-END'")
+            lo, hi = int(ipaddress.IPv4Address(start.strip())), int(ipaddress.IPv4Address(end.strip()))
+            if hi < lo: raise ValueError("END < START")
+            if start.strip().split(".")[:2] != end.strip().split(".")[:2]: raise ValueError("must fit in one /16")
+        except (ValueError, ipaddress.AddressValueError) as exc:
+            print(f"malformed: AUTHENTICODE_IP_POOL is not a usable range ({exc}); the pool-manager refuses that posture at start"); sys.exit(0)
     ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
     if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
     if ex.lower() == "none": print("ok"); sys.exit(0)
     if ex not in SUPPORTED:
         print(f"malformed: AUTHENTICODE_EXIT names an exit the VM rooter does not support (one of {', '.join(SUPPORTED)}); the pool-manager refuses that posture at start"); sys.exit(0)
+    # the rest of validate_egress_posture: inetsim needs its sink; a shared-router VPN needs BOTH gateway and leg or neither
+    if ex == "inetsim" and not (env.get("AUTHENTICODE_FAKENET_ADDR") or "").strip():
+        print("malformed: AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink); the pool-manager refuses that posture at start"); sys.exit(0)
+    if ex in ("openvpn", "wireguard") and bool((env.get("AUTHENTICODE_GATEWAY") or "").strip()) != bool((env.get("AUTHENTICODE_LEG") or "").strip()):
+        print(f"malformed: AUTHENTICODE_EXIT={ex} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (or neither); the pool-manager refuses that posture at start"); sys.exit(0)
     bi = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip().lower()   # BEFORE the worker-count short-circuit: the spec parses the boolean whatever the count
     if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
         print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)
