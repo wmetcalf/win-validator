@@ -231,12 +231,27 @@ def authenticode_spec() -> VmWorkerSpec:
     )
 
 
+AGENT_STATUSES = frozenset({"Valid", "Revoked", "Distrusted", "UntrustedRoot", "HashMismatch", "Expired", "NotYetValid", "UnknownError",
+                            "ContentUnverified", "NotSigned"})   # the agent's verdict vocabulary (the UI's status classes name the same set)
+
+
+def smoke_expect() -> str:
+    """AUTHENTICODE_SMOKE_EXPECT, the status the smoke sample must validate to: stripped, blank is Valid, and it must name a status
+    the agent can return (case-insensitively) — a typo (Vaild) could never match, and every worker would fail the gate with only
+    'no worker became warm' to show for it. Refused by name, like the sample and the warm dir beside it."""
+    raw = (os.environ.get("AUTHENTICODE_SMOKE_EXPECT") or "").strip() or "Valid"
+    for status in AGENT_STATUSES:
+        if status.lower() == raw.lower():
+            return status
+    raise RuntimeError(f"AUTHENTICODE_SMOKE_EXPECT={raw!r} is not a status the agent returns (one of {', '.join(sorted(AGENT_STATUSES))})")
+
+
 def _smoke(slot) -> bool:
     """Health smoke test: send a known benign signed sample to the agent and assert the expected
     verdict — proves the OS is up, the agent returns, AND cert validation actually works (not just
     a port-open check). Opt-in via AUTHENTICODE_SMOKE_SAMPLE (default expected status Valid)."""
     sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
-    expect = (os.environ.get("AUTHENTICODE_SMOKE_EXPECT") or "").strip() or "Valid"   # stripped like every knob; the status compares case-insensitively
+    expect = smoke_expect()
     try:
         v = agent_validate(slot.endpoint, sample, timeout=30.0)
     except Exception:
@@ -296,6 +311,8 @@ class WarmVmPool:
             # worker would fail the smoke gate and the pool would report only "no worker became
             # warm" — the error would never say why
             raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} is not a file; put a benign signed sample there or unset it")
+        if smoke_sample:
+            smoke_expect()   # refused by name here, at start, not at the first health check
         health_check = _smoke if smoke_sample else None
         warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
         if warm_dir and not os.path.isdir(warm_dir):

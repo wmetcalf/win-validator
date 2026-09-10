@@ -70,6 +70,7 @@ if [ ! -f keys/build_key ]; then
     say "generated throwaway build key: keys/build_key(.pub)"
 fi
 PUBKEY="$(cat keys/build_key.pub)"
+case "$(printf %s "$PUBKEY" | tr -d "[:space:]")" in "") die "keys/build_key.pub is empty: the guest would get an empty authorized_keys and packer (key-only ssh) would wait out its ssh_timeout with nothing naming the cause; regenerate the pair (rm keys/build_key*) or restore the public half";; esac
 
 # ---- render the answer file (XML-escaped substitution, then parsed back: an operator ADMIN_PASSWORD with
 #      & < or > used to land raw in two <Value> elements, and Windows Setup silently ignores an unparseable
