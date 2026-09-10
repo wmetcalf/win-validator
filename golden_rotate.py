@@ -1091,8 +1091,9 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
                 _run(["sudo", "rm", "-f", str(mk)])
     # ordered by MODIFICATION TIME (the name as the tie-break): the names are UTC stamps since round 62 but backups made before
     # that are stamped in local time, and in a zone ahead of UTC they sort lexically NEWER than a fresh backup for hours —
-    # the prune then deleted the rollback copy it had just made. The mtime is the promotion time on every backup (a rename
-    # keeps it; the build touches the base first, run 91), so it orders both populations alike
+    # the prune then deleted the rollback copy it had just made. The mtime is the promotion time on every backup: _backup_current
+    # copies it fresh, a restore copies too, and NOTHING else touches a retained backup (the build touches only a candidate
+    # image, the age prune's target; a retained backup used as a base is held out of this prune by its sidecar instead)
     baks = sorted((b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name)), key=lambda b: (_mtime(b) or 0.0, b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
