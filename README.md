@@ -134,7 +134,7 @@ just yields `revocation_checked="unknown"`. **Two hops to know about:** (1) work
 libvirt bridge is switched, not routed: the FORWARD rules see it only with `net.bridge.bridge-nf-call-iptables=1`
 (`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist) drops it —
 the documented default `direct` exit with block_internal off ends in ACCEPT, so a compromised worker reaches
-its siblings' agent port 8765, which the golden's firewall rule opens to any source; (2) the host's own
+its siblings' agent port 8765 (a golden baked before this version opened that port to any source); (2) the host's own
 listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
 blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
 `block_internal` covers the docker-published 8099; with `none` there is no chain at all — see `deploy/README.md`.

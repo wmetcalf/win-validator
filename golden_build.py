@@ -122,6 +122,8 @@ def agent_caller() -> str:
     neither is known). A rebake applies a change, like the port itself."""
     explicit = (os.environ.get("AUTHENTICODE_AGENT_CALLER") or "").strip()
     if explicit:
+        if not re.fullmatch(r"(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}", explicit):   # one IPv4 literal: 'Any', a CIDR or a trailing comment would be spliced into the rule verbatim (and 'Any' bakes the open rule this exists to end)
+            raise SystemExit(f"AUTHENTICODE_AGENT_CALLER={explicit!r} is not one IPv4 address; the agent-port rule admits exactly the pool-manager's address")
         return explicit
     net = os.environ.get("AUTHENTICODE_LIBVIRT_NETWORK", "default")
     r = gr._virsh("net-dumpxml", net)
