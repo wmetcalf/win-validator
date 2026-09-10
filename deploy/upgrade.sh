@@ -111,15 +111,20 @@ except ValueError as exc:
     env = {"(unreadable)": str(exc)}
 if sys.argv[1] == "get":
     print(env.get(sys.argv[3], "")); sys.exit(0)
-if sys.argv[1] == "egress":   # design change #8's env half, read the way the pool-manager reads it (winval_blastbox.pool_manager._refuse_open_egress)
-    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()
-    if not ex or ex.lower() == "none": print("ok"); sys.exit(0)
+if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads the env: _refuse_open_egress (#7/#8) AND the posture the warm-up
+    # validates (a supported exit name, a well-formed boolean) — a posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
+    SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
+    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
+    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
+    if ex.lower() == "none": print("ok"); sys.exit(0)
+    if ex not in SUPPORTED:
+        print(f"malformed: AUTHENTICODE_EXIT names an exit the VM rooter does not support (one of {', '.join(SUPPORTED)}); the pool-manager refuses that posture at start"); sys.exit(0)
+    bi = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip().lower()   # BEFORE the worker-count short-circuit: the spec parses the boolean whatever the count
+    if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+        print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if workers < 2: print("ok"); sys.exit(0)
-    bi = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip().lower()
-    if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
-        print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)
     if "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"): print("ok"); sys.exit(0)   # a SET allowlist, even a closed one, drops siblings
     print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS: the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
@@ -135,19 +140,10 @@ for k in sorted(env):
 PY
 }
 
-# design change #7: this version's pool-manager REFUSES to start without AUTHENTICODE_EXIT (a worker without an exit driver reaches
-# the libvirt NAT and the host's own listeners) unless the operator writes AUTHENTICODE_EXIT=none on purpose. With --restart the
-# restart would fail after the tree moved: refused HERE; without it, said loudly (the restart is the operator's next step)
-if [ -z "$(envfile_py get "$ETC/winval.env" AUTHENTICODE_EXIT)" ]; then
-  if [ "$restart" = yes ]; then
-    echo "upgrade.sh: $ETC/winval.env has no AUTHENTICODE_EXIT, and this version's pool-manager refuses to start without one: name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose, then rerun; the tree was not moved" >&2; exit 1
-  fi
-  echo "upgrade.sh: WARNING: $ETC/winval.env has no AUTHENTICODE_EXIT; this version's pool-manager will refuse to start until you name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none on purpose" >&2
-fi
 # design change #8, the half an env file decides, read the way the pool-manager reads it (the helper mirrors its rules): with --restart
 # a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half is the unit's own ExecStartPre)
 verdict=$(envfile_py egress "$ETC/winval.env")
-case "$verdict" in ok) ;; *)
+case "$verdict" in ok) ;; *)   # unset: / malformed: / refuse: — each names its remedy
   if [ "$restart" = yes ]; then echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi
   echo "upgrade.sh: WARNING: $ETC/winval.env: $verdict" >&2 ;;
 esac
