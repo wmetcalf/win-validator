@@ -232,7 +232,8 @@ def authenticode_spec() -> VmWorkerSpec:
 
 
 AGENT_STATUSES = frozenset({"Valid", "Revoked", "Distrusted", "UntrustedRoot", "HashMismatch", "Expired", "NotYetValid", "UnknownError",
-                            "ContentUnverified", "NotSigned"})   # the agent's verdict vocabulary (the UI's status classes name the same set)
+                            "NotSigned"})   # the agent's verdict vocabulary (myatg's README + rdp_validate.cs); ContentUnverified is a UI flag
+                                            # (content_verified false), never a status
 
 
 def smoke_expect() -> str:
