@@ -82,32 +82,48 @@ _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authentico
 
 
 BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
-BRIDGE_NF_MODPROBE = ("modprobe", "-n", "-v", "br_netfilter")   # a VERBOSE dry run: what the unit's ExecStartPre would do at the next start
+BRIDGE_NF_MODPROBE = ("modprobe",)   # the binary (a test points it at a -C config dir or a stub); the helper adds its own arguments
+
+
+def _modprobe(*args: str) -> tuple[int, list[str]]:
+    r = subprocess.run(BRIDGE_NF_MODPROBE + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
 
 
 def _bridge_nf_loadable() -> tuple[bool, str]:
     """Would `modprobe br_netfilter` insert the module? Its dry run's exit code says nothing: with an `install br_netfilter /bin/false`
     directive (the one way to make a module unloadable; `blacklist` never stops an explicit modprobe) `-n` exits 0 for a module it
-    would not insert — for a module that does not exist, even. The verbose dry run prints what WOULD run: an `insmod .../br_netfilter.ko*`
-    line when the module would be inserted, `install <command>` when a directive replaces the insertion. Loadable = exit 0 and an insmod
-    line naming br_netfilter (install lines beside it are other modules' in the plan), or an install line that is the documented
-    --ignore-install self-load idiom. What only the real insertion can tell (a lockdown/signature refusal, a stale .ko)
-    stays with the manager's own start, which reads the sysctl live."""
+    would not insert — for a module that does not exist, even. The verbose dry run prints the plan: `insmod .../br_netfilter.ko*` when
+    the module would be inserted, `install <command>` when a directive replaces an insertion — but WITHOUT the module's name, so whose
+    directive it is cannot be told from the plan; the effective configuration (`modprobe -c`) names it. Loadable, then: the dry run
+    exits 0, and EITHER br_netfilter has an install directive that is the self-load idiom man 5 modprobe.d documents (`modprobe
+    --ignore-install br_netfilter`, judged on the command's words up to a comment — kmod prints a trailing comment sh would drop),
+    OR it has none, the plan inserts br_netfilter.ko and carries no install line at all (a dependency's directive: whether the load
+    survives it cannot be told from the plan, so it is refused). What only the real insertion can tell (a lockdown/signature refusal,
+    a stale .ko) stays with the manager's own start, which reads the sysctl live."""
     try:
-        r = subprocess.run(BRIDGE_NF_MODPROBE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        rc, plan = _modprobe("-n", "-v", "br_netfilter")
+        if rc != 0:
+            return False, f"modprobe -n -v br_netfilter failed (rc {rc}: {' | '.join(plan)[:200]})"
+        _, conf = _modprobe("-c")
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
-    lines = [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
-    if r.returncode != 0:
-        return False, f"{' '.join(BRIDGE_NF_MODPROBE)} failed (rc {r.returncode}: {' | '.join(lines)[:200]})"
-    if any(ln.startswith("insmod ") and ("/br_netfilter.ko" in ln) for ln in lines):
-        return True, ""   # the plan inserts it; an install line beside it belongs to another module in the plan (a softdep peer)
-    installs = [ln for ln in lines if ln.startswith("install ")]
-    if installs and any("--ignore-install" in ln for ln in installs):
-        return True, ""   # the self-load idiom man 5 modprobe.d documents: `install br_netfilter /sbin/modprobe --ignore-install br_netfilter && ...`
+    own = [ln for ln in conf if ln.split()[:2] == ["install", "br_netfilter"]]
+    if own:
+        words: list[str] = []
+        for w in own[0].split()[2:]:
+            if w.startswith("#"):
+                break
+            words.append(w)
+        if any(w == "--ignore-install" and words[i + 1:i + 2] == ["br_netfilter"] for i, w in enumerate(words)):
+            return True, ""
+        return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+    if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
+        return False, f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
+    installs = [ln for ln in plan if ln.startswith("install ")]
     if installs:
-        return False, f"a modprobe.d install directive replaces the insertion ({installs[0][:120]})"
-    return False, f"the dry run names no br_netfilter.ko to insert ({' | '.join(lines)[:200] or 'no output'})"
+        return False, f"a dependency in the plan carries an install directive ({installs[0][:120]}): whether the load survives it cannot be told from the plan"
+    return True, ""
 
 
 def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:

@@ -382,7 +382,7 @@ $('#go').onclick=async()=>{if(!chosen)return;$('#go').disabled=true;
   try{const res=await fetch('/scan',{method:'POST',body:fd});const r=await res.json().catch(()=>({}));
     if(!res.ok||!r.job_id)throw new Error(res.status+(r.detail?': '+(typeof r.detail==='string'?r.detail:JSON.stringify(r.detail)):''));   // a refusal is JSON too (400/413/503): its detail is the message, never a poll on /scan/undefined
     watch(r.job_id);await refresh();}
-  catch(e){$('#detail').innerHTML='<div class="empty">submit failed: '+esc(e)+'</div>';}
+  catch(e){clearInterval(poll);$('#detail').innerHTML='<div class="empty">submit failed: '+esc(e)+'</div>';}   // the previous job's poll would repaint over the message
   $('#go').disabled=false;};
 function watch(id){clearInterval(poll);const tick=async()=>{const j=await jget('/scan/'+id);render(j);
   if(j.status==='done'||j.status==='error'){clearInterval(poll);refresh();}};tick();poll=setInterval(tick,1200);}

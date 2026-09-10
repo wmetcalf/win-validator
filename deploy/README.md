@@ -86,7 +86,8 @@ sudo systemctl enable --now winval-pool-manager
 ```
 
 The unit materialises the RAM base (`AUTHENTICODE_GOLDEN_BASE`, on `/dev/shm`) in
-`ExecStartPre` when it is MISSING, or present but not owned by the unit — `/dev/shm` empties on reboot, so a rebooted host comes
+`ExecStartPre` when it is MISSING, or present but not owned by the unit (a worker base configured as the disk golden itself is left
+as it is: it is its own source) — `/dev/shm` empties on reboot, so a rebooted host comes
 back on its own (an 18 GB copy takes ~20–30 s; the unit's start budget is 55 min: up to 30 min behind a rotation's lock plus the copy on a slow store). Fast
 failures — Postgres not up yet, a bad `winval.env` — are retried every 30 s for eight starts, then the
 unit latches `failed`: fix the cause and `sudo systemctl reset-failed winval-pool-manager && sudo

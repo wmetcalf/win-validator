@@ -152,15 +152,27 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         import os, subprocess
         if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): print("ok"); sys.exit(0)
         # the VERBOSE dry run (the exit code says nothing: with an `install br_netfilter /bin/false` directive `-n` exits 0 for a module it
-        # would not insert): loadable = rc 0 and an `insmod .../br_netfilter.ko*` line (install lines beside it are other modules' in the plan), or the
-        # documented `--ignore-install` self-load idiom — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
+        # would not insert) is the plan, and `modprobe -c` names whose install directive a plan line is (the plan does not): loadable = rc 0
+        # and EITHER br_netfilter's own directive is the documented `modprobe --ignore-install br_netfilter` self-load (the command's words
+        # up to a comment), OR it has none, the plan inserts br_netfilter.ko and carries no install line (a dependency's directive is refused:
+        # whether the load survives it cannot be told from the plan) — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
+        def mp(*a):
+            r = subprocess.run(["modprobe", *a], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
         try:
-            r = subprocess.run(["modprobe", "-n", "-v", "br_netfilter"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-            lines = [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
-            why = "" if r.returncode == 0 else f"modprobe -n -v br_netfilter failed (rc {r.returncode}: {' | '.join(lines)[:200]})"
-            installs = [ln for ln in lines if ln.startswith("install ")]
-            if not why and not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in lines) and not any("--ignore-install" in ln for ln in installs):
-                why = f"a modprobe.d install directive replaces the insertion ({installs[0][:120]})" if installs else f"the dry run names no br_netfilter.ko to insert ({' | '.join(lines)[:200] or 'no output'})"
+            rc, plan = mp("-n", "-v", "br_netfilter"); conf = mp("-c")[1] if rc == 0 else []
+            why = "" if rc == 0 else f"modprobe -n -v br_netfilter failed (rc {rc}: {' | '.join(plan)[:200]})"
+            own = [ln for ln in conf if ln.split()[:2] == ["install", "br_netfilter"]]
+            if not why and own:
+                words = []
+                for w in own[0].split()[2:]:
+                    if w.startswith("#"): break
+                    words.append(w)
+                if not any(w == "--ignore-install" and words[i + 1:i + 2] == ["br_netfilter"] for i, w in enumerate(words)): why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+            elif not why:
+                installs = [ln for ln in plan if ln.startswith("install ")]
+                if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan): why = f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
+                elif installs: why = f"a dependency in the plan carries an install directive ({installs[0][:120]}): whether the load survives it cannot be told from the plan"
         except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
         if not why: print("ok"); sys.exit(0)
         print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
