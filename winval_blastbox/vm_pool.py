@@ -53,11 +53,6 @@ _PER_REQUEST_PARAMS = ("rev", "scripts")
 AGENT_RESPONSE_MAX = env_int("WINVAL_AGENT_RESPONSE_MB", 64, floor=1) * (1 << 20)
 
 
-def read_sample(path: str) -> bytes:
-    with open(path, "rb") as fh:
-        return fh.read()
-
-
 def check_sample(path: str) -> None:
     """Open, stat and close the sample on the HOST before any worker is claimed: a missing file, a directory or
     an unreadable one is the caller's problem, never evidence about a worker (it used to be read inside the try
@@ -124,16 +119,19 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     ``params`` carries per-request myatg overrides (``rev`` / ``scripts``); myatg validates the values
     itself and falls back to its startup defaults on an unknown one."""
     host, port = endpoint
-    data = read_sample(path)
+    size = os.stat(path).st_size
     q = {"name": os.path.basename(path)}
     for k in _PER_REQUEST_PARAMS:
         if params and params.get(k):
             q[k] = str(params[k])
     url = f"http://{host}:{port}/validate?" + urllib.parse.urlencode(q)
-    req = urllib.request.Request(
-        url, data=data, method="POST", headers={"Content-Type": "application/octet-stream"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read(AGENT_RESPONSE_MAX + 1)
+    # the body is STREAMED from the file (http.client sends a file object in blocks when Content-Length is given): the whole
+    # sample used to be read into memory first — two gigabytes of host RAM per in-flight job at the default 1024 MiB cap
+    with open(path, "rb") as fh:
+        req = urllib.request.Request(
+            url, data=fh, method="POST", headers={"Content-Type": "application/octet-stream", "Content-Length": str(size)})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read(AGENT_RESPONSE_MAX + 1)
     if len(body) > AGENT_RESPONSE_MAX:
         raise RuntimeError(f"the guest agent's verdict exceeds {AGENT_RESPONSE_MAX} bytes (WINVAL_AGENT_RESPONSE_MB); "
                            "refusing to publish it")
