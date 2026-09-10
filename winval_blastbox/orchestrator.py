@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
     global _store
     pool_size = _pool_size()
     _store = JobStore(max_workers=pool_size)
-    if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM") or "1"):   # blastbox's strict boolean: a typo raises at startup, never reads as OFF (the opposite of the default)
+    if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM"), default=True):   # blastbox's strict boolean: unset or blank is the default (on), a typo raises at startup, never reads as OFF
         runner = HostRunner()
         runner.warmup()  # boot the VM pool once
         ENGINES["authenticode"] = lambda p: _authenticode_verdict(runner.validate(p))

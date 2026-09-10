@@ -139,7 +139,7 @@ listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inb
 blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
 `block_internal` covers the docker-published 8099; with `none` there is no chain at all — see `deploy/README.md`.
 Both hops are checked at start (with an exit driver set; `none` opts out of both): with more than one worker, the pool-manager refuses to start unless
-`AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist) is set AND `net.bridge.bridge-nf-call-iptables` is 1, so a
+`AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist, or the `drop` exit) is set AND `net.bridge.bridge-nf-call-iptables` is 1, so a
 policy that could not drop worker-to-worker traffic never runs a pool. And the golden's own firewall rule for the
 agent port admits the pool-manager's address alone (the host's address on the libvirt network, learned at bake
 time; `AUTHENTICODE_AGENT_CALLER` overrides it), so a sibling never reaches the port even where the host rules miss.

@@ -209,7 +209,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         if not loadable:
             raise SystemExit(f"br_netfilter is not loaded and cannot be ({why}): the pool-manager's next start "
                              f"would refuse with {workers} workers on one bridge (the FORWARD rules never see worker-to-worker frames, so "
-                             "AUTHENTICODE_BLOCK_INTERNAL cannot drop them). Install the module (a kernel with CONFIG_BRIDGE_NETFILTER), "
+                             "the policy's DROP for them never fires). Install the module (a kernel with CONFIG_BRIDGE_NETFILTER), "
                              "or run one worker")
         return
     try:

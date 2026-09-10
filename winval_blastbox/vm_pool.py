@@ -236,12 +236,12 @@ def _smoke(slot) -> bool:
     verdict — proves the OS is up, the agent returns, AND cert validation actually works (not just
     a port-open check). Opt-in via AUTHENTICODE_SMOKE_SAMPLE (default expected status Valid)."""
     sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
-    expect = os.environ.get("AUTHENTICODE_SMOKE_EXPECT", "Valid")
+    expect = (os.environ.get("AUTHENTICODE_SMOKE_EXPECT") or "").strip() or "Valid"   # stripped like every knob; the status compares case-insensitively
     try:
         v = agent_validate(slot.endpoint, sample, timeout=30.0)
     except Exception:
         return False
-    return isinstance(v, dict) and v.get("status") == expect
+    return isinstance(v, dict) and str(v.get("status", "")).strip().lower() == expect.lower()
 
 
 def _warm_crl(slot) -> None:
