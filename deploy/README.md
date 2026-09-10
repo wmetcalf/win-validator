@@ -122,9 +122,14 @@ request-body cap, the bounded `/cert` scan) — and re-derives `compose.env`, wh
 written before this version does not carry.
 
 ```bash
-sudo sh /opt/win-validator/deploy/upgrade.sh <branch>             # code, venv, compose.env; stops before any restart and says what --restart does
-sudo sh /opt/win-validator/deploy/upgrade.sh <branch> --restart   # rebuilds the ingress, installs the three unit files + daemon-reload, restarts the pool-manager
+cd /opt/win-validator && sudo git fetch --prune origin
+sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch>             # code, venv, compose.env; stops before any restart and says what --restart does
+sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch> --restart   # rebuilds the ingress, installs the three unit files + daemon-reload, restarts the pool-manager
 ```
+
+The script is read from origin rather than from the checkout because a host still on a version without it (it
+arrived with this one) has no `deploy/upgrade.sh` to run; once upgraded, `sudo sh deploy/upgrade.sh <branch>`
+is the same thing.
 
 The `--restart` step drops in-flight uploads and fails every RUNNING job as *orphaned by a pool-manager restart*
 (its sample removed; clients resubmit): drain first if that matters. The pool-manager's first start may wait up

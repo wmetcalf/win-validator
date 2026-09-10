@@ -18,11 +18,15 @@ restart=no; [ "${2:-}" = "--restart" ] && restart=yes
 if [ "$(id -u)" != 0 ] && [ "${WINVAL_SKIP_ROOT_CHECK:-}" != 1 ]; then echo "upgrade.sh: run as root (sudo): it writes $ETC and /etc/systemd/system" >&2; exit 1; fi
 cd "$ROOT"
 [ -z "$(git status --porcelain)" ] || { echo "upgrade.sh: local changes in $ROOT — stash or discard them first:" >&2; git status --short >&2; exit 1; }
-sh deploy/compose-env.sh --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }   # compose-env.sh's OWN rules, all of them, before the checkout: a duplicated first gate here let a present-but-unusable URL move the tree
 git fetch --prune origin   # branches only (--tags fails for good once an upstream tag moves; nothing here uses a tag), and PRUNED: a branch deleted upstream left a stale origin/<branch> that passed every guard and shipped its pre-merge tip
 if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
   echo "upgrade.sh: '$branch' is not a branch on origin now (deleted upstream after a merge? then deploy the branch it was merged into; a tag? tags are not supported); the tree was not moved" >&2; exit 1
 fi
+# compose-env's OWN rules, all of them, before the checkout — and the TARGET version's copy of them, read from origin without
+# touching the tree: a host still on a version that has no deploy/compose-env.sh (this script arrived with it) can bootstrap
+# with `git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch>`, and a duplicated first gate here once let a
+# present-but-unusable URL move the tree
+git show "refs/remotes/origin/$branch:deploy/compose-env.sh" | sh -s -- --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }
 if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
   echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
 fi
