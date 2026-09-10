@@ -224,6 +224,11 @@ if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base
 fi
 git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
+# the unit files go in RIGHT AFTER the checkout, before pip and the restart gate: installing a unit restarts nothing, and the code
+# just checked out depends on what its unit does at start (the RAM base it materialises, the br_netfilter it loads) — a pip failure,
+# a crash or a reboot from here on would otherwise leave or start the new code under the old unit and latch the pool-manager failed
+install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
+systemctl daemon-reload
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 # every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
 # database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
@@ -231,11 +236,6 @@ git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, n
 # next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
 example=$(mktemp) && envfile_py redacted deploy/winval.env.example > "$example" && { envfile_py redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
-# the unit files go in BEFORE the restart gate: installing a unit restarts nothing, and the code just checked out depends on what its
-# unit does at start (the RAM base it materialises, the br_netfilter it loads) — a crash or a reboot between the two halves of the
-# documented upgrade would otherwise start the new code under the old unit and latch the pool-manager failed
-install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
-systemctl daemon-reload
 if [ "$restart" != yes ]; then
   cat <<MSG
 upgrade.sh: code, venv, compose.env and the unit files are current. Nothing was restarted. To finish:

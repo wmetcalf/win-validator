@@ -27,6 +27,7 @@ import base64
 import json
 import shutil
 import logging
+import fcntl
 import os
 import re
 import subprocess
@@ -39,6 +40,39 @@ if __name__ == "__main__":   # golden_build does `import golden_rotate`: hand it
     sys.modules["golden_rotate"] = sys.modules[__name__]   # NothingPublished would be a different class from main()'s handler
 
 logger = logging.getLogger("winval.golden_rotate")
+
+class rotation_lock:
+    """The rotation lock, held for the body: `with rotation_lock("taking the rebake-source copy"): ...`. Bounded like the
+    preflight's wait (a pool-manager start holds it for minutes, a rotation for hours): never an unbounded block inside a
+    oneshot with no start timeout. Raises NothingPublished when it is still held after PREFLIGHT_LOCK_WAIT_S."""
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+        self._fd = -1
+
+    def __enter__(self) -> "rotation_lock":
+        self._fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            _tighten_lock(self._fd)
+            deadline = time.time() + PREFLIGHT_LOCK_WAIT_S
+            while True:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except OSError as e:
+                    if time.time() >= deadline:
+                        raise NothingPublished(f"lock {ROTATE_LOCK} still held after {PREFLIGHT_LOCK_WAIT_S}s while {self._what}") from e
+                    time.sleep(5)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = -1
+            raise
+
+    def __exit__(self, *exc: object) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
 
 def _tighten_lock(fd: int) -> None:
     """The rotation lock must be 0600: flock(2) needs only a READABLE descriptor, so a 0644 lock

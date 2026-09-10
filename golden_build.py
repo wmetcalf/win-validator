@@ -175,7 +175,9 @@ def build(base: str = BASE_QCOW2) -> str:
             suffix = gr.build_hold_suffix()
             if suffix is None:   # an unverifiable hold would be reclaimed under this build: refuse rather than bake on a base the prune may take
                 raise SystemExit(f"cannot read this process's start time (/proc/{os.getpid()}/stat): refusing to build from the retained backup {base}, whose hold could not be kept")
-            held_keep = gr._mark_kept(os.path.realpath(base), suffix=suffix)
+            with gr.rotation_lock("holding the retained backup out of the prune"):   # the prune runs under this lock and reads the
+                # holds once: a hold written beside a prune already iterating was not seen, and the backing file went mid-build
+                held_keep = gr._mark_kept(os.path.realpath(base), suffix=suffix)
             if held_keep is None:   # neither sidecar location took the write: an unheld base is one the count prune may take mid-build
                 raise SystemExit(f"could not hold the retained backup {base} out of the prune (no sidecar could be written beside it or beside the chain mirror): refusing to build from it")
     # chain depth is a property of the SOURCE, not of which builder ran: the packer base or the
