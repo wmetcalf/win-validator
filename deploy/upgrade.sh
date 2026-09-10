@@ -151,10 +151,17 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
         import os, subprocess
         if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): print("ok"); sys.exit(0)
-        try: loadable = subprocess.run(["modprobe", "-n", "-q", "br_netfilter"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
-        except (OSError, subprocess.SubprocessError): loadable = False
-        if loadable: print("ok"); sys.exit(0)
-        print(f"refuse: br_netfilter is not loaded and cannot be (modprobe -n br_netfilter failed): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
+        # the VERBOSE dry run (the exit code says nothing: with an `install br_netfilter /bin/false` directive `-n` exits 0 for a module it
+        # would not insert): loadable = rc 0, an `insmod .../br_netfilter.ko*` line, no `install` line — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
+        try:
+            r = subprocess.run(["modprobe", "-n", "-v", "br_netfilter"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            lines = [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
+            why = "" if r.returncode == 0 else f"modprobe -n br_netfilter failed (rc {r.returncode})"
+            if not why and any(ln.startswith("install ") for ln in lines): why = "a modprobe.d install directive replaces the insertion"
+            if not why and not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in lines): why = "the dry run names no br_netfilter.ko to insert"
+        except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
+        if not why: print("ok"); sys.exit(0)
+        print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
     print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS: the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)

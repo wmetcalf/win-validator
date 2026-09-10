@@ -82,7 +82,29 @@ _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authentico
 
 
 BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
-BRIDGE_NF_MODPROBE = ("modprobe", "-n", "-q", "br_netfilter")   # a dry run: can the unit's ExecStartPre load the module at the next start?
+BRIDGE_NF_MODPROBE = ("modprobe", "-n", "-v", "br_netfilter")   # a VERBOSE dry run: what the unit's ExecStartPre would do at the next start
+
+
+def _bridge_nf_loadable() -> tuple[bool, str]:
+    """Would `modprobe br_netfilter` insert the module? Its dry run's exit code says nothing: with an `install br_netfilter /bin/false`
+    directive (the one way to make a module unloadable; `blacklist` never stops an explicit modprobe) `-n` exits 0 for a module it
+    would not insert — for a module that does not exist, even. The verbose dry run prints what WOULD run: an `insmod .../br_netfilter.ko*`
+    line when the module would be inserted, `install <command>` when a directive replaces the insertion. Loadable = exit 0, an insmod
+    line naming br_netfilter, and no install line. What only the real insertion can tell (a lockdown/signature refusal, a stale .ko)
+    stays with the manager's own start, which reads the sysctl live."""
+    try:
+        r = subprocess.run(BRIDGE_NF_MODPROBE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
+    lines = [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
+    if r.returncode != 0:
+        return False, f"{' '.join(BRIDGE_NF_MODPROBE)} failed (rc {r.returncode}: {' | '.join(lines)[:200]})"
+    installs = [ln for ln in lines if ln.startswith("install ")]
+    if installs:
+        return False, f"a modprobe.d install directive replaces the insertion ({installs[0][:120]})"
+    if not any(ln.startswith("insmod ") and ("/br_netfilter.ko" in ln) for ln in lines):
+        return False, f"the dry run names no br_netfilter.ko to insert ({' | '.join(lines)[:200] or 'no output'})"
+    return True, ""
 
 
 def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
@@ -95,7 +117,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
     outage). sysctl="live" reads the sysctl as it is now (the manager's own start, after the unit's ExecStartPre applied
     it); sysctl="loadable" is for a caller whose RESTART will apply it: it passes when the sysctl exists (the unit sets it)
-    or br_netfilter can be loaded (a modprobe dry run: the unit loads it), and refuses on the host the unit's own comment
+    or br_netfilter would be inserted (a verbose modprobe dry run, see _bridge_nf_loadable), and refuses on the host the unit's own comment
     names — one that cannot load the module, where ExecStartPre's `-` lets the start reach the manager and refuse."""
     raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
     if not raw:
@@ -113,12 +135,9 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     if sysctl == "loadable":
         if Path(BRIDGE_NF_SYSCTL).exists():
             return   # br_netfilter is loaded: the unit's `sysctl -w` sets the value at the next start
-        try:
-            loadable = subprocess.run(BRIDGE_NF_MODPROBE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            loadable = False
+        loadable, why = _bridge_nf_loadable()
         if not loadable:
-            raise SystemExit(f"br_netfilter is not loaded and cannot be ({' '.join(BRIDGE_NF_MODPROBE)} failed): the pool-manager's next start "
+            raise SystemExit(f"br_netfilter is not loaded and cannot be ({why}): the pool-manager's next start "
                              f"would refuse with {workers} workers on one bridge (the FORWARD rules never see worker-to-worker frames, so "
                              "AUTHENTICODE_BLOCK_INTERNAL cannot drop them). Install the module (a kernel with CONFIG_BRIDGE_NETFILTER), "
                              "or run one worker")
