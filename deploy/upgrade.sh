@@ -148,7 +148,7 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if workers < 2: print("ok"); sys.exit(0)
-    if "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist, even a closed one, drops siblings
+    if ex == "drop" or "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist, even a closed one, drops siblings; the drop exit ends in DROP
         # the kernel half, as the restart will find it: the unit's ExecStartPre loads br_netfilter and sets the sysctl (both with `-`, so a host
         # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
         import os, subprocess

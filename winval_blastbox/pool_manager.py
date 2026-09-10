@@ -197,7 +197,8 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         return
     from winval_blastbox.vm_pool import authenticode_spec
     eg = authenticode_spec().egress
-    if eg is not None and not eg.block_internal and eg.egress_ports is None:   # () is the CLOSED allowlist (drops siblings too); only None is 'no allowlist: ACCEPT' 
+    if eg is not None and eg.exit_driver != "drop" and not eg.block_internal and eg.egress_ports is None:   # () is the CLOSED allowlist (drops siblings
+        # too); only None is 'no allowlist: ACCEPT'. The drop exit ends its chain in an unconditional DROP (blastbox's rooter): closed already
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
                          "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
