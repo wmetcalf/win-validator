@@ -31,12 +31,35 @@ db_url() {   # the value as the service reads it: systemd's EnvironmentFile (and
 # '$' as '$$', because compose interpolates its env file and a bare '$' would truncate the secret) and the percent-encoded
 # one (the ingress embeds it in a URL)
 PWLINE=$(db_url | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
-# both lines present with NON-EMPTY values: what a hand-written compose.env must carry (an empty value resolves to compose's
-# 'winval' fallback and locks the ingress out)
-env_value() {   # the value of $1 in compose.env as compose reads it: a matching pair of double or single quotes stripped, so "" and '' are EMPTY (the refusal below tells the operator to double-quote, and "" passed a bare non-empty test)
-  sed -n "s/^$1=//p" "$ETC/compose.env" 2>/dev/null | tail -1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+# What compose READS from an env file is decided by compose, not by a re-implementation of its parser here: a hand-rolled
+# reading passed "" (quoted empty), then `"" # comment`, a trailing space, a whitespace-only value and an uninterpolated
+# $VAR as non-empty — each of which compose resolves to its 'winval' fallback, splitting the password between the tiers.
+# So the two values are read back through compose's own interpolation (a throwaway one-service file), and a file compose
+# cannot parse (an unterminated quote) is a refusal HERE, before anything moves — not at the `up` afterwards.
+# Prints "plain=<set|empty> urlenc=<set|empty>"; a non-zero rc means compose refused the file (its message on stderr).
+compose_reads() {
+  d=$(mktemp -d) || return 1
+  printf 'services:\n  p:\n    image: scratch\n    environment:\n      A: ${WINVAL_PG_PASSWORD:-}\n      B: ${WINVAL_PG_PASSWORD_URLENC:-}\n' > "$d/probe.yml"
+  if cfg=$(docker compose --env-file "$1" -f "$d/probe.yml" config --format json 2>"$d/err"); then
+    rm -rf "$d"
+    printf '%s' "$cfg" | python3 -c 'import json, sys; e = json.load(sys.stdin)["services"]["p"].get("environment") or {}; print("plain=" + ("set" if e.get("A") else "empty"), "urlenc=" + ("set" if e.get("B") else "empty"))'
+  else
+    cat "$d/err" >&2; rm -rf "$d"; return 1
+  fi
 }
-hand_written=no; [ -n "$(env_value WINVAL_PG_PASSWORD)" ] && [ -n "$(env_value WINVAL_PG_PASSWORD_URLENC)" ] && hand_written=yes
+# both lines present with NON-EMPTY values, as compose reads them: what a hand-written compose.env must carry (an empty value
+# resolves to compose's 'winval' fallback and locks the ingress out). A file compose cannot parse is neither hand-written nor
+# usable: refused below with compose's own message (a derived file replaces only the two password lines, so its OTHER lines
+# are checked the same way before the write)
+hand_written=no; unparseable=""
+if [ -f "$ETC/compose.env" ]; then
+  if reads=$(compose_reads "$ETC/compose.env" 2>"${TMPDIR:-/tmp}/compose-env.$$"); then
+    [ "$reads" = "plain=set urlenc=set" ] && hand_written=yes
+  else
+    unparseable=$(cat "${TMPDIR:-/tmp}/compose-env.$$")
+  fi
+  rm -f "${TMPDIR:-/tmp}/compose-env.$$"
+fi
 # 'already matches' means BOTH derived lines are in the file exactly: a match on the encoded half alone let a missing, empty or
 # stale plain password line through, and compose then initialised pgdata with its stock fallback while the ingress used the URL's
 HAVE=$(grep '^WINVAL_PG_PASSWORD=\|^WINVAL_PG_PASSWORD_URLENC=' "$ETC/compose.env" 2>/dev/null | sort || true)
@@ -44,9 +67,16 @@ if [ -n "$PWLINE" ] && [ "$HAVE" = "$(printf '%s\n' "$PWLINE" | sort)" ]; then
   echo "compose-env: $ETC/compose.env already matches winval.env"
 else
   if [ -n "$PWLINE" ]; then
-    if [ "$check" = yes ]; then echo "compose-env: --check ok ($ETC/compose.env would be derived from winval.env's URL)"; exit 0; fi
     OTHER=$(grep -v '^WINVAL_PG_PASSWORD' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
-    { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } | install -m 0600 /dev/stdin "$ETC/compose.env"   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change; printf, not echo: dash's echo would eat the backslashes
+    # the file as it WOULD be, read by compose before it is written (or, with --check, instead of being written): a broken
+    # line among the survivors would otherwise surface at the `up`, after the tree moved
+    cand=$(mktemp) || exit 1
+    { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } > "$cand"   # printf, not echo: dash's echo would eat the backslashes
+    if ! reads=$(compose_reads "$cand") || [ "$reads" != "plain=set urlenc=set" ]; then
+      rm -f "$cand"; echo "compose-env: the derived $ETC/compose.env would not be readable by compose (above: a line other than the two password lines?); nothing written" >&2; exit 1
+    fi
+    if [ "$check" = yes ]; then rm -f "$cand"; echo "compose-env: --check ok ($ETC/compose.env would be derived from winval.env's URL)"; exit 0; fi
+    install -m 0600 "$cand" "$ETC/compose.env"; rm -f "$cand"   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change
     echo "compose-env: $ETC/compose.env derived from winval.env's BLASTBOX_DATABASE_URL"
   elif [ "$hand_written" = yes ]; then
     # winval.env's URL is not the compose's Postgres (another scheme, user or no password) and the operator wrote both lines
@@ -54,7 +84,8 @@ else
     # a pool-manager on a different store never sees the ingress's rows (pool_manager.py: the store must match the ingress)
     echo "compose-env: winval.env's URL is not the compose's Postgres; $ETC/compose.env is hand-written and left alone — the shipped compose's ingress queues into ITS Postgres service, so the pool-manager's store must be that Postgres or the ingress must be yours"
   else   # never an EMPTY compose.env or one with an empty value (the 'winval' fallback password would lock the ingress out)
-    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to $ETC/compose.env by hand (non-empty) before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted, \$ as \$\$> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
+    [ -z "$unparseable" ] || echo "compose-env: compose cannot read $ETC/compose.env: $unparseable" >&2
+    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to $ETC/compose.env by hand (non-empty, as compose reads them: no trailing comment on the line, \$ as \$\$) before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
     exit 1
   fi
 fi
