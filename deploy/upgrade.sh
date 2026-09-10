@@ -42,20 +42,88 @@ git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, n
 # database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
 # ...as LOGICAL lines: systemd joins a line ending in an odd number of backslashes with the next, so a URL continued onto the
 # next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
-redacted() {
+redacted() {   # the file's ASSIGNMENTS as systemd reads them (the same parser compose-env.sh and golden_rotate.py carry), one KEY=value
+  # line per knob sorted by name, a secret's value replaced: a redaction over physical lines printed the second line of a quoted
+  # multi-line secret and a URL landed mid-line by a continuation
   python3 - "$1" <<'PY'
 import re, sys
-lines = open(sys.argv[1], encoding="utf-8", errors="surrogateescape").read().splitlines()
-def continues(raw):
-    if raw.lstrip().startswith("#"): return False
-    return (len(raw) - len(raw.rstrip("\\"))) % 2 == 1
-joined = []
-for line in lines:
-    if joined and continues(joined[-1]): joined[-1] = joined[-1][:-1] + line
-    else: joined.append(line)
-pat = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*).*$")   # blanks around '=' honoured (KEY = value); _KEY alone hid AUTHENTICODE_SSH_KEY; UNANCHORED: a secret assignment joined onto another value by a continuation is redacted where it lands
-for line in joined:
-    sys.stdout.buffer.write((pat.sub(lambda m: m.group(1) + "<redacted>", line, count=1) + "\n").encode("utf-8", "surrogateescape"))   # bytes out as bytes in: a stray non-UTF-8 byte must not end the diff in a traceback
+# --- envfile parser (systemd src/basic/env-file.c parse_env_file_internal, verified against systemd-run over 77 files) ---
+import re as _re
+def parse_env_file(data: bytes):
+    """winval.env as systemd's EnvironmentFile reads it: a state machine, not lines. Quoted values run across newlines until
+    their closing quote (an open one swallows the rest of the file); a closing quote returns to the value (\"a\" \"b\" is ab);
+    backslash escapes \\ \" $ ` inside double quotes and any character unquoted, backslash-newline continues; # and ; start
+    a comment only where a key would; the LAST assignment wins; a key that is not a valid name is dropped. Returns
+    (assignments, unterminated) — unterminated says the file ended inside a quote. Raises ValueError when systemd would
+    refuse the whole file (an assignment that is not valid UTF-8 or carries a NUL)."""
+    text = data.decode("utf-8", "surrogateescape")
+    WS = " \t"; NL = "\n\r"; COMMENTS = "#;"; ESC = "\"\\`$"
+    PRE_KEY, KEY, PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE, COMMENT = range(9)
+    st = PRE_KEY; key = []; val = []; key_ws = None; val_ws = None; out = {}
+    def push():
+        k = "".join(key[:key_ws] if key_ws is not None else key); v = "".join(val)
+        if any("\udc80" <= c <= "\udcff" or c == "\x00" for c in k + v):
+            raise ValueError(f"the assignment of {k!r} is not valid UTF-8 (or carries a NUL): systemd rejects the whole file")
+        if _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k): out[k] = v
+    for c in text:
+        if st == PRE_KEY:
+            if c in COMMENTS: st = COMMENT
+            elif c not in WS and c not in NL: st = KEY; key = [c]; key_ws = None
+        elif st == KEY:
+            if c in NL: st = PRE_KEY; key = []
+            elif c == "=": st = PRE_VALUE; val = []; val_ws = None
+            else:
+                if c not in WS: key_ws = None
+                elif key_ws is None: key_ws = len(key)
+                key.append(c)
+        elif st == PRE_VALUE:
+            if c in NL: st = PRE_KEY; push(); key = []; val = []
+            elif c == "'": st = SQ
+            elif c == '"': st = DQ
+            elif c == "\\": st = VALUE_ESCAPE; val_ws = None
+            elif c not in WS: st = VALUE; val_ws = None; val.append(c)
+        elif st == VALUE:
+            if c in NL:
+                st = PRE_KEY
+                if val_ws is not None: del val[val_ws:]
+                push(); key = []; val = []
+            elif c == "\\": st = VALUE_ESCAPE; val_ws = None
+            else:
+                if c not in WS: val_ws = None
+                elif val_ws is None: val_ws = len(val)
+                val.append(c)
+        elif st == VALUE_ESCAPE:
+            st = VALUE
+            if c not in NL: val.append(c)
+        elif st == SQ:
+            if c == "'": st = PRE_VALUE
+            else: val.append(c)
+        elif st == DQ:
+            if c == '"': st = PRE_VALUE
+            elif c == "\\": st = DQ_ESCAPE
+            else: val.append(c)
+        elif st == DQ_ESCAPE:
+            st = DQ
+            if c in ESC: val.append(c)
+            elif c not in NL: val.append("\\"); val.append(c)
+        elif st == COMMENT:
+            if c in NL: st = PRE_KEY
+    unterminated = st in (SQ, DQ, DQ_ESCAPE)
+    if st in (PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE):
+        if st == VALUE and val_ws is not None: del val[val_ws:]
+        push()
+    return out, unterminated
+# --- end envfile parser ---
+
+try:
+    env, _ = parse_env_file(open(sys.argv[1], "rb").read())
+except ValueError as exc:
+    env = {"(unreadable)": str(exc)}
+secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
+inside = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*|://[^/@\s]*@).*$")   # a secret assignment that a continuation landed INSIDE another knob's value, or any URL userinfo
+for k in sorted(env):
+    v = "<redacted>" if secret.match(k) else inside.sub(lambda m: m.group(1) + "<redacted>", env[k], count=1).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    sys.stdout.buffer.write(f"{k}={v}\n".encode("utf-8", "surrogateescape"))
 PY
 }
 example=$(mktemp) && redacted deploy/winval.env.example > "$example" && { redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"

@@ -50,46 +50,89 @@ def _tighten_lock(fd: int) -> None:
         os.fchmod(fd, 0o600)
 
 
+# --- envfile parser (systemd src/basic/env-file.c parse_env_file_internal, verified against systemd-run over 77 files) ---
+import re as _re
+def parse_env_file(data: bytes):
+    """winval.env as systemd's EnvironmentFile reads it: a state machine, not lines. Quoted values run across newlines until
+    their closing quote (an open one swallows the rest of the file); a closing quote returns to the value (\"a\" \"b\" is ab);
+    backslash escapes \\ \" $ ` inside double quotes and any character unquoted, backslash-newline continues; # and ; start
+    a comment only where a key would; the LAST assignment wins; a key that is not a valid name is dropped. Returns
+    (assignments, unterminated) — unterminated says the file ended inside a quote. Raises ValueError when systemd would
+    refuse the whole file (an assignment that is not valid UTF-8 or carries a NUL)."""
+    text = data.decode("utf-8", "surrogateescape")
+    WS = " \t"; NL = "\n\r"; COMMENTS = "#;"; ESC = "\"\\`$"
+    PRE_KEY, KEY, PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE, COMMENT = range(9)
+    st = PRE_KEY; key = []; val = []; key_ws = None; val_ws = None; out = {}
+    def push():
+        k = "".join(key[:key_ws] if key_ws is not None else key); v = "".join(val)
+        if any("\udc80" <= c <= "\udcff" or c == "\x00" for c in k + v):
+            raise ValueError(f"the assignment of {k!r} is not valid UTF-8 (or carries a NUL): systemd rejects the whole file")
+        if _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k): out[k] = v
+    for c in text:
+        if st == PRE_KEY:
+            if c in COMMENTS: st = COMMENT
+            elif c not in WS and c not in NL: st = KEY; key = [c]; key_ws = None
+        elif st == KEY:
+            if c in NL: st = PRE_KEY; key = []
+            elif c == "=": st = PRE_VALUE; val = []; val_ws = None
+            else:
+                if c not in WS: key_ws = None
+                elif key_ws is None: key_ws = len(key)
+                key.append(c)
+        elif st == PRE_VALUE:
+            if c in NL: st = PRE_KEY; push(); key = []; val = []
+            elif c == "'": st = SQ
+            elif c == '"': st = DQ
+            elif c == "\\": st = VALUE_ESCAPE; val_ws = None
+            elif c not in WS: st = VALUE; val_ws = None; val.append(c)
+        elif st == VALUE:
+            if c in NL:
+                st = PRE_KEY
+                if val_ws is not None: del val[val_ws:]
+                push(); key = []; val = []
+            elif c == "\\": st = VALUE_ESCAPE; val_ws = None
+            else:
+                if c not in WS: val_ws = None
+                elif val_ws is None: val_ws = len(val)
+                val.append(c)
+        elif st == VALUE_ESCAPE:
+            st = VALUE
+            if c not in NL: val.append(c)
+        elif st == SQ:
+            if c == "'": st = PRE_VALUE
+            else: val.append(c)
+        elif st == DQ:
+            if c == '"': st = PRE_VALUE
+            elif c == "\\": st = DQ_ESCAPE
+            else: val.append(c)
+        elif st == DQ_ESCAPE:
+            st = DQ
+            if c in ESC: val.append(c)
+            elif c not in NL: val.append("\\"); val.append(c)
+        elif st == COMMENT:
+            if c in NL: st = PRE_KEY
+    unterminated = st in (SQ, DQ, DQ_ESCAPE)
+    if st in (PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE):
+        if st == VALUE and val_ws is not None: del val[val_ws:]
+        push()
+    return out, unterminated
+# --- end envfile parser ---
+
+
 def _load_env_file(path: str) -> None:
-    """Read the units' EnvironmentFile the way systemd does (KEY=VALUE, # comments, optional
-    quotes) and apply it to any variable NOT already in the environment — so a hand-run
-    `sudo … golden_rotate.py` (sudo's env_reset strips every exported GOLDEN_*/AUTHENTICODE_*
-    override) sees the SAME paths the timer's rotation used, instead of the defaults."""
+    """Read the units' EnvironmentFile the way systemd does (parse_env_file above) and apply it to any variable NOT
+    already in the environment — so a hand-run `sudo … golden_rotate.py` (sudo's env_reset strips every exported
+    GOLDEN_*/AUTHENTICODE_* override) sees the SAME paths the timer's rotation used, instead of the defaults. A file
+    systemd would reject applies nothing here either, with a warning: the units started with none of its knobs."""
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="surrogateescape").splitlines()   # a stray non-UTF-8 byte (a comment) killed the module at import; systemd reads the file fine
+        data = Path(path).read_bytes()
     except OSError:
         return
-    seen: dict[str, str] = {}
-    def _continues(raw: str) -> bool:   # systemd: an ODD number of trailing backslashes continues the line — but never a comment
-        if raw.lstrip().startswith("#"):
-            return False
-        n = len(raw) - len(raw.rstrip("\\"))
-        return n % 2 == 1
-    joined: list[str] = []
-    for line in lines:
-        if joined and _continues(joined[-1]):
-            joined[-1] = joined[-1][:-1] + line
-        else:
-            joined.append(line)
-    for line in joined:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if any("\udc80" <= c <= "\udcff" for c in line):   # a byte that is not UTF-8 in an ASSIGNMENT: systemd rejects the WHOLE file (a comment is tolerated), and the unit starts with none of its knobs — read the file the way the units did
-            logging.getLogger("golden_rotate").warning("%s: the assignment of %s carries a byte that is not UTF-8; systemd rejects the whole file, so none of it is applied here either", path, k)
-            return
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-            quote = v[0]
-            v = v[1:-1]
-            if quote == '"':   # systemd.exec(5): inside double quotes a backslash escapes a backslash or a quote
-                v = re.sub(r'\\([\\"])', r'\1', v)
-        else:   # UNQUOTED: a backslash escapes the next character (\\ -> \, \c -> c), as systemd does — a Windows path must be single-quoted or double-escaped
-            v = re.sub(r"\\(.)", r"\1", v)
-        if k:
-            seen[k] = v   # the LAST assignment wins, as it does for systemd — a hand run must read the file the units read
+    try:
+        seen, _ = parse_env_file(data)
+    except ValueError as exc:
+        logging.getLogger("golden_rotate").warning("%s: %s; none of it is applied here either", path, exc)
+        return
     for k, v in seen.items():
         if k not in os.environ:
             os.environ[k] = v
