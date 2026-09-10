@@ -14,6 +14,12 @@ set -eu
 ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
+# compose lets the PROCESS environment beat the env file, even a set-but-empty variable: a WINVAL_PG_PASSWORD exported into
+# root's shell would make the `up` (run in that same shell) resolve it over compose.env, and the checks below would judge
+# the file while compose used the variable. Refused up front, by name, in every mode
+for v in WINVAL_PG_PASSWORD WINVAL_PG_PASSWORD_URLENC; do
+  if eval "[ -n \"\${$v+x}\" ]"; then echo "compose-env: $v is set in the environment; compose would use it instead of $ETC/compose.env (a set-but-empty one resolves to empty): unset it and rerun" >&2; exit 1; fi
+done
 if ! grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env"; then
   if [ "$mint" != yes ]; then
     echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
@@ -60,24 +66,26 @@ if [ -f "$ETC/compose.env" ]; then
   fi
   rm -f "${TMPDIR:-/tmp}/compose-env.$$"
 fi
-# 'already matches' means BOTH derived lines are in the file exactly: a match on the encoded half alone let a missing, empty or
-# stale plain password line through, and compose then initialised pgdata with its stock fallback while the ingress used the URL's
-HAVE=$(grep '^WINVAL_PG_PASSWORD=\|^WINVAL_PG_PASSWORD_URLENC=' "$ETC/compose.env" 2>/dev/null | sort || true)
-if [ -n "$PWLINE" ] && [ "$HAVE" = "$(printf '%s\n' "$PWLINE" | sort)" ]; then
-  echo "compose-env: $ETC/compose.env already matches winval.env"
-else
-  if [ -n "$PWLINE" ]; then
-    OTHER=$(grep -v '^WINVAL_PG_PASSWORD' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
-    # the file as it WOULD be, read by compose before it is written (or, with --check, instead of being written): a broken
-    # line among the survivors would otherwise surface at the `up`, after the tree moved
+if [ -n "$PWLINE" ]; then
+    # The file as it SHOULD be: every line that is not an assignment of the two password names as compose would read one
+    # (compose's dotenv is last-wins and honours `export ` and leading blanks, so a trailing `export WINVAL_PG_PASSWORD=bogus`
+    # would beat the derived line — dropped, not kept), then the two derived lines. That candidate is read by compose BEFORE
+    # anything is written (or, with --check, instead of being written): a broken survivor line (WINVAL_SPOOL_SIZE="4g) would
+    # otherwise surface at the `up`, after the tree moved. 'already matches' is the file being byte-for-byte that candidate —
+    # a textual match of the two lines alone let an unparseable survivor and a later redefinition through as 'matches'
+    OTHER=$(grep -v '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}WINVAL_PG_PASSWORD\(_URLENC\)\{0,1\}[[:space:]]*=' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
     cand=$(mktemp) || exit 1
     { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } > "$cand"   # printf, not echo: dash's echo would eat the backslashes
     if ! reads=$(compose_reads "$cand") || [ "$reads" != "plain=set urlenc=set" ]; then
       rm -f "$cand"; echo "compose-env: the derived $ETC/compose.env would not be readable by compose (above: a line other than the two password lines?); nothing written" >&2; exit 1
     fi
-    if [ "$check" = yes ]; then rm -f "$cand"; echo "compose-env: --check ok ($ETC/compose.env would be derived from winval.env's URL)"; exit 0; fi
-    install -m 0600 "$cand" "$ETC/compose.env"; rm -f "$cand"   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change
-    echo "compose-env: $ETC/compose.env derived from winval.env's BLASTBOX_DATABASE_URL"
+    if cmp -s "$cand" "$ETC/compose.env" 2>/dev/null; then
+      rm -f "$cand"; echo "compose-env: $ETC/compose.env already matches winval.env"
+    elif [ "$check" = yes ]; then rm -f "$cand"; echo "compose-env: --check ok ($ETC/compose.env would be derived from winval.env's URL)"; exit 0
+    else
+      install -m 0600 "$cand" "$ETC/compose.env"; rm -f "$cand"   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change
+      echo "compose-env: $ETC/compose.env derived from winval.env's BLASTBOX_DATABASE_URL"
+    fi
   elif [ "$hand_written" = yes ]; then
     # winval.env's URL is not the compose's Postgres (another scheme, user or no password) and the operator wrote both lines
     # by hand, as told: theirs, left alone. NOTE the shipped compose wires its ingress to ITS Postgres service and nothing else:
@@ -87,5 +95,4 @@ else
     [ -z "$unparseable" ] || echo "compose-env: compose cannot read $ETC/compose.env: $unparseable" >&2
     echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to $ETC/compose.env by hand (non-empty, as compose reads them: no trailing comment on the line, \$ as \$\$) before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
     exit 1
-  fi
 fi
