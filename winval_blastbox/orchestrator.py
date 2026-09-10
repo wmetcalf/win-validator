@@ -27,6 +27,7 @@ import time
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures.thread as _futures_thread
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -319,7 +320,17 @@ def _poke_loop(ref: "weakref.ref[JobStore]") -> None:
             fails = 0
             continue
         try:
-            pool._adjust_thread_count()   # CPython's own worker start; a submit would leave a queued no-op behind every failure
+            # CPython's own worker start (a submit would leave a queued no-op behind every failure), under the SAME locks submit()
+            # holds and behind the same checks: unlocked, a submit landing during the start read len(_threads)==0 too and a second
+            # worker ran past max_workers (the claim concurrency); and _adjust_thread_count mutates the module's _threads_queues,
+            # which its own comment says the global lock must be held for. At interpreter shutdown, or a shut/broken pool, nothing
+            with pool._shutdown_lock, _futures_thread._global_shutdown_lock:
+                if _futures_thread._shutdown or pool._shutdown or getattr(pool, "_broken", False):
+                    return
+                if getattr(pool, "_threads", ()) or pool._work_queue.empty():   # re-read under the lock: a submit may just have started one
+                    fails = 0
+                    continue
+                pool._adjust_thread_count()
         except Exception as exc:  # noqa: BLE001 — a worker still cannot start: keep trying, say so once
             fails += 1
             if fails == _POKE_MAX:
