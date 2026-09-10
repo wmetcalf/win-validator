@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,7 +85,10 @@ class JobStore:
         self._max_jobs = max_jobs  # bound this in-memory store (non-persistent; see PR follow-up)
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="scan")
-        threading.Thread(target=_poke_loop, args=(self,), name="poke-executor", daemon=True).start()   # see _poke_loop
+        try:   # see _poke_loop; a thread the process cannot start at THIS moment must not fail the startup the poker exists to rescue
+            threading.Thread(target=_poke_loop, args=(weakref.ref(self),), name="poke-executor", daemon=True).start()
+        except RuntimeError as exc:
+            _log.warning("no poker thread (%s): a job queued while no worker can start waits for the next submission", exc)
 
     def create(self, filename: str, engines: list[str]) -> str:
         jid = uuid.uuid4().hex
@@ -296,26 +300,33 @@ _POKE_S = 30.0
 _POKE_MAX = 120   # an hour of failed pokes, then the operator is told once
 
 
-def _poke_loop(store: "JobStore") -> None:
+def _poke_loop(ref: "weakref.ref[JobStore]") -> None:
     """The executor only tries to start a worker on a submit, so a job queued while a worker could NOT start (the process
-    limit) would wait for the next submission. This daemon thread, started with the store, submits a no-op whenever work is
-    queued and no worker is alive, until one starts. It ends with the pool."""
+    limit) would wait for the next submission. This daemon thread, started with the store, asks the executor to start a
+    worker (its own _adjust_thread_count: nothing is queued by the asking) whenever work is queued and no worker is alive,
+    until one starts. It holds the store weakly and ends with it, or with its pool."""
     fails = 0
     while True:
         time.sleep(_POKE_S)
+        store = ref()
+        if store is None:
+            return
         pool = store._pool
+        del store
         if getattr(pool, "_shutdown", False):
             return
         if getattr(pool, "_threads", ()) or pool._work_queue.empty():
             fails = 0
             continue
         try:
-            pool.submit(lambda: None)
+            pool._adjust_thread_count()   # CPython's own worker start; a submit would leave a queued no-op behind every failure
         except Exception as exc:  # noqa: BLE001 — a worker still cannot start: keep trying, say so once
             fails += 1
             if fails == _POKE_MAX:
                 _log.error("no worker thread could be started in %d attempts over %.0f s (%s): the queued jobs wait for the process limit to clear", fails, fails * _POKE_S, exc)
             continue
+        finally:
+            del pool
         _log.info("a worker thread started after %d failed attempt(s); the queued jobs run", fails)
         fails = 0
 
