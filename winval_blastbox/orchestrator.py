@@ -284,7 +284,31 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         alive = len(getattr(_store._pool, "_threads", ()) or ())
         _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run%s", jid, exc,
                      "" if alive else " — once a worker thread can start (none is alive now: the process limit?)")
+        if not alive:   # the executor only tries to start a worker on a submit: with none alive, nothing would run the queued job until
+            # the NEXT submission — poke it with a no-op every _POKE_S until a worker lives (a transient thread limit clears on its own)
+            threading.Timer(_POKE_S, _poke_executor, args=(jid, 1)).start()
     return {"job_id": jid, "status": "queued", "engines": sel}
+
+
+_POKE_S = 30.0
+_POKE_MAX = 120   # an hour of pokes, then the operator is told
+
+
+def _poke_executor(jid: str, attempt: int) -> None:
+    """Re-submit a no-op so the executor tries to start a worker again; the queued job runs on it."""
+    pool = getattr(_store, "_pool", None)
+    if pool is None:
+        return
+    try:
+        pool.submit(lambda: None)
+    except Exception as exc:  # noqa: BLE001 — a worker still cannot start (or the pool is gone): try again, bounded
+        if attempt >= _POKE_MAX or "shutdown" in str(exc).lower():
+            _log.error("job %s: still no worker thread after %d attempts (%s); the job stays queued until the process limit clears and a scan is submitted", jid, attempt, exc)
+            return
+        threading.Timer(_POKE_S, _poke_executor, args=(jid, attempt + 1)).start()
+        return
+    if attempt > 1 or not getattr(pool, "_threads", ()):
+        _log.info("job %s: a worker thread started on attempt %d; the queued job runs", jid, attempt)
 
 
 @app.get("/scan/{job_id}")
