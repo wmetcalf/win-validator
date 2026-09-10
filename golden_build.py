@@ -297,7 +297,12 @@ def build_and_promote(base: str = BASE_QCOW2) -> int:
         gr._rm_candidate(candidate)
         raise
     gr._rm_candidate(candidate)
-    if gr.restart_pool():   # warm workers ran the old golden; without this the build is not "live"
+    try:
+        restarted = gr.restart_pool()   # warm workers ran the old golden; without this the build is not "live"
+    except gr.RestartFailed as exc:   # the promotion stands; a pool left down is a non-zero exit, as the timer answers it
+        logger.error("BUILD PROMOTED but the restart FAILED (%s)", exc)
+        return 1
+    if restarted:
         logger.info("BUILD PROMOTED: reproducible golden built + gated + live")
     else:
         logger.warning("BUILD PROMOTED but NOT live: restart winval-pool-manager to put it in service")

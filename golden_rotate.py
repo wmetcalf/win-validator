@@ -1186,6 +1186,12 @@ def _record_chain(candidate: str) -> None:
         logger.error("chain depth %s is LOST: not recorded for %s, not mirrored at %s, and the sidecar could not be kept either; the count reads %s — write %s to %s by hand once the store accepts writes, or the master rebake is up to %d cycles late", depth, GOLDEN_BASE_DISK, _mirror_file(), chain_length(), depth, _chain_file(), MAX_CHAIN)
 
 
+class RestartFailed(RuntimeError):
+    """restart_pool() could not bring the pool back: systemctl failed, or the unit did not come up after a reset. Distinct from
+    the deliberate no-op (an empty GOLDEN_RESTART_SERVICE, a stopped pool), which returns False: a promotion that succeeded is
+    still a success, but a pool left DOWN by the restart is what the timer's exit code must say."""
+
+
 def restart_pool() -> bool:
     """Re-warm the pool off the freshly promoted golden: warm workers keep the OLD golden's inode
     open (the promotion is a rename) and are only ever snapshot-reverted, never respawned, so
@@ -1204,10 +1210,12 @@ def restart_pool() -> bool:
     else:   # running -> restart; deliberately stopped -> stays stopped (try-restart)
         r = _run(["sudo", "systemctl", "try-restart", svc], 4500)   # >= the unit's TimeoutStopSec (15 min) + TimeoutStartSec (55 min): a client killed at 60 min reported "NOT in service" about a restart still succeeding
     if r.returncode != 0:
-        logger.error("restart of %s FAILED (rc=%s): the pool is still running the OLD golden until it is restarted", svc, r.returncode)
-        return False
+        raise RestartFailed(f"restart of {svc} FAILED (rc={r.returncode}): the pool is still running the OLD golden, or down, until it is restarted by hand")
     active = _run(["sudo", "systemctl", "is-active", svc]).stdout.strip()
-    if active not in ("active", "activating"):   # try-restart of a stopped unit is a successful no-op
+    if active not in ("active", "activating"):
+        if state == "failed":   # a reset + restart that did not come up is a failure, not a stopped unit
+            raise RestartFailed(f"{svc} is {active or 'not active'} after reset-failed + restart: the pool is DOWN until it is started by hand")
+        # try-restart of a stopped unit is a successful no-op
         logger.warning("%s is %s (deliberately stopped?): nothing was restarted; the promoted golden is NOT in service until it is started", svc, active or "not active")
         return False
     return True
@@ -1243,7 +1251,12 @@ def refresh_and_rotate() -> int:
         _rm_candidate(candidate)
         raise
     _rm_candidate(candidate)
-    if restart_pool():
+    try:
+        restarted = restart_pool()
+    except RestartFailed as exc:   # the promotion stands; the pool does not: the timer must say so (non-zero) rather than report a success
+        logger.error("REBAKE PROMOTED but the restart FAILED (%s); %d backup(s) retained", exc, KEEP_N)
+        return 1
+    if restarted:
         logger.info("REBAKE PROMOTED: golden refreshed and in service; %d backup(s) retained", KEEP_N)
     else:
         logger.warning("REBAKE PROMOTED but NOT in service until winval-pool-manager is restarted; %d backup(s) retained", KEEP_N)
@@ -1283,7 +1296,12 @@ def _main(cmd: str, argv: list[str]) -> int:
         # allocation already spent
         rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False, gate_samples=False)
         rotate(argv[1])
-        if restart_pool():   # the retry path is a promoting entry point too: warm workers ran the old golden
+        try:
+            restarted = restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
+        except RestartFailed as exc:   # the promotion stands; a pool left down is a non-zero exit, as the timer answers it
+            logger.error("PROMOTED but the restart FAILED (%s)", exc)
+            return 1
+        if restarted:
             logger.info("PROMOTED: golden refreshed and in service")
         else:   # a deliberate no-op (GOLDEN_RESTART_SERVICE empty, a stopped pool at bring-up) is not a failed promotion: 0, as the timer and build-and-promote answer it
             logger.warning("PROMOTED but NOT in service until winval-pool-manager is restarted")
