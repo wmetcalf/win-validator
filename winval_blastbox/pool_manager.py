@@ -180,7 +180,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
     an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
     refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
-    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist)
+    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist, or the drop exit)
     AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
     and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach.
     The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
@@ -201,7 +201,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         # too); only None is 'no allowlist: ACCEPT'. The drop exit ends its chain in an unconditional DROP (blastbox's rooter): closed already
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
-                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
+                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS, or AUTHENTICODE_EXIT=drop), or run one worker")
     if sysctl == "loadable":
         if Path(BRIDGE_NF_SYSCTL).exists():
             return   # br_netfilter is loaded: the unit's `sysctl -w` sets the value at the next start

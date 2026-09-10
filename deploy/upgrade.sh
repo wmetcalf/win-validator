@@ -195,7 +195,7 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
         if not why: print("ok"); sys.exit(0)
         print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
-    print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS: the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
+    print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS (nor the drop exit): the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
 userinfo = re.compile(r"://[^/@\s]*@")   # any URL userinfo, the whole of it (user AND password), wherever it sits in a value

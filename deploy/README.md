@@ -186,8 +186,8 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   host-destined traffic except established, DHCP and gated DNS, and `AUTHENTICODE_BLOCK_INTERNAL=1` drops the
   docker-published 8099 in FORWARD. Worker-to-worker traffic on the bridge is switched, not routed: it meets the
   FORWARD rules only with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe br_netfilter`), and is
-  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1` or a port allowlist. With more than one worker the pool-manager
-  refuses to start unless both are in place (block_internal or a port allowlist, AND the sysctl at 1). The golden's
+  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1`, a port allowlist, or the `drop` exit (whose chain ends in DROP). With more
+  than one worker the pool-manager refuses to start unless both are in place (one of those three, AND the sysctl at 1). The golden's
   own rule for the agent port admits the pool-manager's address alone (learned from the libvirt network at bake
   time; `AUTHENTICODE_AGENT_CALLER` overrides it, `AUTHENTICODE_LIBVIRT_NETWORK` names another network) — a golden
   baked before this version opens the port to any source until it is rebaked.
