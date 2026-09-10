@@ -146,7 +146,15 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if workers < 2: print("ok"); sys.exit(0)
-    if "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"): print("ok"); sys.exit(0)   # a SET allowlist, even a closed one, drops siblings
+    if "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist, even a closed one, drops siblings
+        # the kernel half, as the restart will find it: the unit's ExecStartPre loads br_netfilter and sets the sysctl (both with `-`, so a host
+        # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
+        import os, subprocess
+        if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): print("ok"); sys.exit(0)
+        try: loadable = subprocess.run(["modprobe", "-n", "-q", "br_netfilter"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError): loadable = False
+        if loadable: print("ok"); sys.exit(0)
+        print(f"refuse: br_netfilter is not loaded and cannot be (modprobe -n br_netfilter failed): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
     print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS: the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
@@ -162,7 +170,7 @@ PY
 }
 
 # design change #8, the half an env file decides, read the way the pool-manager reads it (the helper mirrors its rules): with --restart
-# a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half is the unit's own ExecStartPre)
+# a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half as the unit's ExecStartPre will leave it)
 verdict=$(envfile_py egress "$ETC/winval.env")
 case "$verdict" in ok) ;; *)   # unset: / malformed: / refuse: — each names its remedy
   if [ "$restart" = yes ]; then echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi

@@ -210,8 +210,8 @@ def authenticode_spec() -> VmWorkerSpec:
             block_internal=parse_strict_bool(os.environ.get("AUTHENTICODE_BLOCK_INTERNAL")),
         )
         routing = ExitRouting(
-            vpn_table=os.environ.get("AUTHENTICODE_VPN_TABLE", "vpn"),
-            vpn_tun=os.environ.get("AUTHENTICODE_VPN_TUN", "tun0"),
+            vpn_table=(os.environ.get("AUTHENTICODE_VPN_TABLE") or "").strip() or "vpn",   # stripped like every routing knob: whitespace-only is unset (the default)
+            vpn_tun=(os.environ.get("AUTHENTICODE_VPN_TUN") or "").strip() or "tun0",
             fakenet_addr=(os.environ.get("AUTHENTICODE_FAKENET_ADDR") or "").strip() or None,
             gateway=(os.environ.get("AUTHENTICODE_GATEWAY") or "").strip() or None,
             leg=(os.environ.get("AUTHENTICODE_LEG") or "").strip() or None,

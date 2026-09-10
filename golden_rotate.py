@@ -553,9 +553,10 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
         validate_egress_posture(authenticode_spec())
         from winval_blastbox.pool_manager import _refuse_open_egress
-        _refuse_open_egress(pool_size(), sysctl=False)   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open sibling
-        # traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the knobs were
-        # fixed. The sysctl half is the unit's ExecStartPre's to apply on that very restart, so it is not judged here
+        _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
+        # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
+        # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
+        # cannot load br_netfilter at all is refused here
     except (ValueError, RuntimeError) as exc:
         raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     except SystemExit as exc:

@@ -26,6 +26,7 @@ import os
 import shutil
 import signal
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -81,9 +82,10 @@ _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authentico
 
 
 BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
+BRIDGE_NF_MODPROBE = ("modprobe", "-n", "-q", "br_netfilter")   # a dry run: can the unit's ExecStartPre load the module at the next start?
 
 
-def _refuse_open_egress(workers: int, *, sysctl: bool = True) -> None:
+def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
     an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
     refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
@@ -91,8 +93,10 @@ def _refuse_open_egress(workers: int, *, sysctl: bool = True) -> None:
     AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
     and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach.
     The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
-    outage); it passes sysctl=False because the unit's own ExecStartPre loads br_netfilter and sets the sysctl on every
-    start, so the kernel half is judged where it is applied, here."""
+    outage). sysctl="live" reads the sysctl as it is now (the manager's own start, after the unit's ExecStartPre applied
+    it); sysctl="loadable" is for a caller whose RESTART will apply it: it passes when the sysctl exists (the unit sets it)
+    or br_netfilter can be loaded (a modprobe dry run: the unit loads it), and refuses on the host the unit's own comment
+    names — one that cannot load the module, where ExecStartPre's `-` lets the start reach the manager and refuse."""
     raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
     if not raw:
         raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
@@ -106,7 +110,18 @@ def _refuse_open_egress(workers: int, *, sysctl: bool = True) -> None:
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
                          "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
-    if not sysctl:
+    if sysctl == "loadable":
+        if Path(BRIDGE_NF_SYSCTL).exists():
+            return   # br_netfilter is loaded: the unit's `sysctl -w` sets the value at the next start
+        try:
+            loadable = subprocess.run(BRIDGE_NF_MODPROBE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            loadable = False
+        if not loadable:
+            raise SystemExit(f"br_netfilter is not loaded and cannot be ({' '.join(BRIDGE_NF_MODPROBE)} failed): the pool-manager's next start "
+                             f"would refuse with {workers} workers on one bridge (the FORWARD rules never see worker-to-worker frames, so "
+                             "AUTHENTICODE_BLOCK_INTERNAL cannot drop them). Install the module (a kernel with CONFIG_BRIDGE_NETFILTER), "
+                             "or run one worker")
         return
     try:
         enabled = Path(BRIDGE_NF_SYSCTL).read_text().strip() == "1"
