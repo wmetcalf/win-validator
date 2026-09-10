@@ -59,12 +59,13 @@ compose_reads() {
 # are checked the same way before the write)
 hand_written=no; unparseable=""
 if [ -f "$ETC/compose.env" ]; then
-  if reads=$(compose_reads "$ETC/compose.env" 2>"${TMPDIR:-/tmp}/compose-env.$$"); then
+  # compose's parse error quotes the offending value verbatim (a password with an unbalanced quote): captured in a variable,
+  # never a file — a predictable name under /tmp, created 0644 by root's umask, held the secret for the length of the call
+  if reads=$(compose_reads "$ETC/compose.env" 2>&1); then
     [ "$reads" = "plain=set urlenc=set" ] && hand_written=yes
   else
-    unparseable=$(cat "${TMPDIR:-/tmp}/compose-env.$$")
+    unparseable=$reads
   fi
-  rm -f "${TMPDIR:-/tmp}/compose-env.$$"
 fi
 if [ -n "$PWLINE" ]; then
     # The file as it SHOULD be: every line that is not an assignment of the two password names as compose would read one
