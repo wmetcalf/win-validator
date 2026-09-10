@@ -165,7 +165,7 @@ except ImportError:
     m = re.fullmatch(r"(?:(?P<user>" + ATOM + r"*)(?::(?P<pw>(?:" + ATOM + r"|:)*))?@)?(?P<host>(?:[A-Za-z0-9._-]|%[0-9A-Fa-f]{2})+)(?::(?P<port>[0-9]+))?(?P<path>/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*)?(?:\?(?P<query>" + KEY + r"=" + VAL + r"*(?:&" + KEY + r"=" + VAL + r"*)*))?", tail)
     if url.startswith(("postgresql:", "postgres:")) and m is None:
         sys.exit("without libpq to judge it (this host's python has no psycopg), this URL is derived only in the one shape both read alike: user:password@host:port/dbname?key=value..., the password and every value percent-encoded except letters, digits and -._~!$&'()*+,;= (a raw # ? [ ] space or a bare % is refused), the host a name or IPv4 literal, each query key one of libpq's own keywords; rewrite the URL to that shape")
-    if m is not None:
+    if m is not None and url.startswith(("postgresql:", "postgres:")):   # scheme-gated like the grammar refusal: a redis:// URL is the hand-written branch's, never judged here
         def dec(v):   # %XX only (libpq never reads '+' as a space), and STRICT: unquote's default replaced a byte that is not UTF-8 (%FF) with U+FFFD and wrote that as the password, while libpq sends the byte — the tiers split on a green --check
             try:
                 return unquote(v, errors="strict")
@@ -175,8 +175,10 @@ except ImportError:
         for part in (m.group("query") or "").split("&"):
             if part:
                 k, v = part.split("=", 1); q[k] = dec(v)
-        user = q.get("user", dec(m.group("user")) if m.group("user") is not None else None)
-        pw = q.get("password", dec(m.group("pw")) if m.group("pw") is not None else None)
+        # the userinfo halves are decoded only when the query does not override them: as dict.get defaults they were decoded
+        # eagerly, and a %FF in a userinfo password that ?password= overrides refused what libpq (and the psycopg tier) accept
+        user = q["user"] if "user" in q else (dec(m.group("user")) if m.group("user") is not None else None)
+        pw = q["password"] if "password" in q else (dec(m.group("pw")) if m.group("pw") is not None else None)
 if not (url.startswith("postgresql:") or url.startswith("postgres:")) or user != "winval" or not pw:
     sys.exit(0)   # not the compose's Postgres: the hand-written branch decides
 if any(ord(c) < 32 or ord(c) == 127 for c in pw):
