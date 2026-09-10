@@ -139,7 +139,7 @@ fi
 [ "$mint" = yes ] && [ -z "$URL" ] && URL=$(db_url)   # the line --mint just wrote
 PWLINE=$(URL="$URL" "$PY" - <<'PY'
 import json, os, sys
-from urllib.parse import urlsplit, unquote, quote, parse_qs
+from urllib.parse import urlsplit, unquote, quote
 # the password AS LIBPQ READS THE URL (the pool-manager connects through psycopg): a query parameter overrides the userinfo
 # (postgresql://winval:AAAA@h/db?password=BBBB connects with BBBB), so psycopg's own parser judges when the venv carries it,
 # and the fallback applies the same override by hand
@@ -153,8 +153,11 @@ try:
 except ImportError:
     u = urlsplit(url)
     if u.scheme.startswith("postgres"):
-        q = parse_qs(u.query, keep_blank_values=True)
-        user = (q.get("user") or [u.username])[-1]; pw = (q.get("password") or [unquote(u.password) if u.password else None])[-1]
+        q = {}   # by hand, %XX only: libpq's conninfo_uri_decode never reads '+' as a space, parse_qs (form encoding) does
+        for part in u.query.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1); q[unquote(k)] = unquote(v)
+        user = q.get("user", u.username); pw = q.get("password", unquote(u.password) if u.password else None)
 if not (url.startswith("postgresql:") or url.startswith("postgres:")) or user != "winval" or not pw:
     sys.exit(0)   # not the compose's Postgres: the hand-written branch decides
 if any(ord(c) < 32 or ord(c) == 127 for c in pw):
