@@ -17,6 +17,8 @@ case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage
 # compose lets the PROCESS environment beat the env file, even a set-but-empty variable: a WINVAL_PG_PASSWORD exported into
 # root's shell would make the `up` (run in that same shell) resolve it over compose.env, and the checks below would judge
 # the file while compose used the variable. Refused up front, by name, in every mode
+# compose itself reads the env file below; a docker without the compose plugin (or none at all) is named here, not blamed on the file
+docker compose version >/dev/null 2>&1 || { echo "compose-env: 'docker compose' is not usable here ($(docker compose version 2>&1 | head -1)); the compose up needs it and so does reading $ETC/compose.env the way compose does" >&2; exit 1; }
 for v in WINVAL_PG_PASSWORD WINVAL_PG_PASSWORD_URLENC; do
   if eval "[ -n \"\${$v+x}\" ]"; then echo "compose-env: $v is set in the environment; compose would use it instead of $ETC/compose.env (a set-but-empty one resolves to empty): unset it and rerun" >&2; exit 1; fi
 done
@@ -73,12 +75,14 @@ if [ -n "$PWLINE" ]; then
     # would beat the derived line — dropped, not kept), then the two derived lines. That candidate is read by compose BEFORE
     # anything is written (or, with --check, instead of being written): a broken survivor line (WINVAL_SPOOL_SIZE="4g) would
     # otherwise surface at the `up`, after the tree moved. 'already matches' is the file being byte-for-byte that candidate —
-    # a textual match of the two lines alone let an unparseable survivor and a later redefinition through as 'matches'
+    # a textual match of the two lines alone let an unparseable survivor and a later redefinition through as 'matches'.
+    # Line-oriented: compose's dotenv also allows a MULTI-LINE quoted value, and a line inside one spelled like an assignment
+    # of the two names would be dropped from that value — compose.env carries single-line knobs (README); not supported
     OTHER=$(grep -v '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}WINVAL_PG_PASSWORD\(_URLENC\)\{0,1\}[[:space:]]*=' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
     cand=$(mktemp) || exit 1
     { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } > "$cand"   # printf, not echo: dash's echo would eat the backslashes
     if ! reads=$(compose_reads "$cand") || [ "$reads" != "plain=set urlenc=set" ]; then
-      rm -f "$cand"; echo "compose-env: the derived $ETC/compose.env would not be readable by compose (above: a line other than the two password lines?); nothing written" >&2; exit 1
+      rm -f "$cand"; echo "compose-env: compose could not read the derived $ETC/compose.env (its message above: a broken line among the other lines, or a compose that cannot run); nothing written" >&2; exit 1
     fi
     if cmp -s "$cand" "$ETC/compose.env" 2>/dev/null; then
       rm -f "$cand"; echo "compose-env: $ETC/compose.env already matches winval.env"
