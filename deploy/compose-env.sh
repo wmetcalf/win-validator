@@ -35,8 +35,18 @@ if ! grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env"; then
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" >> "$ETC/winval.env"
   echo "compose-env: minted a database password into $ETC/winval.env (greenfield)"
 fi
-db_url() {   # the value as the service reads it: systemd's EnvironmentFile (and golden_rotate's loader) accept a value in matching double or single quotes — urlsplit does not, and a quoted URL derived the wrong password
-  grep '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" | tail -1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+db_url() {   # the value as the SERVICE reads it — systemd's EnvironmentFile parses the value with POSIX shell rules (systemd.exec): matching
+  # double or single quotes are stripped, and backslash escapes are processed (\\ \" \$ \` inside double quotes; any \x unquoted;
+  # none in single quotes) — a quoted URL derived the wrong password, and so did one with a backslash in it (systemd read a\\b as a\b)
+  grep '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" | tail -1 | cut -d= -f2- | python3 -c "$(cat <<'PY'
+import re, sys
+v = sys.stdin.read().strip()
+if len(v) >= 2 and v[0] == v[-1] == '"': v = re.sub(r'\\(["\\$`])', r'\1', v[1:-1])
+elif len(v) >= 2 and v[0] == v[-1] == "'": v = v[1:-1]
+else: v = re.sub(r'\\(.)', r'\1', v)
+print(v)
+PY
+)"
 }
 # the two lines compose needs, derived from the URL. The password is URL-DECODED (a percent-encoded '@' or '#' in the URL
 # is the literal char Postgres must be initialised with; both clients decode it the same way). Two forms: the literal
