@@ -127,9 +127,17 @@ UI + API at <http://localhost:8099/>.
 
 ## Upgrading an existing deployment
 
-The bring-up above is greenfield and deliberately keeps an existing `/etc/winval/winval.env`. Coming from an
-earlier checkout, these change meaning or behaviour under a preserved env file — read them before the first
-restart:
+The bring-up above is greenfield: its `git clone` fails on a deployed host and its unit copies re-install what
+is already there. Upgrade in place instead — and read the list below before the first restart, because the
+preserved `/etc/winval/winval.env` changes meaning under this version:
+
+```bash
+cd /opt/win-validator && sudo git fetch --all && sudo git checkout <branch-or-tag> && sudo git pull --ff-only
+sudo /opt/win-validator/.venv/bin/pip install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+sudo diff /etc/winval/winval.env deploy/winval.env.example   # every knob named below; new knobs have defaults
+sudo install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl restart winval-pool-manager   # the first start may wait behind a rotation's lock, then re-copy the RAM base (below)
+```
 
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
@@ -137,8 +145,8 @@ restart:
   by the unit's uid (libvirt's DAC driver usually leaves it owned by the qemu user) is discarded and re-copied
   from `GOLDEN_BASE_DISK` — up to 30 min behind a rotation's lock plus the copy, inside `TimeoutStartSec=55min`.
   With no disk twin the start refuses rather than replace the only golden with the agent-less master: promote a
-  golden to `GOLDEN_BASE_DISK` first. Re-install both unit files (`install -m 0644 deploy/*.service /etc/systemd/system/`)
-  and reload: the code moved to `/opt/win-validator`.
+  golden to `GOLDEN_BASE_DISK` first. The unit files must be re-installed (the recipe above): the code moved to
+  `/opt/win-validator`, and the pool-manager unit must run as root (its pre-step owns the lock and the RAM base).
 - **A preserved env file can refuse the pool-manager at start where it used to run**: `AUTHENTICODE_WARM_DIR` or
   `AUTHENTICODE_SMOKE_SAMPLE` set to a path that does not exist (the old example pointed at a home directory the
   `/opt` move invalidates) fails the start by name; `AUTHENTICODE_EGRESS_PORTS` present but blank is now a CLOSED

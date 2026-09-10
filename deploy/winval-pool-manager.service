@@ -45,8 +45,10 @@ Requires=libvirtd.service
 
 [Service]
 Type=simple
-# Needs libvirt + iptables. Run as root (simplest) or a user in the libvirt group with passwordless
-# sudo for virsh/iptables — LibvirtVmConfig.sudo prefixes those, so root makes the sudo a no-op.
+# Needs libvirt + iptables, and ROOT: the ExecStartPre below creates and locks /run/winval-golden-rotate.lock
+# (0600, shared with the root-run rotation) and owns the RAM base in /dev/shm; a non-root User= fails the
+# pre-step with 'Permission denied' and latches the unit failed in ~4 min. (LibvirtVmConfig.sudo prefixes
+# virsh/iptables, which root makes a no-op.)
 User=root
 # The checkout (or a symlink to it) at a canonical path — nothing host-specific in this unit.
 WorkingDirectory=/opt/win-validator
