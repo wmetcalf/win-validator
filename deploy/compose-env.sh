@@ -151,25 +151,26 @@ try:
     except Exception:
         user = pw = None
 except ImportError:
-    # urlsplit and libpq part ways on a RAW '@' (last vs first), a raw space (refused vs taken), a raw '[' (a traceback), a
-    # raw '#' (a fragment urlsplit strips BEFORE anything can be judged; a password byte to libpq: the tiers split silently)
-    # and a bare '%' (an escape to urlsplit's lenient unquote, a refusal to libpq). Judged on the RAW text after the scheme,
-    # before urlsplit sees it: without libpq to judge, only unreserved characters, sub-delims, the structural @ / ? and
-    # %XX escapes are derived at all
+    # No libpq to judge: the URL is accepted only when it fits ONE strict grammar whose every part libpq and this code read the
+    # same way — user[:password]@host[:port][/db][?key=value[&key=value]...], with userinfo and values made of unreserved
+    # characters, sub-delims and %XX escapes, host a name or IPv4 literal. Everything else (a raw # ? [ ] space, a bare %, a
+    # second @, a query part that is not key=value, an IPv6 literal, a byte outside printable ASCII) is a named refusal:
+    # urlsplit read each of those differently from libpq (a fragment stripped, a query split at the first ?, a part without
+    # '=' dropped, '+' as a space) and wrote a truncated or different secret, or exited 0 with nothing written
     import re
-    tail = url.split("://", 1)[1] if "://" in url else url
-    if re.search(r"[#\[\]\s]", tail) or re.search(r"%(?![0-9A-Fa-f]{2})", tail) or tail.count("@") > 1 or not re.fullmatch(r"[\x21-\x7e]*", tail):
-        sys.exit("the URL carries a raw #, @, space, [ ], a bare % or a byte outside printable ASCII that libpq and this fallback would read differently; percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
-    try:
-        u = urlsplit(url)
-    except ValueError:
-        sys.exit("the URL cannot be split: percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
-    if u.scheme.startswith("postgres"):
-        q = {}   # by hand, %XX only: libpq's conninfo_uri_decode never reads '+' as a space, parse_qs (form encoding) does
-        for part in u.query.split("&"):
-            if "=" in part:
-                k, v = part.split("=", 1); q[unquote(k)] = unquote(v)
-        user = q.get("user", unquote(u.username) if u.username else None); pw = q.get("password", unquote(u.password) if u.password else None)
+    tail = url.split("://", 1)[1] if "://" in url else ""
+    ATOM = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})"
+    VAL = r"(?:[A-Za-z0-9._~!$'()*+,;:@/-]|%[0-9A-Fa-f]{2})"
+    m = re.fullmatch(r"(?:(?P<user>" + ATOM + r"*)(?::(?P<pw>(?:" + ATOM + r"|:)*))?@)?(?P<host>[A-Za-z0-9.-]+)(?::(?P<port>[0-9]+))?(?P<path>/[A-Za-z0-9._~-]*)?(?:\?(?P<query>[a-z_]+=" + VAL + r"*(?:&[a-z_]+=" + VAL + r"*)*))?", tail)
+    if url.startswith(("postgresql:", "postgres:")) and m is None:
+        sys.exit("the URL does not fit the one shape this host can judge without libpq (user:password@host:port/db?key=value, everything percent-encoded but letters, digits and -._~!$&'()*+,;=): a raw # ? [ ] space, a bare %, a second @ or a query part without '=' would be read differently by libpq; percent-encode it (this host's python has no psycopg to judge it)")
+    if m is not None:
+        q = {}
+        for part in (m.group("query") or "").split("&"):
+            if part:
+                k, v = part.split("=", 1); q[k] = unquote(v)   # %XX only: libpq never reads '+' as a space
+        user = q.get("user", unquote(m.group("user")) if m.group("user") is not None else None)
+        pw = q.get("password", unquote(m.group("pw")) if m.group("pw") is not None else None)
 if not (url.startswith("postgresql:") or url.startswith("postgres:")) or user != "winval" or not pw:
     sys.exit(0)   # not the compose's Postgres: the hand-written branch decides
 if any(ord(c) < 32 or ord(c) == 127 for c in pw):
