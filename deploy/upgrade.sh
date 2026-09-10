@@ -168,8 +168,16 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
                 for w in own[0].split()[2:]:
                     if w.startswith("#"): break
                     words.append(w)
-                norm = lambda w: w.replace("-", "_")
-                if not any(w in ("--ignore-install", "-i") and [norm(x) for x in words[i + 1:i + 2]] == ["br_netfilter"] for i, w in enumerate(words)): why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+                first = []   # the idiom, and nothing else: the FIRST simple command a modprobe with --ignore-install/-i and the module (pool_manager._is_self_load)
+                for w in words:
+                    if w in ("&&", "||", ";", "|"): break
+                    first.append(w)
+                prog = first[0] if first else ""; flags = [w for w in first[1:] if w.startswith("-")]; args = [w for w in first[1:] if not w.startswith("-")]
+                name = os.path.basename(args[0]) if len(args) == 1 else ""
+                for suf in (".zst", ".xz", ".gz", ".ko"):
+                    if name.endswith(suf): name = name[:-len(suf)]
+                idiom = bool(first) and os.path.basename(prog) == "modprobe" and ("/" not in prog or os.access(prog, os.X_OK)) and any(f in ("--ignore-install", "-i") for f in flags) and name.replace("-", "_") == "br_netfilter"
+                if not idiom: why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]}); only the plain self-load idiom is read as loadable"
                 else:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
                     rc2, plan2 = mp("-n", "-v", "--ignore-install", "br_netfilter")
                     if rc2 != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan2): why = f"the self-load directive's own modprobe --ignore-install br_netfilter would insert nothing (rc {rc2}: {' | '.join(plan2)[:200] or 'no output'})"

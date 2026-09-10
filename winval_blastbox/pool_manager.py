@@ -90,6 +90,34 @@ def _modprobe(*args: str) -> tuple[int, list[str]]:
     return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
 
 
+def _is_self_load(words: list[str]) -> bool:
+    """Is an install directive's command the self-load idiom — `modprobe --ignore-install br_netfilter`, and nothing else before it?
+    Only the FIRST simple command is judged (up to &&, ||, ; or |: a sysctl chained after the load is the documented shape); its
+    first word must be modprobe (a bare name, or an existing executable path ending in it), its other words flags, one of them
+    --ignore-install or -i, and its one non-flag the module (a bare name, or a .ko path; kmod reads br-netfilter as br_netfilter).
+    A directive that merely CONTAINS those words (`test -f /etc/allow && modprobe --ignore-install br_netfilter`, an echo of a
+    policy) is not the idiom: what it runs cannot be told from its text, so it is refused."""
+    first: list[str] = []
+    for w in words:
+        if w in ("&&", "||", ";", "|"):
+            break
+        first.append(w)
+    if not first:
+        return False
+    prog = first[0]
+    if os.path.basename(prog) != "modprobe" or ("/" in prog and not os.access(prog, os.X_OK)):
+        return False
+    flags = [w for w in first[1:] if w.startswith("-")]
+    args = [w for w in first[1:] if not w.startswith("-")]
+    if not any(f in ("--ignore-install", "-i") for f in flags) or len(args) != 1:
+        return False
+    name = os.path.basename(args[0])
+    for suffix in (".zst", ".xz", ".gz", ".ko"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name.replace("-", "_") == "br_netfilter"
+
+
 def _bridge_nf_loadable() -> tuple[bool, str]:
     """Would `modprobe br_netfilter` insert the module? Its dry run's exit code says nothing: with an `install br_netfilter /bin/false`
     directive (the one way to make a module unloadable; `blacklist` never stops an explicit modprobe) `-n` exits 0 for a module it
@@ -97,7 +125,7 @@ def _bridge_nf_loadable() -> tuple[bool, str]:
     the module would be inserted, `install <command>` when a directive replaces an insertion — but WITHOUT the module's name, so whose
     directive it is cannot be told from the plan; the effective configuration (`modprobe -c`) names it. Loadable, then: the dry run
     exits 0, and EITHER br_netfilter has an install directive that is the self-load idiom man 5 modprobe.d documents (`modprobe
-    --ignore-install br_netfilter`, judged on the command's words up to a comment — kmod prints a trailing comment sh would drop —
+    --ignore-install br_netfilter` as its first simple command, see _is_self_load — kmod prints a trailing comment sh would drop —
     and then on that command's own dry run, which must insert br_netfilter.ko: the directive's text does not say the module exists),
     OR it has none, the plan inserts br_netfilter.ko and carries no install line at all (a dependency's directive: whether the load
     survives it cannot be told from the plan, so it is refused). What only the real insertion can tell (a lockdown/signature refusal,
@@ -116,9 +144,8 @@ def _bridge_nf_loadable() -> tuple[bool, str]:
             if w.startswith("#"):
                 break
             words.append(w)
-        norm = lambda w: w.replace("-", "_")   # kmod prints the directive's NAME normalised but its arguments verbatim: br-netfilter is the module
-        if not any(w in ("--ignore-install", "-i") and [norm(x) for x in words[i + 1:i + 2]] == ["br_netfilter"] for i, w in enumerate(words)):
-            return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+        if not _is_self_load(words):
+            return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]}); only the plain self-load idiom is read as loadable"
         try:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
             rc, plan = _modprobe("-n", "-v", "--ignore-install", "br_netfilter")
         except (OSError, subprocess.SubprocessError) as exc:
