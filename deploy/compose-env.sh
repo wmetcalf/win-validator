@@ -16,7 +16,7 @@ ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
 # cwd: root ran <cwd>/.venv/bin/python, a shim planted in any directory an operator happened to be in. Read from a pipe
 # (upgrade.sh's `sh -s`, run from the tree it cd'd into) the cwd IS the tree
 case "$0" in */*) TREE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd) ;; *) TREE=$PWD ;; esac   # readlink -f: a symlink to the script from $HOME/bin resolved to $HOME and found a planted ~/.venv
-PY=python3; [ -x "$TREE/.venv/bin/python" ] && PY="$TREE/.venv/bin/python"
+PY=python3; [ -x "$TREE/.venv/bin/python" ] && [ "$(stat -c %u "$TREE/.venv/bin/python" 2>/dev/null)" = "$(id -u)" ] && PY="$TREE/.venv/bin/python"   # and only a venv the invoking user owns: piped in (`sh -s`) from a stranger's writable cwd, a planted ./.venv ran as root
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
 if [ -e "$ETC/compose.env" ] && [ ! -f "$ETC/compose.env" ]; then echo "compose-env: $ETC/compose.env is not a regular file (a directory? install would write INTO it and report success)" >&2; exit 1; fi
@@ -68,6 +68,9 @@ if [ -z "$URL" ]; then
   fi
   PW=$(openssl rand -hex 16)
   [ -z "$(tail -c1 "$ETC/winval.env")" ] || echo >> "$ETC/winval.env"   # a last line without its newline: the URL was glued onto that knob, and the SECOND --mint then succeeded over the corrupted knob
+  if [ -s "$ETC/winval.env" ] && tail -1 "$ETC/winval.env" | "$PY" -c 'import sys; raw = sys.stdin.read().rstrip("\n"); sys.exit(0 if not raw.lstrip().startswith("#") and (len(raw) - len(raw.rstrip("\\"))) % 2 == 1 else 1)'; then
+    echo "compose-env: the last line of $ETC/winval.env ends in a backslash, a continuation to every reader: the minted URL would be swallowed into that knob (and a second --mint would then mint a second password); end that line first" >&2; exit 1
+  fi
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" >> "$ETC/winval.env"
   echo "compose-env: minted a database password into $ETC/winval.env (greenfield)"
 fi
@@ -115,7 +118,14 @@ PY
   else
     # compose quotes the token it choked on (Go-quoted: the password, once a survivor's open quote swallowed the password
     # line, or the operator's own hand-written one): every quoted segment is elided before the message leaves this script
-    MSG="$(cat "$d/err")" "$PY" -c 'import os, re, sys; sys.stderr.write(re.sub(r"\"(?:\\\\.|[^\"\\\\])*\"?", "\"<elided>\"", os.environ["MSG"]) + "\n")'
+    MSG="$(cat "$d/err")" "$PY" - <<'PY'
+import os, re, sys
+# compose echoes the token it choked on in the OPERATOR'S quote character (a single quote too), or after 'in variable name':
+# everything from the first quote of either kind, backtick or colon past the line number is dropped, whatever the shape
+for line in os.environ["MSG"].splitlines():
+    m = re.match(r"^(.*?line \d+: [A-Za-z ]*?)(?=[\"'`:]|$)", line)
+    sys.stderr.write((m.group(1).rstrip() + " <elided>" if m else re.sub(r"[\"'`].*$", "<elided>", line)) + "\n")
+PY
     rm -rf "$d"; return 1
   fi
 }

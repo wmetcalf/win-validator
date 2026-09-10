@@ -53,9 +53,9 @@ joined = []
 for line in lines:
     if joined and continues(joined[-1]): joined[-1] = joined[-1][:-1] + line
     else: joined.append(line)
-pat = re.compile(r"^(\s*)(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*).*$")   # blanks around '=' are honoured by the readers (KEY = value): redacted too   # _KEY alone hid AUTHENTICODE_SSH_KEY, a path this branch moved
+pat = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*).*$")   # blanks around '=' honoured (KEY = value); _KEY alone hid AUTHENTICODE_SSH_KEY; UNANCHORED: a secret assignment joined onto another value by a continuation is redacted where it lands
 for line in joined:
-    sys.stdout.buffer.write((pat.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", line) + "\n").encode("utf-8", "surrogateescape"))   # bytes out as bytes in: a stray non-UTF-8 byte must not end the diff in a traceback
+    sys.stdout.buffer.write((pat.sub(lambda m: m.group(1) + "<redacted>", line, count=1) + "\n").encode("utf-8", "surrogateescape"))   # bytes out as bytes in: a stray non-UTF-8 byte must not end the diff in a traceback
 PY
 }
 example=$(mktemp) && redacted deploy/winval.env.example > "$example" && { redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
