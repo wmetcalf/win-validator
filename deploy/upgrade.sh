@@ -2,11 +2,13 @@
 # In-place upgrade of a deployed host: `sudo sh deploy/upgrade.sh <branch> [--restart]`.
 # A SCRIPT, not a paste: `set -e` and every refusal stay in this process, never in the operator's shell.
 # Every refusal happens BEFORE the deployed tree moves: the tree is live (the units run from it, the weekly
-# rotation imports from it), so a refused upgrade must leave HEAD where it was. Refuses on a dirty tree, on an
-# argument that is not a branch on origin (tags are not supported: deploy a branch), and on a local branch that
-# is not an ancestor of origin's tip (local commits AHEAD of origin fast-forward "successfully" and would build
-# the untrusted-facing ingress and install root units from an unreviewed tree). It never mints a database
-# password: that is the bring-up's, and a fresh one would lock both tiers out of the initialised volume.
+# rotation imports from it), so a refused upgrade must leave HEAD where it was. The five refusals: a dirty tree;
+# a compose.env that could not be derived (compose-env.sh --check, every rule of it, nothing written); an argument
+# that is not a branch on origin (tags are not supported: deploy a branch); a detached HEAD on no origin branch
+# (the checkout would orphan it); a local branch that is not an ancestor of origin's tip (local commits AHEAD of
+# origin fast-forward "successfully" and would build the untrusted-facing ingress and install root units from an
+# unreviewed tree). It never mints a database password: that is the bring-up's, and a fresh one would lock both
+# tiers out of the initialised volume.
 # Without --restart it stops before anything restarts and prints what --restart does: restarting both tiers
 # drops in-flight uploads and fails every RUNNING job as orphaned (clients resubmit) — drain first if that matters.
 set -eu
@@ -21,8 +23,8 @@ git fetch --prune origin   # branches only (--tags fails for good once an upstre
 if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
   echo "upgrade.sh: '$branch' is not a branch on origin now (deleted upstream after a merge? then deploy the branch it was merged into; a tag? tags are not supported); the tree was not moved" >&2; exit 1
 fi
-if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && ! git merge-base --is-ancestor HEAD "refs/remotes/origin/$branch"; then
-  echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD) with commits that are not on origin/$branch; they would be orphaned by the checkout — branch or discard them first; the tree was not moved" >&2; exit 1
+if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
+  echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
 fi
 if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
   echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1

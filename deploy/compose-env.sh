@@ -26,7 +26,14 @@ db_url() {   # the value as the service reads it: systemd's EnvironmentFile (and
   grep '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" | tail -1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 WANT_URLENC=$(db_url | python3 -c 'import sys; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); print(quote(unquote(u.password), safe="")) if u.password else None')
-if ! test -f "$ETC/compose.env" || [ "$(sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' "$ETC/compose.env")" != "$WANT_URLENC" ]; then   # a MISSING compose.env is derived too
+HAVE_URLENC=$(sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p' "$ETC/compose.env" 2>/dev/null | tail -1)
+# both lines present with NON-EMPTY values: what a hand-written compose.env must carry (an empty value resolves to compose's
+# 'winval' fallback and locks the ingress out; and an empty WANT_URLENC from a password-less URL used to compare equal to a
+# MISSING line, so a pre-URLENC compose.env was reported as 'already matches' and compose then hard-failed after the upgrade)
+hand_written=no; grep -q '^WINVAL_PG_PASSWORD=..*' "$ETC/compose.env" 2>/dev/null && grep -q '^WINVAL_PG_PASSWORD_URLENC=..*' "$ETC/compose.env" 2>/dev/null && hand_written=yes
+if [ -n "$WANT_URLENC" ] && [ "$HAVE_URLENC" = "$WANT_URLENC" ]; then
+  echo "compose-env: $ETC/compose.env already matches winval.env"
+else
   # the password is URL-DECODED (a percent-encoded '@' or '#' in the URL is the literal char Postgres must be initialised
   # with; both clients decode it the same way). Two forms: the literal password (written as a JSON/double-quoted string —
   # compose's env file understands \" and \\ inside double quotes — with '$' as '$$', because compose interpolates its env
@@ -37,14 +44,13 @@ if ! test -f "$ETC/compose.env" || [ "$(sed -n 's/^WINVAL_PG_PASSWORD_URLENC=//p
     OTHER=$(grep -v '^WINVAL_PG_PASSWORD' "$ETC/compose.env" 2>/dev/null || true)   # READ before the write: a grep in the same pipeline as install raced the recreated (empty) file
     { [ -n "$OTHER" ] && printf '%s\n' "$OTHER"; printf '%s\n' "$PWLINE"; } | install -m 0600 /dev/stdin "$ETC/compose.env"   # the other lines (WINVAL_UPLOAD_MB, WINVAL_SPOOL_SIZE) survive a password change; printf, not echo: dash's echo would eat the backslashes
     echo "compose-env: $ETC/compose.env derived from winval.env's BLASTBOX_DATABASE_URL"
-  elif grep -q '^WINVAL_PG_PASSWORD=' "$ETC/compose.env" 2>/dev/null && grep -q '^WINVAL_PG_PASSWORD_URLENC=' "$ETC/compose.env" 2>/dev/null; then
-    # a store that is not the compose's Postgres (BLASTBOX_DATABASE_URL=redis://..., which the README supports): the operator wrote
-    # both lines by hand, as told, and they are theirs — left alone, so a Redis-backed deployment can be upgraded
-    echo "compose-env: winval.env's store is not the compose's Postgres; $ETC/compose.env is hand-written and left alone"
-  else   # never an EMPTY compose.env (the fallback password would lock the ingress out)
-    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to $ETC/compose.env by hand before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted, \$ as \$\$> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
+  elif [ "$hand_written" = yes ]; then
+    # winval.env's URL is not the compose's Postgres (another scheme, user or no password) and the operator wrote both lines
+    # by hand, as told: theirs, left alone. NOTE the shipped compose wires its ingress to ITS Postgres service and nothing else:
+    # a pool-manager on a different store never sees the ingress's rows (pool_manager.py: the store must match the ingress)
+    echo "compose-env: winval.env's URL is not the compose's Postgres; $ETC/compose.env is hand-written and left alone — the shipped compose's ingress queues into ITS Postgres service, so the pool-manager's store must be that Postgres or the ingress must be yours"
+  else   # never an EMPTY compose.env or one with an empty value (the 'winval' fallback password would lock the ingress out)
+    echo "winval.env's BLASTBOX_DATABASE_URL is not postgresql://winval:<password>@host...; write BOTH lines to $ETC/compose.env by hand (non-empty) before the compose up: WINVAL_PG_PASSWORD=<the password, double-quoted, \$ as \$\$> and WINVAL_PG_PASSWORD_URLENC=<the same, percent-encoded>" >&2
     exit 1
   fi
-else
-  echo "compose-env: $ETC/compose.env already matches winval.env"
 fi
