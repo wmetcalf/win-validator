@@ -137,7 +137,31 @@ fi
 # '$' as '$$', because compose interpolates its env file and a bare '$' would truncate the secret) and the percent-encoded
 # one (the ingress embeds it in a URL)
 [ "$mint" = yes ] && [ -z "$URL" ] && URL=$(db_url)   # the line --mint just wrote
-PWLINE=$(printf '%s' "$URL" | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
+PWLINE=$(URL="$URL" "$PY" - <<'PY'
+import json, os, sys
+from urllib.parse import urlsplit, unquote, quote, parse_qs
+# the password AS LIBPQ READS THE URL (the pool-manager connects through psycopg): a query parameter overrides the userinfo
+# (postgresql://winval:AAAA@h/db?password=BBBB connects with BBBB), so psycopg's own parser judges when the venv carries it,
+# and the fallback applies the same override by hand
+url = os.environ["URL"].strip(); user = pw = None
+try:
+    from psycopg.conninfo import conninfo_to_dict
+    try:
+        d = conninfo_to_dict(url); user = d.get("user"); pw = d.get("password")
+    except Exception:
+        user = pw = None
+except ImportError:
+    u = urlsplit(url)
+    if u.scheme.startswith("postgres"):
+        q = parse_qs(u.query, keep_blank_values=True)
+        user = (q.get("user") or [u.username])[-1]; pw = (q.get("password") or [unquote(u.password) if u.password else None])[-1]
+if not (url.startswith("postgresql:") or url.startswith("postgres:")) or user != "winval" or not pw:
+    sys.exit(0)   # not the compose's Postgres: the hand-written branch decides
+if any(ord(c) < 32 or ord(c) == 127 for c in pw):
+    sys.exit("the password contains control characters, which compose's env file cannot carry; choose another")
+print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe=""))
+PY
+)
 # What compose READS from an env file is decided by compose, not by a re-implementation of its parser here: a hand-rolled
 # reading passed "" (quoted empty), then `"" # comment`, a trailing space, a whitespace-only value and an uninterpolated
 # $VAR as non-empty — each of which compose resolves to its 'winval' fallback, splitting the password between the tiers.
