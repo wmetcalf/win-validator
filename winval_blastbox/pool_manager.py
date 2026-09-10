@@ -99,7 +99,7 @@ def _refuse_open_egress(workers: int) -> None:
         return
     from winval_blastbox.vm_pool import authenticode_spec
     eg = authenticode_spec().egress
-    if eg is not None and not eg.block_internal and not eg.egress_ports:
+    if eg is not None and not eg.block_internal and eg.egress_ports is None:   # () is the CLOSED allowlist (drops siblings too); only None is 'no allowlist: ACCEPT' 
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
                          "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
@@ -470,12 +470,17 @@ class PoolManager:
         if WORK_ROOT.is_symlink() or WORK_ROOT.stat().st_uid != os.geteuid():
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} must be a directory owned by this process (uid {os.geteuid()})")
         os.chmod(WORK_ROOT, 0o700)
+        try:   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings — BEFORE the orphan recovery (a refusal that fires on the first start after an upgrade must not first fail every RUNNING job and unlink its spool), the pool shut on the way out like every other start failure
+            _refuse_open_egress(self._concurrency)
+        except ValueError as exc:   # a posture typo: the warm-up's own one-line path
+            logger.error("the pool cannot start: %s", exc); self._runner.shutdown(); return 1
+        except SystemExit:
+            self._runner.shutdown(); raise
         self._recover_orphans()
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         try:
             try:
-                _refuse_open_egress(self._concurrency)   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings (a posture ValueError takes the one-line path below; the finally still shuts the pool)
                 self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
             except (RuntimeError, ValueError) as exc:
                 if self._stop.is_set():   # the operator's stop, not a failure: exit 0, or the unit latches `failed` and the rotator's restart_pool() resurrects a deliberately stopped manager

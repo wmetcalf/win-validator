@@ -226,7 +226,7 @@ def build(base: str = BASE_QCOW2) -> str:
                              "-o", "UserKnownHostsFile=/dev/null", src, f"Administrator@{ip}:{dst}"], 60)
                 if r.returncode != 0:   # an unchecked upload would compile the base image's stale copy
                     raise RuntimeError(f"staging {src} -> {dst} failed (rc={r.returncode}): {r.stderr.strip()[-300:]}")
-        caller = agent_caller()   # resolved once, before any step runs: a bake that cannot scope the agent port does not start
+        caller = agent_caller()   # resolved once, before the steps run (the domain is booted by now): a bake that cannot scope the agent port fails here, nothing flattened
         for name, ps in STEPS:
             ps = ps.replace("@@AGENT_CALLER@@", caller)
             logger.info("step %s …", name)

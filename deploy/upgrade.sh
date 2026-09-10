@@ -133,6 +133,17 @@ if [ -z "$(envfile_py get "$ETC/winval.env" AUTHENTICODE_EXIT)" ]; then
   fi
   echo "upgrade.sh: WARNING: $ETC/winval.env has no AUTHENTICODE_EXIT; this version's pool-manager will refuse to start until you name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none on purpose" >&2
 fi
+# design change #8, the half an env file decides: with an exit driver and more than one worker, the pool-manager refuses to start unless
+# AUTHENTICODE_BLOCK_INTERNAL is on or AUTHENTICODE_EGRESS_PORTS is set (the bridge-nf sysctl is the unit's own ExecStartPre)
+exit_knob=$(envfile_py get "$ETC/winval.env" AUTHENTICODE_EXIT); pool=$(envfile_py get "$ETC/winval.env" AUTHENTICODE_POOL_SIZE); bi=$(envfile_py get "$ETC/winval.env" AUTHENTICODE_BLOCK_INTERNAL); ports=$(envfile_py get "$ETC/winval.env" AUTHENTICODE_EGRESS_PORTS)
+case "$(printf '%s' "$exit_knob" | tr 'A-Z' 'a-z')" in ""|none) ;; *)
+  if [ "${pool:-2}" != 1 ] && [ -z "$ports" ] && ! printf '%s' "$bi" | tr 'A-Z' 'a-z' | grep -qx '1\|true\|yes\|on'; then
+    if [ "$restart" = yes ]; then
+      echo "upgrade.sh: $ETC/winval.env names an AUTHENTICODE_EXIT driver with ${pool:-2} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS: this version's pool-manager refuses to start (a worker could reach its siblings' agent port); set one, then rerun; the tree was not moved" >&2; exit 1
+    fi
+    echo "upgrade.sh: WARNING: $ETC/winval.env names an AUTHENTICODE_EXIT driver with ${pool:-2} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor AUTHENTICODE_EGRESS_PORTS; this version's pool-manager will refuse to start until one is set" >&2
+  fi ;;
+esac
 if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
   echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
 fi
