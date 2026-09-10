@@ -97,7 +97,8 @@ def _bridge_nf_loadable() -> tuple[bool, str]:
     the module would be inserted, `install <command>` when a directive replaces an insertion — but WITHOUT the module's name, so whose
     directive it is cannot be told from the plan; the effective configuration (`modprobe -c`) names it. Loadable, then: the dry run
     exits 0, and EITHER br_netfilter has an install directive that is the self-load idiom man 5 modprobe.d documents (`modprobe
-    --ignore-install br_netfilter`, judged on the command's words up to a comment — kmod prints a trailing comment sh would drop),
+    --ignore-install br_netfilter`, judged on the command's words up to a comment — kmod prints a trailing comment sh would drop —
+    and then on that command's own dry run, which must insert br_netfilter.ko: the directive's text does not say the module exists),
     OR it has none, the plan inserts br_netfilter.ko and carries no install line at all (a dependency's directive: whether the load
     survives it cannot be told from the plan, so it is refused). What only the real insertion can tell (a lockdown/signature refusal,
     a stale .ko) stays with the manager's own start, which reads the sysctl live."""
@@ -115,9 +116,18 @@ def _bridge_nf_loadable() -> tuple[bool, str]:
             if w.startswith("#"):
                 break
             words.append(w)
-        if any(w == "--ignore-install" and words[i + 1:i + 2] == ["br_netfilter"] for i, w in enumerate(words)):
-            return True, ""
-        return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+        norm = lambda w: w.replace("-", "_")   # kmod prints the directive's NAME normalised but its arguments verbatim: br-netfilter is the module
+        if not any(w in ("--ignore-install", "-i") and [norm(x) for x in words[i + 1:i + 2]] == ["br_netfilter"] for i, w in enumerate(words)):
+            return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+        try:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
+            rc, plan = _modprobe("-n", "-v", "--ignore-install", "br_netfilter")
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
+        if rc != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
+            return False, f"the self-load directive's own modprobe --ignore-install br_netfilter would insert nothing (rc {rc}: {' | '.join(plan)[:200] or 'no output'})"
+        if any(ln.startswith("install ") for ln in plan):
+            return False, "a dependency in the self-load's plan carries an install directive: whether the load survives it cannot be told from the plan"
+        return True, ""
     if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
         return False, f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
     installs = [ln for ln in plan if ln.startswith("install ")]

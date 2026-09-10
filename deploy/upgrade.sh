@@ -168,7 +168,12 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
                 for w in own[0].split()[2:]:
                     if w.startswith("#"): break
                     words.append(w)
-                if not any(w == "--ignore-install" and words[i + 1:i + 2] == ["br_netfilter"] for i, w in enumerate(words)): why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+                norm = lambda w: w.replace("-", "_")
+                if not any(w in ("--ignore-install", "-i") and [norm(x) for x in words[i + 1:i + 2]] == ["br_netfilter"] for i, w in enumerate(words)): why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]})"
+                else:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
+                    rc2, plan2 = mp("-n", "-v", "--ignore-install", "br_netfilter")
+                    if rc2 != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan2): why = f"the self-load directive's own modprobe --ignore-install br_netfilter would insert nothing (rc {rc2}: {' | '.join(plan2)[:200] or 'no output'})"
+                    elif any(ln.startswith("install ") for ln in plan2): why = "a dependency in the self-load's plan carries an install directive: whether the load survives it cannot be told from the plan"
             elif not why:
                 installs = [ln for ln in plan if ln.startswith("install ")]
                 if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan): why = f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
