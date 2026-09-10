@@ -141,7 +141,11 @@ def build(base: str = BASE_QCOW2) -> str:
         # and this build holds no lock while it runs — freshen the mtime so the prune leaves it alone
         if not os.path.isfile(base):   # a typo'd path must not be CREATED by the touch (a 0-byte backup-shaped file would join the rollback set)
             raise SystemExit(f"base {base} does not exist")
-        gr._run(["sudo", "touch", os.path.realpath(base)])
+        if not gr._BACKUP_NAME.match(Path(os.path.realpath(base)).name):
+            # a candidate / built / rebake image is what the AGE prune reclaims: freshen its mtime. A RETAINED backup is never
+            # touched — retention orders the rollback set by mtime (its promotion time), and a touch made an old backup outrank
+            # every newer rollback image for good; the hold below is what keeps it out of the count prune during the build
+            gr._run(["sudo", "touch", os.path.realpath(base)])
         if gr._BACKUP_NAME.match(Path(os.path.realpath(base)).name):   # the file the overlay backs on, as the touch above and the hold below name it: a symlink to a retained backup was touched but never held, and the count prune could take it mid-build
             # a RETAINED backup as the base: the age prune leaves it, the COUNT prune (GOLDEN_KEEP_N) does not — a rotation
             # landing during the build evicted the overlay's backing file. A hold named after THIS build's pid: honoured only
