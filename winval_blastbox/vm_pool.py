@@ -195,7 +195,9 @@ def validate_egress_posture(spec: VmWorkerSpec) -> None:
 def authenticode_spec() -> VmWorkerSpec:
     """Build the authenticode VM-worker spec from AUTHENTICODE_* env (golden, pool size, agent,
     optional egress: AUTHENTICODE_EXIT/EGRESS_PORTS/BLOCK_INTERNAL/VPN_TABLE/...)."""
-    exit_driver = os.environ.get("AUTHENTICODE_EXIT")
+    exit_driver = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
+    if exit_driver.lower() == "none":   # the EXPLICIT opt-out (design change #7): no egress policy, on purpose and by name — an unset knob is a pool-manager refusal
+        exit_driver = ""
     egress = routing = None
     if exit_driver:
         egress = VmEgressPolicy(

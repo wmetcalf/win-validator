@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import sys
 import time
@@ -101,7 +102,8 @@ STEPS: list[tuple[str, str]] = [
         cmd /c "netsh http delete urlacl url=http://+:{AGENT_PORT}/ >nul 2>&1"   # cmd swallows the stderr: under Stop, PowerShell 5.1 turns a native command's REDIRECTED stderr (2>$null too) into a terminating error, and a fresh image has no ACL to delete
         netsh http add urlacl url=http://+:{AGENT_PORT}/ user="NT AUTHORITY\NETWORK SERVICE" | Out-Null
         if ($LASTEXITCODE -ne 0) {{ throw "netsh http add urlacl failed ($LASTEXITCODE)" }}   # native: see netsvc-acls
-        New-NetFirewallRule -DisplayName valagent-{AGENT_PORT} -Direction Inbound -Protocol TCP -LocalPort {AGENT_PORT} -Action Allow -ErrorAction SilentlyContinue | Out-Null
+        Remove-NetFirewallRule -DisplayName valagent-{AGENT_PORT} -ErrorAction SilentlyContinue | Out-Null   # an earlier bake's rule opened the port to ANY source: replaced, never left beside the scoped one
+        New-NetFirewallRule -DisplayName valagent-{AGENT_PORT} -Direction Inbound -Protocol TCP -LocalPort {AGENT_PORT} -RemoteAddress @@AGENT_CALLER@@ -Action Allow -ErrorAction Stop | Out-Null   # design change #8: the host alone calls the agent; a sibling worker on the bridge never reaches this port
         'http-acl ok'"""),
     ("onstart-agent", fr"""
         cmd /c "schtasks /delete /tn valagent /f >nul 2>&1"   # same: a fresh image has no valagent task, and its 'cannot find the file' would end the step
@@ -112,6 +114,23 @@ STEPS: list[tuple[str, str]] = [
         if ($LASTEXITCODE -ne 0) {{ throw "schtasks /create failed ($LASTEXITCODE)" }}
         (schtasks /query /tn valagent /v /fo list | Select-String 'Task To Run')"""),
 ]
+
+
+def agent_caller() -> str:
+    """The one address the golden's agent-port firewall rule admits: the host's address on the libvirt network the
+    workers share (AUTHENTICODE_AGENT_CALLER overrides it; a bake refuses rather than open the port to any source when
+    neither is known). A rebake applies a change, like the port itself."""
+    explicit = (os.environ.get("AUTHENTICODE_AGENT_CALLER") or "").strip()
+    if explicit:
+        return explicit
+    net = os.environ.get("AUTHENTICODE_LIBVIRT_NETWORK", "default")
+    r = gr._virsh("net-dumpxml", net)
+    m = re.search(r"<ip [^>]*address=['\"]([0-9.]+)['\"]", r.stdout or "") if r.returncode == 0 else None
+    if not m:
+        raise SystemExit(f"cannot learn the host's address on the libvirt network {net!r} (virsh net-dumpxml rc {r.returncode}); the agent-port "
+                         f"firewall rule is scoped to the pool-manager's address and never opened to any source — set AUTHENTICODE_AGENT_CALLER "
+                         f"to the host's bridge address (or AUTHENTICODE_LIBVIRT_NETWORK to the workers' network) and rebake")
+    return m.group(1)
 
 
 def build(base: str = BASE_QCOW2) -> str:
@@ -207,7 +226,9 @@ def build(base: str = BASE_QCOW2) -> str:
                              "-o", "UserKnownHostsFile=/dev/null", src, f"Administrator@{ip}:{dst}"], 60)
                 if r.returncode != 0:   # an unchecked upload would compile the base image's stale copy
                     raise RuntimeError(f"staging {src} -> {dst} failed (rc={r.returncode}): {r.stderr.strip()[-300:]}")
+        caller = agent_caller()   # resolved once, before any step runs: a bake that cannot scope the agent port does not start
         for name, ps in STEPS:
+            ps = ps.replace("@@AGENT_CALLER@@", caller)
             logger.info("step %s …", name)
             # EVERY step is checked: a throw, a native failure or a timeout raises with the
             # guest's stderr, so a build never flattens an image a step failed to prepare

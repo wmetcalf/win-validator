@@ -121,9 +121,10 @@ corrupted image is rejected and the current golden is kept.
 
 ## Locked-down egress — why it matters here
 
-**Opt-in:** the network policy below applies once `AUTHENTICODE_EXIT` names an exit driver. The shipped
-`deploy/winval.env.example` leaves every egress line commented out, and a worker started without it reaches
-whatever the libvirt network allows (plain NAT, RFC1918 included) — set it before the ingress is exposed.
+**Required, or opted out by name:** the pool-manager refuses to start unless `AUTHENTICODE_EXIT` names an exit
+driver (`direct` is the minimum: it installs the per-worker chains) or is set to `none`, the explicit opt-out that
+gives a worker whatever the libvirt network allows (plain NAT, RFC1918 included) on purpose. An unset knob used to
+mean the same as `none` silently; it is a refusal now.
 With it set, the worker's network is a **class policy, not a host allowlist**: an anonymizing exit
 (VPN/SOCKS, tor optional) + **DNS/HTTP/HTTPS only (53/80/443)** + **block all RFC1918/internal**,
 fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
@@ -136,8 +137,12 @@ the documented default `direct` exit with block_internal off ends in ACCEPT, so 
 its siblings' agent port 8765, which the golden's firewall rule opens to any source; (2) the host's own
 listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
 blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
-`block_internal` covers the docker-published 8099; with NO exit driver there is no chain at all — see
-`deploy/README.md`.
+`block_internal` covers the docker-published 8099; with `none` there is no chain at all — see `deploy/README.md`.
+Both hops are checked at start: with more than one worker, the pool-manager refuses to start unless
+`AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist) is set AND `net.bridge.bridge-nf-call-iptables` is 1, so a
+policy that could not drop worker-to-worker traffic never runs a pool. And the golden's own firewall rule for the
+agent port admits the pool-manager's address alone (the host's address on the libvirt network, learned at bake
+time; `AUTHENTICODE_AGENT_CALLER` overrides it), so a sibling never reaches the port even where the host rules miss.
 
 ## Repo layout
 

@@ -29,23 +29,11 @@ fi
 rules=$(git show "refs/remotes/origin/$branch:deploy/compose-env.sh" 2>/dev/null) || rules=""   # captured first: a pipe into sh -s reads an empty script as success when the path does not exist at that ref
 [ -n "$rules" ] || { echo "upgrade.sh: origin/$branch has no deploy/compose-env.sh (a version older than this script?): this upgrade path deploys versions that carry it; the tree was not moved" >&2; exit 1; }
 printf '%s\n' "$rules" | sh -s -- --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }
-if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
-  echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
-fi
-if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
-  echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1
-fi
-git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
-[ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
-"$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
-# every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
-# database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
-# ...as LOGICAL lines: systemd joins a line ending in an odd number of backslashes with the next, so a URL continued onto the
-# next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
-redacted() {   # the file's ASSIGNMENTS as systemd reads them (the same parser compose-env.sh and golden_rotate.py carry), one KEY=value
-  # line per knob sorted by name, a secret's value replaced: a redaction over physical lines printed the second line of a quoted
-  # multi-line secret and a URL landed mid-line by a continuation
-  python3 - "$1" <<'PY'
+envfile_py() {   # $1 = mode, $2 = file [, $3 = key]. 'redacted': the file's ASSIGNMENTS as systemd reads them (the same parser
+  # compose-env.sh and golden_rotate.py carry), one KEY=value line per knob sorted by name, a secret's value replaced (a redaction
+  # over physical lines printed the second line of a quoted multi-line secret and a URL landed mid-line by a continuation).
+  # 'get': one knob's value as the units read it (empty when unset)
+  python3 - "$1" "$2" "${3:-}" <<'PY'
 import re, sys
 # --- envfile parser (systemd src/basic/env-file.c parse_env_file_internal, verified against systemd-run over 77 files) ---
 import re as _re
@@ -118,9 +106,11 @@ def parse_env_file(data: bytes):
 # --- end envfile parser ---
 
 try:
-    env, _ = parse_env_file(open(sys.argv[1], "rb").read())
+    env, _ = parse_env_file(open(sys.argv[2], "rb").read())
 except ValueError as exc:
     env = {"(unreadable)": str(exc)}
+if sys.argv[1] == "get":
+    print(env.get(sys.argv[3], "")); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
 userinfo = re.compile(r"://[^/@\s]*@")   # any URL userinfo, the whole of it (user AND password), wherever it sits in a value
@@ -133,7 +123,30 @@ for k in sorted(env):
     sys.stdout.buffer.write(f"{k}={v}\n".encode("utf-8", "surrogateescape"))
 PY
 }
-example=$(mktemp) && redacted deploy/winval.env.example > "$example" && { redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
+
+# design change #7: this version's pool-manager REFUSES to start without AUTHENTICODE_EXIT (a worker without an exit driver reaches
+# the libvirt NAT and the host's own listeners) unless the operator writes AUTHENTICODE_EXIT=none on purpose. With --restart the
+# restart would fail after the tree moved: refused HERE; without it, said loudly (the restart is the operator's next step)
+if [ -z "$(envfile_py get "$ETC/winval.env" AUTHENTICODE_EXIT)" ]; then
+  if [ "$restart" = yes ]; then
+    echo "upgrade.sh: $ETC/winval.env has no AUTHENTICODE_EXIT, and this version's pool-manager refuses to start without one: name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose, then rerun; the tree was not moved" >&2; exit 1
+  fi
+  echo "upgrade.sh: WARNING: $ETC/winval.env has no AUTHENTICODE_EXIT; this version's pool-manager will refuse to start until you name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none on purpose" >&2
+fi
+if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
+  echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
+fi
+if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
+  echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1
+fi
+git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
+[ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
+"$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+# every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
+# database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
+# ...as LOGICAL lines: systemd joins a line ending in an odd number of backslashes with the next, so a URL continued onto the
+# next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
+example=$(mktemp) && envfile_py redacted deploy/winval.env.example > "$example" && { envfile_py redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
 if [ "$restart" != yes ]; then
   cat <<MSG

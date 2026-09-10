@@ -80,6 +80,40 @@ def _retention_days() -> float:
 _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authenticode_spec) and the claim concurrency
 
 
+BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
+
+
+def _refuse_open_egress(workers: int) -> None:
+    """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
+    an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
+    refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
+    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist)
+    AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
+    and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach."""
+    raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
+    if not raw:
+        raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
+                         "and the host's own listeners (the ingress on 8099). Name an exit driver (direct is the minimum: it installs the "
+                         "per-worker chains), or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose")
+    if raw.lower() == "none" or workers < 2:
+        return
+    from winval_blastbox.vm_pool import authenticode_spec
+    eg = authenticode_spec().egress
+    if eg is not None and not eg.block_internal and not eg.egress_ports:
+        raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
+                         "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
+                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS), or run one worker")
+    try:
+        enabled = Path(BRIDGE_NF_SYSCTL).read_text().strip() == "1"
+    except OSError:
+        enabled = False
+    if not enabled:
+        raise SystemExit(f"{BRIDGE_NF_SYSCTL} is not 1 (br_netfilter not loaded, or the sysctl off): with {workers} workers on one bridge the "
+                         "FORWARD rules never see worker-to-worker frames, so AUTHENTICODE_BLOCK_INTERNAL cannot drop them and a compromised "
+                         "worker reaches its siblings' agent port. Run: modprobe br_netfilter; sysctl -w net.bridge.bridge-nf-call-iptables=1 "
+                         "(and persist both), or run one worker")
+
+
 def _rel_parts(p: Path, what: str, root: Path = JOB_ROOT) -> tuple:
     """The components of p below root, LEXICALLY (abspath collapses '..'); nothing here touches the
     filesystem. Every open that follows is done component by component from a descriptor on root
@@ -441,6 +475,7 @@ class PoolManager:
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         try:
             try:
+                _refuse_open_egress(self._concurrency)   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings (a posture ValueError takes the one-line path below; the finally still shuts the pool)
                 self._runner.warmup(stop_event=self._stop)   # a SIGTERM during the warm-up ends it (and reaps) instead of waiting out the warm timeout
             except (RuntimeError, ValueError) as exc:
                 if self._stop.is_set():   # the operator's stop, not a failure: exit 0, or the unit latches `failed` and the rotator's restart_pool() resurrects a deliberately stopped manager

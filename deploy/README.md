@@ -135,6 +135,12 @@ The `--restart` step drops in-flight uploads and fails every RUNNING job as *orp
 (its sample removed; clients resubmit): drain first if that matters. The pool-manager's first start may wait up
 to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 
+- **The pool-manager refuses to start without `AUTHENTICODE_EXIT`** (design change #7): an env file that never named an
+  exit driver must gain one (`direct` is the minimum) or the explicit `AUTHENTICODE_EXIT=none`. `upgrade.sh --restart` refuses
+  BEFORE the tree moves when the line is missing; without `--restart` it warns. With more than one worker the start also needs
+  `AUTHENTICODE_BLOCK_INTERNAL=1` (or `AUTHENTICODE_EGRESS_PORTS`) and `net.bridge.bridge-nf-call-iptables=1` (`modprobe br_netfilter`),
+  or the pool-manager refuses by name (design change #8). The next golden bake scopes the agent-port firewall rule to the
+  pool-manager's address; a bake refuses if it cannot learn that address (`AUTHENTICODE_AGENT_CALLER` names it by hand).
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
 - **Backup retention orders by modification time**, not by name: backups made before this version are stamped in local time, the new ones in UTC, and in a zone ahead of UTC the old names sort lexically newer than a fresh backup for hours. The mtime is the promotion time on every backup, so both populations rank alike.
@@ -165,17 +171,19 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   over a container/host bind-mount. Redis also works as the shared store when BOTH tiers point at it — which the shipped compose does not: its ingress is wired to its own Postgres service, so with this compose the pool-manager's `BLASTBOX_DATABASE_URL` must be that Postgres.
 - **VPN/tor egress + the tunnel kill-switch** live with the pool-manager (host iptables), so a
   worker still fails closed on a tunnel drop regardless of the ingress — once `AUTHENTICODE_EXIT`
-  names an exit driver. The example env ships with every egress line commented out: a pool-manager
-  started that way gives its workers the libvirt network's plain NAT. Set it before exposing the ingress.
+  names an exit driver. The pool-manager REFUSES to start with it unset; `AUTHENTICODE_EXIT=none` is the
+  explicit opt-out that gives workers the libvirt network's plain NAT on purpose. Set a driver before exposing the ingress.
   Without an exit driver nothing governs a worker's traffic to the host either: the ingress publishes 8099 on
   all interfaces with no authentication, so a worker can read `/jobs` or fill the spool (Postgres is bound to
   127.0.0.1). With `AUTHENTICODE_EXIT` set, blastbox installs a per-worker INPUT chain on the host that drops
   host-destined traffic except established, DHCP and gated DNS, and `AUTHENTICODE_BLOCK_INTERNAL=1` drops the
   docker-published 8099 in FORWARD. Worker-to-worker traffic on the bridge is switched, not routed: it meets the
   FORWARD rules only with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe br_netfilter`), and is
-  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1` or a port allowlist — the example's `direct` exit with
-  block_internal commented out ends in ACCEPT, so a worker reaches a sibling's agent port 8765, which the golden
-  opens to any source. Set both when workers share a bridge.
+  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1` or a port allowlist. With more than one worker the pool-manager
+  refuses to start unless both are in place (block_internal or a port allowlist, AND the sysctl at 1). The golden's
+  own rule for the agent port admits the pool-manager's address alone (learned from the libvirt network at bake
+  time; `AUTHENTICODE_AGENT_CALLER` overrides it, `AUTHENTICODE_LIBVIRT_NETWORK` names another network) — a golden
+  baked before this version opens the port to any source until it is rebaked.
 - **`/cert/{tbs}` on the ingress** searches the newest 2000 scans of its store and says so in the answer's
   `scanned` / `truncated` fields (the orchestrator's `/cert` has no such bound).
 
