@@ -16,10 +16,13 @@ restart=no; [ "${2:-}" = "--restart" ] && restart=yes
 if [ "$(id -u)" != 0 ] && [ "${WINVAL_SKIP_ROOT_CHECK:-}" != 1 ]; then echo "upgrade.sh: run as root (sudo): it writes $ETC and /etc/systemd/system" >&2; exit 1; fi
 cd "$ROOT"
 [ -z "$(git status --porcelain)" ] || { echo "upgrade.sh: local changes in $ROOT — stash or discard them first:" >&2; git status --short >&2; exit 1; }
-grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" || { echo "upgrade.sh: $ETC/winval.env has no BLASTBOX_DATABASE_URL line, so compose.env could not be derived (an upgrade never mints a password: the bring-up does); the tree was not moved" >&2; exit 1; }   # BEFORE the checkout: compose-env.sh's own refusal came after the live tree and the venv had moved
+sh deploy/compose-env.sh --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }   # compose-env.sh's OWN rules, all of them, before the checkout: a duplicated first gate here let a present-but-unusable URL move the tree
 git fetch --prune origin   # branches only (--tags fails for good once an upstream tag moves; nothing here uses a tag), and PRUNED: a branch deleted upstream left a stale origin/<branch> that passed every guard and shipped its pre-merge tip
 if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
-  echo "upgrade.sh: '$branch' is not a branch on origin (tags are not supported: deploy a branch); the tree was not moved" >&2; exit 1
+  echo "upgrade.sh: '$branch' is not a branch on origin now (deleted upstream after a merge? then deploy the branch it was merged into; a tag? tags are not supported); the tree was not moved" >&2; exit 1
+fi
+if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && ! git merge-base --is-ancestor HEAD "refs/remotes/origin/$branch"; then
+  echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD) with commits that are not on origin/$branch; they would be orphaned by the checkout — branch or discard them first; the tree was not moved" >&2; exit 1
 fi
 if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
   echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1

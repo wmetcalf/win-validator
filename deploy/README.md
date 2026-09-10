@@ -121,7 +121,7 @@ written before this version does not carry.
 
 ```bash
 sudo sh /opt/win-validator/deploy/upgrade.sh <branch>             # code, venv, compose.env; stops before any restart and says what --restart does
-sudo sh /opt/win-validator/deploy/upgrade.sh <branch> --restart   # rebuilds the ingress and restarts the pool-manager
+sudo sh /opt/win-validator/deploy/upgrade.sh <branch> --restart   # rebuilds the ingress, installs the three unit files + daemon-reload, restarts the pool-manager
 ```
 
 The `--restart` step drops in-flight uploads and fails every RUNNING job as *orphaned by a pool-manager restart*
@@ -134,8 +134,9 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   by the unit's uid (libvirt's DAC driver usually leaves it owned by the qemu user) is discarded and re-copied
   from `GOLDEN_BASE_DISK` — up to 30 min behind a rotation's lock plus the copy, inside `TimeoutStartSec=55min`.
   With no disk twin the start refuses rather than replace the only golden with the agent-less master: promote a
-  golden to `GOLDEN_BASE_DISK` first. The unit files must be re-installed (the recipe above): the code moved to
-  `/opt/win-validator`, and the pool-manager unit must run as root (its pre-step owns the lock and the RAM base).
+  golden to `GOLDEN_BASE_DISK` first. `upgrade.sh --restart` re-installs all three unit files (both services and
+  the timer) and reloads systemd: the code moved to `/opt/win-validator`, and the pool-manager unit must run as
+  root (its pre-step owns the lock and the RAM base).
 - **A preserved env file can refuse the pool-manager at start where it used to run**: `AUTHENTICODE_WARM_DIR` or
   `AUTHENTICODE_SMOKE_SAMPLE` set to a path that does not exist (the old example pointed at a home directory the
   `/opt` move invalidates) fails the start by name; `AUTHENTICODE_EGRESS_PORTS` present but blank is now a CLOSED
