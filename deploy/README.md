@@ -137,6 +137,7 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
+- **Backup retention orders by modification time**, not by name: backups made before this version are stamped in local time, the new ones in UTC, and in a zone ahead of UTC the old names sort lexically newer than a fresh backup for hours. The mtime is the promotion time on every backup, so both populations rank alike.
 - **The pool-manager unit now owns the RAM base at every start** (`ExecStartPre`): a `/dev/shm` base not owned
   by the unit's uid (libvirt's DAC driver usually leaves it owned by the qemu user) is discarded and re-copied
   from `GOLDEN_BASE_DISK` — up to 30 min behind a rotation's lock plus the copy, inside `TimeoutStartSec=55min`.

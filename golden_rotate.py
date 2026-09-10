@@ -1089,7 +1089,11 @@ def _prune_backups(keep: str | None = None, also_keep: str | None = None) -> Non
         for mk in BACKUP_DIR.glob("*.chain.unrecorded"):
             if (_mtime(mk) or float("inf")) < min(rec_t, time.time() - 3600):
                 _run(["sudo", "rm", "-f", str(mk)])
-    baks = sorted(b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name))
+    # ordered by MODIFICATION TIME (the name as the tie-break): the names are UTC stamps since round 62 but backups made before
+    # that are stamped in local time, and in a zone ahead of UTC they sort lexically NEWER than a fresh backup for hours —
+    # the prune then deleted the rollback copy it had just made. The mtime is the promotion time on every backup (a rename
+    # keeps it; the build touches the base first, run 91), so it orders both populations alike
+    baks = sorted((b for b in BACKUP_DIR.glob("golden-base.*.qcow2") if _BACKUP_NAME.match(b.name)), key=lambda b: (_mtime(b) or 0.0, b.name))
     excess = baks[:-KEEP_N] if KEEP_N > 0 else baks   # 0 = keep none (never "never prune")
     for b in excess:
         if str(b.resolve()) in keep_paths:   # the rotate CLI restoring a BACKUP passes it as the candidate: never the one being restored
