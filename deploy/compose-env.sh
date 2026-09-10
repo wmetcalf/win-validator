@@ -161,9 +161,10 @@ except ImportError:
     tail = url.split("://", 1)[1] if "://" in url else ""
     ATOM = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})"
     VAL = r"(?:[A-Za-z0-9._~!$'()*+,;:@/-]|%[0-9A-Fa-f]{2})"
-    m = re.fullmatch(r"(?:(?P<user>" + ATOM + r"*)(?::(?P<pw>(?:" + ATOM + r"|:)*))?@)?(?P<host>[A-Za-z0-9.-]+)(?::(?P<port>[0-9]+))?(?P<path>/[A-Za-z0-9._~-]*)?(?:\?(?P<query>[a-z_]+=" + VAL + r"*(?:&[a-z_]+=" + VAL + r"*)*))?", tail)
+    KEY = r"(?:application_name|channel_binding|client_encoding|connect_timeout|dbname|fallback_application_name|gssdelegation|gssencmode|gsslib|host|hostaddr|keepalives|keepalives_count|keepalives_idle|keepalives_interval|krbsrvname|load_balance_hosts|max_protocol_version|min_protocol_version|oauth_client_id|oauth_client_secret|oauth_issuer|oauth_scope|options|passfile|password|port|replication|require_auth|requirepeer|scram_client_key|scram_server_key|service|ssl_max_protocol_version|ssl_min_protocol_version|sslcert|sslcertmode|sslcompression|sslcrl|sslcrldir|sslkey|sslkeylogfile|sslmode|sslnegotiation|sslpassword|sslrootcert|sslsni|target_session_attrs|tcp_user_timeout|user)"   # libpq's own keyword list (PQconndefaults): an unknown key is a libpq refusal, and was a green --check here
+    m = re.fullmatch(r"(?:(?P<user>" + ATOM + r"*)(?::(?P<pw>(?:" + ATOM + r"|:)*))?@)?(?P<host>(?:[A-Za-z0-9._-]|%[0-9A-Fa-f]{2})+)(?::(?P<port>[0-9]+))?(?P<path>/(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*)?(?:\?(?P<query>" + KEY + r"=" + VAL + r"*(?:&" + KEY + r"=" + VAL + r"*)*))?", tail)
     if url.startswith(("postgresql:", "postgres:")) and m is None:
-        sys.exit("the URL does not fit the one shape this host can judge without libpq (user:password@host:port/db?key=value, everything percent-encoded but letters, digits and -._~!$&'()*+,;=): a raw # ? [ ] space, a bare %, a second @ or a query part without '=' would be read differently by libpq; percent-encode it (this host's python has no psycopg to judge it)")
+        sys.exit("without libpq to judge it (this host's python has no psycopg), this URL is derived only in the one shape both read alike: user:password@host:port/dbname?key=value..., the password and every value percent-encoded except letters, digits and -._~!$&'()*+,;= (a raw # ? [ ] space or a bare % is refused), the host a name or IPv4 literal, each query key one of libpq's own keywords; rewrite the URL to that shape")
     if m is not None:
         q = {}
         for part in (m.group("query") or "").split("&"):
