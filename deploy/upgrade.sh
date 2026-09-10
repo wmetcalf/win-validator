@@ -40,8 +40,25 @@ git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, n
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 # every knob the README's upgrade section names; new knobs have defaults. REDACTED on both sides: the live URL line carries the
 # database password, and this diff is stdout — of an invocation the README pipes, that lands in tee/script/CI logs
-REDACT='s/^\([[:space:]]*\)\(BLASTBOX_DATABASE_URL=\|[A-Za-z_]*\(PASSWORD\|SECRET\|TOKEN\|API_KEY\|LICENSE\)[A-Za-z_]*=\).*/\1\2<redacted>/'   # an indented line is honoured by systemd; _KEY alone hid AUTHENTICODE_SSH_KEY, a path this branch moved
-example=$(mktemp) && sed -e "$REDACT" deploy/winval.env.example > "$example" && { sed -e "$REDACT" "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
+# ...as LOGICAL lines: systemd joins a line ending in an odd number of backslashes with the next, so a URL continued onto the
+# next line is one assignment to the service and two physical lines to a line-oriented sed, the second of them unredacted
+redacted() {
+  python3 - "$1" <<'PY'
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="surrogateescape").read().splitlines()
+def continues(raw):
+    if raw.lstrip().startswith("#"): return False
+    return (len(raw) - len(raw.rstrip("\\"))) % 2 == 1
+joined = []
+for line in lines:
+    if joined and continues(joined[-1]): joined[-1] = joined[-1][:-1] + line
+    else: joined.append(line)
+pat = re.compile(r"^(\s*)(BLASTBOX_DATABASE_URL=|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*=).*$")   # _KEY alone hid AUTHENTICODE_SSH_KEY, a path this branch moved
+for line in joined:
+    print(pat.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", line))
+PY
+}
+example=$(mktemp) && redacted deploy/winval.env.example > "$example" && { redacted "$ETC/winval.env" | diff - "$example" || true; }; rm -f "$example"
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
 if [ "$restart" != yes ]; then
   cat <<MSG
