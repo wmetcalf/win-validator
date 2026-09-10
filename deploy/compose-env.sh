@@ -46,14 +46,16 @@ def parse_env_file(data: bytes):
     a comment only where a key would; the LAST assignment wins; a key that is not a valid name is dropped. Returns
     (assignments, unterminated) — unterminated says the file ended inside a quote. Raises ValueError when systemd would
     refuse the whole file (an assignment that is not valid UTF-8 or carries a NUL)."""
+    if b"\x00" in data:   # a NUL anywhere, a comment included: systemd refuses the whole file (the UTF-8 rule below is per assignment)
+        raise ValueError("the file carries a NUL byte: systemd rejects the whole file")
     text = data.decode("utf-8", "surrogateescape")
     WS = " \t"; NL = "\n\r"; COMMENTS = "#;"; ESC = "\"\\`$"
     PRE_KEY, KEY, PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE, COMMENT = range(9)
     st = PRE_KEY; key = []; val = []; key_ws = None; val_ws = None; out = {}
     def push():
         k = "".join(key[:key_ws] if key_ws is not None else key); v = "".join(val)
-        if any("\udc80" <= c <= "\udcff" or c == "\x00" for c in k + v):
-            raise ValueError(f"the assignment of {k!r} is not valid UTF-8 (or carries a NUL): systemd rejects the whole file")
+        if any("\udc80" <= c <= "\udcff" for c in k + v):
+            raise ValueError(f"the assignment of {k!r} is not valid UTF-8: systemd rejects the whole file")
         if _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k): out[k] = v
     for c in text:
         if st == PRE_KEY:
@@ -95,7 +97,7 @@ def parse_env_file(data: bytes):
         elif st == DQ_ESCAPE:
             st = DQ
             if c in ESC: val.append(c)
-            elif c not in NL: val.append("\\"); val.append(c)
+            elif c != "\n": val.append("\\"); val.append(c)   # only a LINE FEED continues here (env-file.c tests '\n', not the newline set): a CR keeps its backslash
         elif st == COMMENT:
             if c in NL: st = PRE_KEY
     unterminated = st in (SQ, DQ, DQ_ESCAPE)
@@ -121,11 +123,11 @@ if [ -z "$URL" ]; then
     echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
   fi
   PW=$(openssl rand -hex 16)
-  [ -z "$(tail -c1 "$ETC/winval.env")" ] || echo >> "$ETC/winval.env"   # a last line without its newline: the URL was glued onto that knob, and the SECOND --mint then succeeded over the corrupted knob
   if [ -s "$ETC/winval.env" ] && tail -1 "$ETC/winval.env" | "$PY" -c 'import sys; raw = sys.stdin.read().rstrip("\n"); sys.exit(0 if not raw.lstrip().startswith("#") and (len(raw) - len(raw.rstrip("\\"))) % 2 == 1 else 1)'; then
     echo "compose-env: the last line of $ETC/winval.env ends in a backslash, a continuation to every reader: the minted URL would be swallowed into that knob (and a second --mint would then mint a second password); end that line first" >&2; exit 1
   fi
   uq=0; envfile_py "$ETC/winval.env" unterminated || uq=$?; case $uq in 3) echo "compose-env: $ETC/winval.env ends inside an open quote: systemd reads everything after it as that value, the minted URL included (and the pool-manager would fall back to an in-memory job store, never claiming the ingress's rows); close that quote first" >&2; exit 1 ;; 0) ;; *) exit 1 ;; esac
+  [ -z "$(tail -c1 "$ETC/winval.env")" ] || echo >> "$ETC/winval.env"   # LAST, after every refusal above (a refusal must leave the file byte-identical): a last line without its newline: the URL was glued onto that knob, and the SECOND --mint then succeeded over the corrupted knob
   echo "BLASTBOX_DATABASE_URL=postgresql://winval:$PW@127.0.0.1:5433/winval" >> "$ETC/winval.env"
   echo "compose-env: minted a database password into $ETC/winval.env (greenfield)"
 fi

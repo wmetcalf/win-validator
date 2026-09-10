@@ -56,14 +56,16 @@ def parse_env_file(data: bytes):
     a comment only where a key would; the LAST assignment wins; a key that is not a valid name is dropped. Returns
     (assignments, unterminated) — unterminated says the file ended inside a quote. Raises ValueError when systemd would
     refuse the whole file (an assignment that is not valid UTF-8 or carries a NUL)."""
+    if b"\x00" in data:   # a NUL anywhere, a comment included: systemd refuses the whole file (the UTF-8 rule below is per assignment)
+        raise ValueError("the file carries a NUL byte: systemd rejects the whole file")
     text = data.decode("utf-8", "surrogateescape")
     WS = " \t"; NL = "\n\r"; COMMENTS = "#;"; ESC = "\"\\`$"
     PRE_KEY, KEY, PRE_VALUE, VALUE, VALUE_ESCAPE, SQ, DQ, DQ_ESCAPE, COMMENT = range(9)
     st = PRE_KEY; key = []; val = []; key_ws = None; val_ws = None; out = {}
     def push():
         k = "".join(key[:key_ws] if key_ws is not None else key); v = "".join(val)
-        if any("\udc80" <= c <= "\udcff" or c == "\x00" for c in k + v):
-            raise ValueError(f"the assignment of {k!r} is not valid UTF-8 (or carries a NUL): systemd rejects the whole file")
+        if any("\udc80" <= c <= "\udcff" for c in k + v):
+            raise ValueError(f"the assignment of {k!r} is not valid UTF-8: systemd rejects the whole file")
         if _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k): out[k] = v
     for c in text:
         if st == PRE_KEY:
@@ -105,7 +107,7 @@ def parse_env_file(data: bytes):
         elif st == DQ_ESCAPE:
             st = DQ
             if c in ESC: val.append(c)
-            elif c not in NL: val.append("\\"); val.append(c)
+            elif c != "\n": val.append("\\"); val.append(c)   # only a LINE FEED continues here (env-file.c tests '\n', not the newline set): a CR keeps its backslash
         elif st == COMMENT:
             if c in NL: st = PRE_KEY
     unterminated = st in (SQ, DQ, DQ_ESCAPE)
@@ -120,9 +122,14 @@ try:
 except ValueError as exc:
     env = {"(unreadable)": str(exc)}
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
-inside = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*|://[^/@\s]*@).*$")   # a secret assignment that a continuation landed INSIDE another knob's value, or any URL userinfo
+assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
+userinfo = re.compile(r"://[^/@\s]*@")   # any URL userinfo, the whole of it (user AND password), wherever it sits in a value
+def shown(v):
+    m = assignment.search(v)
+    if m: v = v[:m.end()] + "<redacted>"
+    return userinfo.sub("://<redacted>@", v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
 for k in sorted(env):
-    v = "<redacted>" if secret.match(k) else inside.sub(lambda m: m.group(1) + "<redacted>", env[k], count=1).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    v = "<redacted>" if secret.match(k) else shown(env[k])
     sys.stdout.buffer.write(f"{k}={v}\n".encode("utf-8", "surrogateescape"))
 PY
 }
