@@ -16,16 +16,16 @@ restart=no; [ "${2:-}" = "--restart" ] && restart=yes
 if [ "$(id -u)" != 0 ] && [ "${WINVAL_SKIP_ROOT_CHECK:-}" != 1 ]; then echo "upgrade.sh: run as root (sudo): it writes $ETC and /etc/systemd/system" >&2; exit 1; fi
 cd "$ROOT"
 [ -z "$(git status --porcelain)" ] || { echo "upgrade.sh: local changes in $ROOT — stash or discard them first:" >&2; git status --short >&2; exit 1; }
-git fetch origin   # branches only: --tags fails for good once an upstream tag moves, and nothing here uses a tag
+grep -q '^BLASTBOX_DATABASE_URL=' "$ETC/winval.env" || { echo "upgrade.sh: $ETC/winval.env has no BLASTBOX_DATABASE_URL line, so compose.env could not be derived (an upgrade never mints a password: the bring-up does); the tree was not moved" >&2; exit 1; }   # BEFORE the checkout: compose-env.sh's own refusal came after the live tree and the venv had moved
+git fetch --prune origin   # branches only (--tags fails for good once an upstream tag moves; nothing here uses a tag), and PRUNED: a branch deleted upstream left a stale origin/<branch> that passed every guard and shipped its pre-merge tip
 if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
   echo "upgrade.sh: '$branch' is not a branch on origin (tags are not supported: deploy a branch); the tree was not moved" >&2; exit 1
 fi
 if git rev-parse --verify -q "refs/heads/$branch" >/dev/null && ! git merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/$branch"; then
   echo "upgrade.sh: local branch $branch ($(git rev-parse --short "refs/heads/$branch")) carries commits that are not on origin/$branch ($(git rev-parse --short "refs/remotes/origin/$branch")): refusing to build the ingress and install units from a tree that is not the reviewed one; the tree was not moved" >&2; exit 1
 fi
-git checkout "$branch"
-git merge --ff-only "origin/$branch"
-[ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the fast-forward; stopping" >&2; exit 1; }
+git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
+[ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
 "$ROOT/.venv/bin/pip" install --upgrade "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
 diff "$ETC/winval.env" deploy/winval.env.example || true   # every knob the README's upgrade section names; new knobs have defaults
 sh deploy/compose-env.sh   # this version's compose REQUIRES WINVAL_PG_PASSWORD_URLENC, which a compose.env written before it does not carry (no --mint: an upgrade never invents a password)
