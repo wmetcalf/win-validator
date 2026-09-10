@@ -125,6 +125,28 @@ publishing a golden, and a failed build leaves no candidate behind. The RAM base
 
 UI + API at <http://localhost:8099/>.
 
+## Upgrading an existing deployment
+
+The bring-up above is greenfield and deliberately keeps an existing `/etc/winval/winval.env`. Coming from an
+earlier checkout, these change meaning or behaviour under a preserved env file — read them before the first
+restart:
+
+- **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
+  rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
+- **The pool-manager unit now owns the RAM base at every start** (`ExecStartPre`): a `/dev/shm` base not owned
+  by the unit's uid (libvirt's DAC driver usually leaves it owned by the qemu user) is discarded and re-copied
+  from `GOLDEN_BASE_DISK` — up to 30 min behind a rotation's lock plus the copy, inside `TimeoutStartSec=55min`.
+  With no disk twin the start refuses rather than replace the only golden with the agent-less master: promote a
+  golden to `GOLDEN_BASE_DISK` first. Re-install both unit files (`install -m 0644 deploy/*.service /etc/systemd/system/`)
+  and reload: the code moved to `/opt/win-validator`.
+- **A preserved env file can refuse the pool-manager at start where it used to run**: `AUTHENTICODE_WARM_DIR` or
+  `AUTHENTICODE_SMOKE_SAMPLE` set to a path that does not exist (the old example pointed at a home directory the
+  `/opt` move invalidates) fails the start by name; `AUTHENTICODE_EGRESS_PORTS` present but blank is now a CLOSED
+  allowlist; every `BLASTBOX_*` value must parse. Diff your env file against `deploy/winval.env.example`.
+- **`WINVAL_JOB_RETENTION_DAYS` (default 7)** sweeps terminal and rowless job directories under `WINVAL_JOB_ROOT`
+  from the first start: an existing job root loses history older than that unless you raise it first.
+- Nothing else in the env file is reinterpreted; every new knob has a default.
+
 ## Why each piece is shaped this way
 
 - **ingress** runs `read_only`, `cap_drop: ALL`, `no-new-privileges`, as uid 10001, with only the
