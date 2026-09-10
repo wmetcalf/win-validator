@@ -26,7 +26,9 @@ fi
 # touching the tree: a host still on a version that has no deploy/compose-env.sh (this script arrived with it) can bootstrap
 # with `git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch>`, and a duplicated first gate here once let a
 # present-but-unusable URL move the tree
-git show "refs/remotes/origin/$branch:deploy/compose-env.sh" | sh -s -- --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }
+rules=$(git show "refs/remotes/origin/$branch:deploy/compose-env.sh" 2>/dev/null) || rules=""   # captured first: a pipe into sh -s reads an empty script as success when the path does not exist at that ref
+[ -n "$rules" ] || { echo "upgrade.sh: origin/$branch has no deploy/compose-env.sh (a version older than this script?): this upgrade path deploys versions that carry it; the tree was not moved" >&2; exit 1; }
+printf '%s\n' "$rules" | sh -s -- --check || { echo "upgrade.sh: compose.env could not be derived (above); the tree was not moved" >&2; exit 1; }
 if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
   echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1
 fi
