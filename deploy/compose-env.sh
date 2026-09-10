@@ -151,13 +151,22 @@ try:
     except Exception:
         user = pw = None
 except ImportError:
-    u = urlsplit(url)
+    try:
+        u = urlsplit(url)
+    except ValueError:   # a raw '[' in the netloc: urlsplit raises before anything can be judged
+        sys.exit("the URL cannot be split (a raw [ or ] in it?): percent-encode it, the user:password included (this host's python has no psycopg to judge it)")
     if u.scheme.startswith("postgres"):
+        # urlsplit and libpq part ways on a RAW '@' (last vs first), a raw space (refused vs taken) and a raw '[' (a traceback):
+        # without libpq to judge, only a userinfo made of unreserved characters, sub-delims and %XX escapes is derived at all
+        import re
+        userinfo = u.netloc.rsplit("@", 1)[0] if "@" in u.netloc else ""
+        if not re.fullmatch(r"(?:(?![@/?#\[\]\s])[\x21-\x7e]|%[0-9A-Fa-f]{2})*", userinfo) or (u.query and not re.fullmatch(r"(?:(?![@/?#\[\]\s])[\x21-\x7e]|%[0-9A-Fa-f]{2})*", u.query)):
+            sys.exit("the URL's user:password (or query) carries a raw @, space, [ ] or another byte libpq and this fallback would read differently; percent-encode it (this host's python has no psycopg to judge it)")
         q = {}   # by hand, %XX only: libpq's conninfo_uri_decode never reads '+' as a space, parse_qs (form encoding) does
         for part in u.query.split("&"):
             if "=" in part:
                 k, v = part.split("=", 1); q[unquote(k)] = unquote(v)
-        user = q.get("user", u.username); pw = q.get("password", unquote(u.password) if u.password else None)
+        user = q.get("user", unquote(u.username) if u.username else None); pw = q.get("password", unquote(u.password) if u.password else None)
 if not (url.startswith("postgresql:") or url.startswith("postgres:")) or user != "winval" or not pw:
     sys.exit(0)   # not the compose's Postgres: the hand-written branch decides
 if any(ord(c) < 32 or ord(c) == 127 for c in pw):

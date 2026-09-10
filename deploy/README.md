@@ -214,7 +214,7 @@ A candidate is promoted **only if it passes the gate**; a broken/regressed bake 
 corruption scenarios) is rejected and the current golden is kept. Schedule it weekly:
 
 ```sh
-sudo cp deploy/winval-golden-rotate.{service,timer} /etc/systemd/system/
+sudo cp deploy/winval-golden-rotate.service deploy/winval-golden-rotate.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now winval-golden-rotate.timer
 ```
 
