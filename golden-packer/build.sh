@@ -79,7 +79,8 @@ import os, sys, xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 t = open("answer/Autounattend.xml.tmpl", encoding="utf-8").read()
 pubkey = os.environ["PUBKEY"].replace("'", "''")   # the key lands inside a PowerShell single-quoted string: an apostrophe in a supplied key's comment doubles
-t = t.replace("@@SSH_PUBKEY@@", escape(pubkey)).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"]))
+q = {'"': "&quot;"}   # both land inside a -Command "..." in the answer file: a double quote would end the command early (the XML guard cannot see that)
+t = t.replace("@@SSH_PUBKEY@@", escape(pubkey, q)).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"], q))
 try:
     ET.fromstring(t)
     data = t.encode("utf-8")   # a value the environment could not decode (not UTF-8) is refused here, not as a traceback

@@ -218,7 +218,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         enabled = False
     if not enabled:
         raise SystemExit(f"{BRIDGE_NF_SYSCTL} is not 1 (br_netfilter not loaded, or the sysctl off): with {workers} workers on one bridge the "
-                         "FORWARD rules never see worker-to-worker frames, so AUTHENTICODE_BLOCK_INTERNAL cannot drop them and a compromised "
+                         "FORWARD rules never see worker-to-worker frames, so the policy's DROP for them (block_internal, an allowlist or the drop exit) never fires and a compromised "
                          "worker reaches its siblings' agent port. Run: modprobe br_netfilter; sysctl -w net.bridge.bridge-nf-call-iptables=1 "
                          "(and persist both), or run one worker")
 

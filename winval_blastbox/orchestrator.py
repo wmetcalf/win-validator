@@ -27,6 +27,8 @@ import time
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+
+from blastbox.host.netwire import parse_strict_bool
 import concurrent.futures.thread as _futures_thread
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -210,7 +212,7 @@ async def lifespan(app: FastAPI):
     global _store
     pool_size = _pool_size()
     _store = JobStore(max_workers=pool_size)
-    if os.environ.get("ORCHESTRATOR_WARM", "1").lower() in ("1", "true", "yes"):
+    if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM") or "1"):   # blastbox's strict boolean: a typo raises at startup, never reads as OFF (the opposite of the default)
         runner = HostRunner()
         runner.warmup()  # boot the VM pool once
         ENGINES["authenticode"] = lambda p: _authenticode_verdict(runner.validate(p))
