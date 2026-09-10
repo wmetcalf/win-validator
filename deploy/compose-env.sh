@@ -33,7 +33,10 @@ db_url() {   # the value as the service reads it: systemd's EnvironmentFile (and
 PWLINE=$(db_url | python3 -c 'import sys, json; from urllib.parse import urlsplit, unquote, quote; u = urlsplit(sys.stdin.read().strip()); pw = unquote(u.password) if u.scheme.startswith("postgres") and u.username == "winval" and u.password else None; (sys.exit("the password contains control characters, which compose'"'"'s env file cannot carry; choose another") if pw and any(ord(c) < 32 or ord(c) == 127 for c in pw) else None); print("WINVAL_PG_PASSWORD=" + json.dumps(pw, ensure_ascii=False).replace("$", "$$") + "\nWINVAL_PG_PASSWORD_URLENC=" + quote(pw, safe="")) if pw else None')
 # both lines present with NON-EMPTY values: what a hand-written compose.env must carry (an empty value resolves to compose's
 # 'winval' fallback and locks the ingress out)
-hand_written=no; grep -q '^WINVAL_PG_PASSWORD=..*' "$ETC/compose.env" 2>/dev/null && grep -q '^WINVAL_PG_PASSWORD_URLENC=..*' "$ETC/compose.env" 2>/dev/null && hand_written=yes
+env_value() {   # the value of $1 in compose.env as compose reads it: a matching pair of double or single quotes stripped, so "" and '' are EMPTY (the refusal below tells the operator to double-quote, and "" passed a bare non-empty test)
+  sed -n "s/^$1=//p" "$ETC/compose.env" 2>/dev/null | tail -1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+hand_written=no; [ -n "$(env_value WINVAL_PG_PASSWORD)" ] && [ -n "$(env_value WINVAL_PG_PASSWORD_URLENC)" ] && hand_written=yes
 # 'already matches' means BOTH derived lines are in the file exactly: a match on the encoded half alone let a missing, empty or
 # stale plain password line through, and compose then initialised pgdata with its stock fallback while the ingress used the URL's
 HAVE=$(grep '^WINVAL_PG_PASSWORD=\|^WINVAL_PG_PASSWORD_URLENC=' "$ETC/compose.env" 2>/dev/null | sort || true)
