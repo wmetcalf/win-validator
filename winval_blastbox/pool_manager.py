@@ -90,32 +90,44 @@ def _modprobe(*args: str) -> tuple[int, list[str]]:
     return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
 
 
-def _is_self_load(words: list[str]) -> bool:
-    """Is an install directive's command the self-load idiom — `modprobe --ignore-install br_netfilter`, and nothing else before it?
-    Only the FIRST simple command is judged (up to &&, ||, ; or |: a sysctl chained after the load is the documented shape); its
-    first word must be modprobe (a bare name, or an existing executable path ending in it), its other words flags, one of them
-    --ignore-install or -i, and its one non-flag the module (a bare name, or a .ko path; kmod reads br-netfilter as br_netfilter).
-    A directive that merely CONTAINS those words (`test -f /etc/allow && modprobe --ignore-install br_netfilter`, an echo of a
-    policy) is not the idiom: what it runs cannot be told from its text, so it is refused."""
+SELF_LOAD_FLAGS = {"--ignore-install", "-i", "--quiet", "-q", "--verbose", "-v", "--all", "-a", "--use-blacklist", "-b", "--syslog", "-s"}
+# the insertion-preserving flags of modprobe(8): anything else (-n -r -D -R -c, or -S/-C/-d/-w which take a value and eat the
+# module's name) makes the command something other than an insertion, or cannot be told apart from one by its text
+
+
+def _is_self_load(words: list[str]) -> list[str] | None:
+    """Is an install directive's command EXACTLY the self-load idiom — `modprobe --ignore-install br_netfilter`? Returns the
+    words to confirm it with (its flags and its module argument), or None. Only the FIRST simple command is judged (up to &&,
+    ||, ; or |: a sysctl chained after the load is the documented shape): its first word must be the system's modprobe (a bare
+    name, or a path that resolves to the same binary the probe runs — a busybox or a wrapper elsewhere is not it), every flag
+    drawn from SELF_LOAD_FLAGS with --ignore-install or -i among them, and its one non-flag the module: a bare name (kmod reads
+    br-netfilter as br_netfilter) or a .ko path. A directive that merely CONTAINS those words (`test -f /etc/allow && modprobe
+    --ignore-install br_netfilter`, an echo of a policy, `modprobe -n -i br_netfilter`) is not the idiom: it is refused."""
     first: list[str] = []
     for w in words:
         if w in ("&&", "||", ";", "|"):
             break
         first.append(w)
     if not first:
-        return False
+        return None
     prog = first[0]
-    if os.path.basename(prog) != "modprobe" or ("/" in prog and not os.access(prog, os.X_OK)):
-        return False
+    if os.path.basename(prog) != "modprobe":
+        return None
+    if "/" in prog:
+        system = shutil.which("modprobe")
+        if not system or not os.access(prog, os.X_OK) or os.path.realpath(prog) != os.path.realpath(system):
+            return None
     flags = [w for w in first[1:] if w.startswith("-")]
     args = [w for w in first[1:] if not w.startswith("-")]
-    if not any(f in ("--ignore-install", "-i") for f in flags) or len(args) != 1:
-        return False
+    if not all(f in SELF_LOAD_FLAGS for f in flags) or not any(f in ("--ignore-install", "-i") for f in flags) or len(args) != 1:
+        return None
     name = os.path.basename(args[0])
     for suffix in (".zst", ".xz", ".gz", ".ko"):
         if name.endswith(suffix):
             name = name[: -len(suffix)]
-    return name.replace("-", "_") == "br_netfilter"
+    if name.replace("-", "_") != "br_netfilter":
+        return None
+    return [w for w in first[1:] if w not in ("-q", "--quiet", "-s", "--syslog")]   # harmless to the insertion, but they hide the plan the confirming dry run reads
 
 
 def _bridge_nf_loadable() -> tuple[bool, str]:
@@ -144,10 +156,11 @@ def _bridge_nf_loadable() -> tuple[bool, str]:
             if w.startswith("#"):
                 break
             words.append(w)
-        if not _is_self_load(words):
+        argv = _is_self_load(words)
+        if argv is None:
             return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]}); only the plain self-load idiom is read as loadable"
-        try:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
-            rc, plan = _modprobe("-n", "-v", "--ignore-install", "br_netfilter")
+        try:   # the idiom's OWN words, dry-run (a .ko path is resolved as it would be): the directive's text does not say the module EXISTS
+            rc, plan = _modprobe("-n", "-v", *argv)
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
         if rc != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
