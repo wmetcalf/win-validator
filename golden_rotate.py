@@ -1216,9 +1216,6 @@ def restart_pool() -> bool:
         logger.warning("GOLDEN_RESTART_SERVICE is empty: the promoted golden is NOT in service until winval-pool-manager is restarted")
         return False
     logger.info("restarting %s to warm off the refreshed golden", svc)
-    before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()   # a manual restart does NOT reset
-    # the counter (measured on a transient unit: 3 before, 3 right after): only a RISE during the settle window is this restart's failing start
-    baseline = int(before) if before.isdigit() else 0
     state = _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip()
     if state == "failed":   # crashed or start-limit-latched: clear the latch and bring it back
         _run(["sudo", "systemctl", "reset-failed", svc])
@@ -1235,14 +1232,20 @@ def restart_pool() -> bool:
         logger.warning("%s is %s (deliberately stopped?): nothing was restarted; the promoted golden is NOT in service until it is started", svc, active or "not active")
         return False
     # Type=simple: the unit is 'active' the instant systemctl returns, before the manager has read a knob or warmed a worker. A
-    # start that fails seconds later shows as the unit's auto-restart (Restart=on-failure counts it in NRestarts, which our own
-    # restart does not reset: a rise above the baseline read before it) or, once the start limit latches, as 'failed'. Watch it
-    # for a settle window before calling the golden in service.
+    # start that fails seconds later shows as the unit's auto-restart (Restart=on-failure counts it in NRestarts) or, once the
+    # start limit latches, as 'failed'. The counter's baseline is read AFTER the restart command returned: what a stop, a
+    # reset-failed or the restart itself do to it (measured: a stop zeroes it, a restart may not) no longer matters — only a
+    # rise from here on is this start failing. Watch it for a settle window before calling the golden in service.
+    before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
+    baseline = int(before) if before.isdigit() else 0
     deadline = time.time() + RESTART_SETTLE_S
     while time.time() < deadline:
         time.sleep(min(5, max(0.0, deadline - time.time())))
         if _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip() == "failed":
             raise RestartFailed(f"{svc} went 'failed' within {RESTART_SETTLE_S}s of the restart: its start is failing (journalctl -u {svc}); the pool is DOWN")
+        now_active = _run(["sudo", "systemctl", "is-active", svc]).stdout.strip()
+        if now_active not in ("active", "activating"):
+            raise RestartFailed(f"{svc} is {now_active or 'not active'} within {RESTART_SETTLE_S}s of the restart: the pool is DOWN (journalctl -u {svc})")
         restarts = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
         if restarts.isdigit() and int(restarts) > baseline:
             raise RestartFailed(f"{svc} auto-restarted {int(restarts) - baseline} time(s) within {RESTART_SETTLE_S}s of the restart: its start is failing (journalctl -u {svc}); the pool is not up")
