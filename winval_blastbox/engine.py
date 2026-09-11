@@ -47,6 +47,7 @@ _POOL_LOCK = threading.Lock()
 
 
 KNOB_VALUES = {"AUTHENTICODE_REV": "online|offline|none", "AUTHENTICODE_SCRIPTS": "ps|native"}   # winval.env.example's vocabulary
+KNOB_FALLBACK = {"AUTHENTICODE_REV": "the agent read it as online", "AUTHENTICODE_SCRIPTS": "the agent read it as native (only the exact word ps selects PowerShell)"}   # myatg's ternaries, unvalidated
 
 
 def unknown_knob_values() -> dict[str, str]:
@@ -216,7 +217,7 @@ class AuthenticodeEngine:
 
         warnings: list[BbWarning] = []
         for k, bad in unknown_knob_values().items():   # a value the agent does not know is answered with its startup default, silently
-            warnings.append(BbWarning(code="param_unknown_value", message=f"{k}={bad!r} is not a value the agent knows ({KNOB_VALUES[k]}); the agent used its default"))
+            warnings.append(BbWarning(code="param_unknown_value", message=f"{k}={bad[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"))   # capped: the contract's message is 2000 chars, and an unclosed quote hands systemd the rest of the file as the value
         unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())
         if unforwardable:
             warnings.append(

@@ -200,6 +200,8 @@ if sys.argv[1] == "egress":
             if exp.lower() not in AGENT: print(f"malformed: AUTHENTICODE_SMOKE_EXPECT={exp!r} is not a status the agent maps; the pool-manager refuses that posture at start"); sys.exit(0)
         wd = (env.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if wd and not os.path.isdir(wd): print(f"malformed: AUTHENTICODE_WARM_DIR={wd!r} is not a directory; the pool-manager refuses that posture at start"); sys.exit(0)
+        gb = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t\n\r\f\v") or "/dev/shm/golden-base.qcow2"   # vm_pool.golden_base and the unit's pre-start, mirrored: ASCII whitespace trimmed, a byte outside printable ASCII refused
+        if not all(32 <= ord(c) < 127 for c in gb): print(f"malformed: AUTHENTICODE_GOLDEN_BASE={gb[:200]!r} carries a character outside printable ASCII (a pasted U+00A0?); the pool-manager's pre-start refuses that posture"); sys.exit(0)
     pool_guards()
     if ex.lower() != "none": bool_guard()   # under none the spec builds no policy and never parses the boolean (authenticode_spec)
     pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()

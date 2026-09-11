@@ -611,7 +611,7 @@ class PoolManager:
         os.chmod(WORK_ROOT, 0o700)
         try:   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings — BEFORE the orphan recovery (a refusal that fires on the first start after an upgrade must not first fail every RUNNING job and unlink its spool), the pool shut on the way out like every other start failure
             _refuse_open_egress(self._concurrency)
-        except ValueError as exc:   # a posture typo: the warm-up's own one-line path
+        except (ValueError, RuntimeError) as exc:   # a posture typo, or a golden base outside printable ASCII: the warm-up's own one-line path
             logger.error("the pool cannot start: %s", exc); self._runner.shutdown(); return 1
         except SystemExit:
             self._runner.shutdown(); raise
