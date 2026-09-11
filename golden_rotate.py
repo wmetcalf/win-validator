@@ -584,7 +584,6 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     try:   # EVERY promoting entry point restarts the pool-manager afterwards, the retry/rollback CLI (no gate) included: the
         # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
-        validate_egress_posture(authenticode_spec())
         from winval_blastbox.pool_manager import _refuse_open_egress
         _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
         # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
@@ -601,6 +600,7 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         pool_warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
         if pool_warm_dir and not os.path.isdir(pool_warm_dir):
             raise RuntimeError(f"AUTHENTICODE_WARM_DIR={pool_warm_dir!r} is not a directory: the pool-manager would refuse to start")
+        validate_egress_posture(authenticode_spec())   # last, as the manager runs it (inside WarmVmPool.__init__, after the knob guards)
     except (ValueError, RuntimeError) as exc:
         raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     except SystemExit as exc:
@@ -805,8 +805,10 @@ def validate_golden(qcow2: str) -> bool:
 # that blames a concurrent run — and with fs.protected_regular root cannot even open it
 ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
 PREFLIGHT_LOCK_WAIT_S = _env_int("GOLDEN_PREFLIGHT_LOCK_WAIT_S", 1800, floor=0)
-RESTART_SETTLE_S = _env_int("GOLDEN_RESTART_SETTLE_S", 360, floor=0)   # how long restart_pool watches a restarted unit before calling it up (0: none):
-# past the pool's 300 s warm deadline (WarmVmPool.start) plus the unit's RestartSec, so a golden that boots but never warms is seen failing
+RESTART_SETTLE_S = _env_int("GOLDEN_RESTART_SETTLE_S", 540, floor=0)   # how long restart_pool watches a restarted unit before calling it up (0: none):
+# past the worst case between "systemctl returned" and the first auto-restart of a golden that boots but never warms — seconds of start,
+# the pool's 300 s warm wait (WarmVmPool.start), the failed-warm reap (blastbox's pool stop, floored at 150 s for libvirt, plus a tick
+# still in its finalize), then RestartSec=30 before NRestarts moves: about 485 s measured; 540 leaves the margin
 
 
 def rotate(candidate: str) -> None:
