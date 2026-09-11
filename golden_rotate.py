@@ -519,7 +519,8 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         return _rotation_preflight(estimate_bytes, candidate_built, keep, source_copy, gate_samples, hold_suffix, holder)
     except BaseException:
         for h in holder:
-            _run(["sudo", "rm", "-f", h])
+            if _run(["sudo", "rm", "-f", h]).returncode != 0:   # said, not swallowed: a hold on any other name than golden-base.* is reclaimed by nothing
+                logger.warning("could not remove the hold %s: remove it by hand if the images store keeps refusing writes", h)
         raise
 
 
@@ -1436,14 +1437,18 @@ def _main(cmd: str, argv: list[str]) -> int:
             # prune orders those by mtime, and re-dating one would pin the oldest and evict a newer generation), the image and its depth
             # sidecar only when it HAS one (an empty sidecar reads as depth 0). Not after a SplitState: the disk twin IS published then,
             # and the remedy is the restart the message names, not a retry
-            if c.is_file() and not _BACKUP_NAME.match(c.name):
-                for f in (str(c), str(candidate_depth_file(str(c)))):
-                    if Path(f).is_file() and _run(["sudo", "touch", f]).returncode != 0:
-                        logger.warning("could not refresh %s: the next rotation's prune may reclaim the kept candidate before a retry", f)
+            # every name RESOLVED before it is judged and before it is touched, as golden_build does: is_file() follows a symlink and so
+            # does touch, so an unresolved sidecar path was a way to re-date a retained backup the name test had just excluded
+            for f in (str(c), str(candidate_depth_file(str(c)))):
+                real = os.path.realpath(f)
+                if not Path(real).is_file() or _BACKUP_NAME.match(Path(real).name):
+                    continue
+                if _run(["sudo", "touch", real]).returncode != 0:
+                    logger.warning("could not refresh %s: the next rotation's prune may reclaim the kept candidate before a retry", real)
             raise
         finally:
-            if hold:
-                _run(["sudo", "rm", "-f", hold])
+            if hold and _run(["sudo", "rm", "-f", hold]).returncode != 0:
+                logger.warning("could not remove the hold %s: remove it by hand if the images store keeps refusing writes", hold)
         try:
             restarted = restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         except RestartFailed as exc:   # the promotion stands; a pool left down is a non-zero exit, as the timer answers it
