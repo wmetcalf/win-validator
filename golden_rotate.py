@@ -393,8 +393,8 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str, int]:
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
 # would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
-GOLDEN_BASE = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or os.environ.get("GOLDEN_BASE")
-               or "/dev/shm/golden-base.qcow2")
+GOLDEN_BASE = ((os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip() or (os.environ.get("GOLDEN_BASE") or "").strip()
+               or "/dev/shm/golden-base.qcow2")   # blank is the default, as the pool's spec and the unit's pre-start read it
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 # A second copy of the chain record OFF the images store: the record beside the golden is the one a

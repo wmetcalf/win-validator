@@ -189,17 +189,19 @@ class AuthenticodeEngine:
         # --serve-http startup and TIER isn't a myatg parameter, so an operator export of either is
         # answered with a warning rather than silently ignored.
         req_params = {}
-        if os.environ.get("AUTHENTICODE_REV"):
-            req_params["rev"] = os.environ["AUTHENTICODE_REV"]
-        if os.environ.get("AUTHENTICODE_SCRIPTS"):
-            req_params["scripts"] = os.environ["AUTHENTICODE_SCRIPTS"]
+        rev = (os.environ.get("AUTHENTICODE_REV") or "").strip()   # stripped like every knob: whitespace-only is unset (an agent answers a stray
+        if rev:                                                   # ?rev=++ with its startup default, silently)
+            req_params["rev"] = rev
+        scripts = (os.environ.get("AUTHENTICODE_SCRIPTS") or "").strip()
+        if scripts:
+            req_params["scripts"] = scripts
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
         verdict = get_pool().validate(str(input), params=req_params or None)
 
         warnings: list[BbWarning] = []
-        unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if os.environ.get(k))
+        unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())
         if unforwardable:
             warnings.append(
                 BbWarning(

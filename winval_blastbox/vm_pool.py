@@ -218,7 +218,8 @@ def authenticode_spec() -> VmWorkerSpec:
         )
     return VmWorkerSpec(
         name="authenticode",
-        image=VmImageSpec(golden=os.environ.get("AUTHENTICODE_GOLDEN_BASE", "/dev/shm/golden-base.qcow2")),
+        image=VmImageSpec(golden=(os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip() or "/dev/shm/golden-base.qcow2"),   # blank is the default, as the
+        # rotation (golden_rotate.GOLDEN_BASE) and the unit's pre-start read it: the three must name ONE file
         agent_port=agent_port(),
         warm_size=pool_size(),
         egress=egress,
