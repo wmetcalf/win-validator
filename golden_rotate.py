@@ -277,7 +277,11 @@ def _is_builder(pid: str) -> bool:
         argv = Path("/proc", pid, "cmdline").read_bytes().split(b"\0")
     except OSError:
         return False
-    return any(a.endswith((b"golden_rotate.py", b"golden_build.py")) for a in argv)
+    if any(a.endswith((b"golden_rotate.py", b"golden_build.py")) for a in argv):
+        return True
+    # `python -m golden_build ...` names the module, not the file: the token after -m (the deploy runs the files, but a hand-run
+    # build this way must not lose its hold to the next rotation's sweep)
+    return any(argv[i] == b"-m" and argv[i + 1] in (b"golden_rotate", b"golden_build") for i in range(len(argv) - 1))
 
 
 def _rebake_src_live(c: Path) -> bool:
