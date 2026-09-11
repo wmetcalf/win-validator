@@ -81,6 +81,32 @@ def _retention_days() -> float:
 _pool_size = pool_size   # ONE reader for both the warm size (vm_pool.authenticode_spec) and the claim concurrency
 
 
+READY_FILE = os.environ.get("WINVAL_READY_FILE") or "/run/winval-pool-manager.ready"   # written once the pool is WARM, removed on exit: the
+# rotation's restart_pool waits for it (a Type=simple unit is 'active' long before a worker is warm, and a failed warm shows only minutes later)
+
+
+def _write_ready() -> None:
+    """The pool is warm: say so where the rotation looks (pid and time inside, for the operator). Best effort: a marker that
+    cannot be written is a warning, never a failed start — the rotation then times out on it and says so by name."""
+    try:
+        tmp = f"{READY_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            fh.write(f"{os.getpid()} {int(time.time())}\n")
+        os.replace(tmp, READY_FILE)
+    except OSError as exc:
+        logger.warning("readiness marker %s not written (%s): a rotation's restart_pool will time out waiting for it", READY_FILE, exc)
+
+
+def _clear_ready() -> None:
+    """No marker while the pool is not warm: removed at start (a crashed previous life may have left one) and on every exit."""
+    try:
+        os.unlink(READY_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("stale readiness marker %s not removed (%s)", READY_FILE, exc)
+
+
 BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
 BRIDGE_NF_MODPROBE = ("modprobe",)   # the binary (a test points it at a -C config dir or a stub); the helper adds its own arguments
 
@@ -180,7 +206,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
     an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
     refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
-    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist, or the drop exit)
+    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist that does not admit the agent port, or the drop exit)
     AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
     and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach.
     The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
@@ -205,7 +231,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         # too); only None is 'no allowlist: ACCEPT'. The drop exit ends its chain in an unconditional DROP (blastbox's rooter): closed already
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
                          "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
-                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or AUTHENTICODE_EGRESS_PORTS, or AUTHENTICODE_EXIT=drop), or run one worker")
+                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or an AUTHENTICODE_EGRESS_PORTS that does not admit the agent port, or AUTHENTICODE_EXIT=drop), or run one worker")
     if sysctl == "loadable":
         if Path(BRIDGE_NF_SYSCTL).exists():
             return   # br_netfilter is loaded: the unit's `sysctl -w` sets the value at the next start
@@ -591,6 +617,7 @@ class PoolManager:
             self._runner.shutdown(); raise
         self._recover_orphans()
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
+        _clear_ready()   # a marker from a previous life says nothing about THIS start
         logger.info("warming VM pool (%d workers)…", self._concurrency)
         try:
             try:
@@ -602,11 +629,13 @@ class PoolManager:
                 logger.error("the pool cannot start: %s", exc)   # one line the journal shows eight times, not a nine-frame traceback each restart
                 return 1
             logger.info("pool warm; claiming jobs from %s", type(self._store).__name__)
+            _write_ready()
             with ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="claim") as ex:
                 for _ in range(self._concurrency):
                     ex.submit(self._worker_loop)
                 self._stop.wait()  # block until SIGTERM/SIGINT
         finally:
+            _clear_ready()
             self._runner.shutdown()   # on EVERY exit, a failed warm-up included: whatever workers exist are destroyed
         logger.info("pool-manager stopped")
         return 0

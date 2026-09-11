@@ -809,26 +809,20 @@ def validate_golden(qcow2: str) -> bool:
 # that blames a concurrent run — and with fs.protected_regular root cannot even open it
 ROTATE_LOCK = os.environ.get("GOLDEN_ROTATE_LOCK", "/run/winval-golden-rotate.lock")
 PREFLIGHT_LOCK_WAIT_S = _env_int("GOLDEN_PREFLIGHT_LOCK_WAIT_S", 1800, floor=0)
-RESTART_SETTLE_S: int | None = _env_int("GOLDEN_RESTART_SETTLE_S", -1, floor=-1)   # how long restart_pool watches a restarted unit before
-# calling it up: 0 = no watch, unset (-1) = computed from the pool size, see restart_settle_s()
+RESTART_SETTLE_S: int | None = _env_int("GOLDEN_RESTART_SETTLE_S", -1, floor=-1)   # how long restart_pool waits for the restarted
+# pool-manager to report WARM before calling the golden in service: 0 = no wait, unset (-1) = 3600 (the unit's own start horizon)
 if RESTART_SETTLE_S is not None and RESTART_SETTLE_S < 0:
     RESTART_SETTLE_S = None
+READY_FILE = os.environ.get("WINVAL_READY_FILE") or "/run/winval-pool-manager.ready"   # the pool-manager writes it once warm (pool_manager._write_ready)
 
 
 def restart_settle_s() -> int:
-    """The window past the worst case between "systemctl returned" and the first auto-restart of a golden that boots but never
-    warms: seconds of start, the pool's 300 s warm wait (WarmVmPool.start), the failed-warm reap — blastbox's pool stop spends its
-    150 s budget on the thread joins and THEN destroys every slot, one virsh destroy (up to 90 s) per slot, unbounded — and
-    RestartSec=30 before NRestarts moves. With the shipped two slots that is about 660 s; a margin of 60 s on top. An explicit
-    GOLDEN_RESTART_SETTLE_S wins (0 skips the watch)."""
-    if RESTART_SETTLE_S is not None:
-        return RESTART_SETTLE_S
-    try:
-        from winval_blastbox.vm_pool import pool_size
-        slots = pool_size()
-    except Exception:  # noqa: BLE001 — the pool's knob reader is not this module's to fail on
-        slots = 2
-    return 300 + 150 + 90 * slots + 30 + 60
+    """The ceiling on the wait for the readiness marker. There is no arithmetic to get right any more: a Type=simple unit is
+    'active' the instant systemctl returns, a failed warm surfaces only after the pool's warm wait and a reap whose bounded
+    worst case runs to many minutes per slot — so the rotation waits for the manager to SAY it is warm (the marker), refuses
+    on the unit's failure signals meanwhile, and gives up by name at the ceiling. An explicit GOLDEN_RESTART_SETTLE_S wins
+    (0 skips the wait)."""
+    return RESTART_SETTLE_S if RESTART_SETTLE_S is not None else 3600
 
 
 def rotate(candidate: str) -> None:
@@ -1253,17 +1247,33 @@ def restart_pool() -> bool:
         # try-restart of a stopped unit is a successful no-op
         logger.warning("%s is %s (deliberately stopped?): nothing was restarted; the promoted golden is NOT in service until it is started", svc, active or "not active")
         return False
-    # Type=simple: the unit is 'active' the instant systemctl returns, before the manager has read a knob or warmed a worker. A
-    # start that fails seconds later shows as the unit's auto-restart (Restart=on-failure counts it in NRestarts) or, once the
-    # start limit latches, as 'failed'. The counter's baseline is read AFTER the restart command returned: what a stop, a
-    # reset-failed or the restart itself do to it (measured: a stop zeroes it, a restart may not) no longer matters — only a
-    # rise from here on is this start failing. Watch it for a settle window before calling the golden in service.
+    # Type=simple: the unit is 'active' the instant systemctl returns, before the manager has read a knob or warmed a worker. The
+    # manager writes READY_FILE once the pool is warm and removes it at start and on exit; a start that fails shows meanwhile as the
+    # unit's auto-restart (Restart=on-failure counts it in NRestarts; the baseline is read after the restart returned, whatever a
+    # stop, a reset-failed or the restart did to the counter), as 'failed' once the start limit latches, or as no longer active.
+    # Wait for the marker, refuse on any of those, give up by name at the ceiling.
     before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
     baseline = int(before) if before.isdigit() else 0
     settle = restart_settle_s()
-    deadline = time.time() + settle
-    while time.time() < deadline:
-        time.sleep(min(5, max(0.0, deadline - time.time())))
+    started = time.time()
+    deadline = started + settle
+    if not settle:
+        return True
+    tick = 0
+    while True:
+        try:
+            if os.stat(READY_FILE).st_mtime >= started - 2:   # written by THIS start (the manager clears a previous life's marker first)
+                logger.info("%s reported the pool warm %ds after the restart", svc, int(time.time() - started))
+                return True
+        except OSError:
+            pass
+        if time.time() >= deadline:
+            raise RestartFailed(f"{svc} did not report the pool warm within {settle}s of the restart ({READY_FILE} not written): the golden is "
+                                f"promoted but the pool is not in service (journalctl -u {svc}); GOLDEN_RESTART_SETTLE_S raises the wait")
+        time.sleep(min(1, max(0.0, deadline - time.time())))   # the marker is looked for every second, the unit's state every fifth
+        tick += 1
+        if tick % 5 and time.time() < deadline:
+            continue
         if _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip() == "failed":
             raise RestartFailed(f"{svc} went 'failed' within {settle}s of the restart: its start is failing (journalctl -u {svc}); the pool is DOWN")
         now_active = _run(["sudo", "systemctl", "is-active", svc]).stdout.strip()
@@ -1272,9 +1282,6 @@ def restart_pool() -> bool:
         restarts = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
         if restarts.isdigit() and int(restarts) > baseline:
             raise RestartFailed(f"{svc} auto-restarted {int(restarts) - baseline} time(s) within {settle}s of the restart: its start is failing (journalctl -u {svc}); the pool is not up")
-    if settle:
-        logger.info("%s still up %ds after the restart", svc, settle)
-    return True
 
 
 def refresh_and_rotate() -> int:

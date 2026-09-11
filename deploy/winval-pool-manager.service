@@ -45,6 +45,7 @@ Requires=libvirtd.service
 [Service]
 # design change #8: worker-to-worker frames on the bridge meet the FORWARD rules only with br_netfilter loaded and the sysctl at 1;
 # both are set at every start ('-': a host that cannot is not failed here — the manager then refuses by name, with the remedy)
+ExecStartPre=-/bin/rm -f /run/winval-pool-manager.ready
 ExecStartPre=-/usr/sbin/modprobe br_netfilter
 ExecStartPre=-/usr/sbin/sysctl -q -w net.bridge.bridge-nf-call-iptables=1
 Type=simple
