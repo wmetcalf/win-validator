@@ -596,12 +596,12 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         # then the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name), in the manager's order — its
         # start runs _refuse_open_egress first, these later: with two knobs wrong the same one is named here and there
         from winval_blastbox.vm_pool import smoke_expect
-        smoke_sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
+        smoke_sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
         if smoke_sample and not os.path.isfile(smoke_sample):
             raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} is not a file: the pool-manager would refuse to start")
         if smoke_sample:
             smoke_expect()
-        pool_warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
+        pool_warm_dir = (os.environ.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if pool_warm_dir and not os.path.isdir(pool_warm_dir):
             raise RuntimeError(f"AUTHENTICODE_WARM_DIR={pool_warm_dir!r} is not a directory: the pool-manager would refuse to start")
         validate_egress_posture(authenticode_spec())   # last, as the manager runs it (inside WarmVmPool.__init__, after the knob guards)

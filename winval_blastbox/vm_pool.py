@@ -252,7 +252,7 @@ def _smoke(slot) -> bool:
     """Health smoke test: send a known benign signed sample to the agent and assert the expected
     verdict — proves the OS is up, the agent returns, AND cert validation actually works (not just
     a port-open check). Opt-in via AUTHENTICODE_SMOKE_SAMPLE (default expected status Valid)."""
-    sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
+    sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
     expect = smoke_expect()
     try:
         v = agent_validate(slot.endpoint, sample, timeout=30.0)
@@ -307,7 +307,7 @@ class WarmVmPool:
         self._last_reap = ""
         # smoke + CRL-warm are opt-in via env; clock-sync (on_ready) is always on — a stale clock at
         # boot or after revert would corrupt validity/revocation verdicts.
-        smoke_sample = os.environ.get("AUTHENTICODE_SMOKE_SAMPLE")
+        smoke_sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()   # stripped like every knob: whitespace-only is unset
         if smoke_sample and not os.path.isfile(smoke_sample):   # a directory (the warm dir, transposed) would fail every worker closed with no reason
             # fail FAST and NAME THE CAUSE: with the variable set and the file missing, every
             # worker would fail the smoke gate and the pool would report only "no worker became
@@ -316,7 +316,7 @@ class WarmVmPool:
         if smoke_sample:
             smoke_expect()   # refused by name here, at start, not at the first health check
         health_check = _smoke if smoke_sample else None
-        warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
+        warm_dir = (os.environ.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if warm_dir and not os.path.isdir(warm_dir):
             # the same rule as the smoke sample: set but missing must fail HERE, by name — _warm_crl
             # would otherwise skip silently and every snapshot would carry a cold CRL/OCSP cache
