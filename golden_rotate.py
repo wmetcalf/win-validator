@@ -1416,8 +1416,11 @@ def _main(cmd: str, argv: list[str]) -> int:
         try:
             rotate(argv[1])
         except (NothingPublished, SplitState):
-            if c.is_file():
-                _run(["sudo", "touch", str(c)]); _run(["sudo", "touch", str(candidate_depth_file(str(c)))])   # kept for the retry: fresh again
+            if c.is_file():   # kept for the retry: fresh again — the image, and its depth sidecar only when it HAS one (a rollback of a
+                # retained backup has none, and an empty sidecar would read as a fabricated depth at the next promotion)
+                _run(["sudo", "touch", str(c)])
+                if candidate_depth_file(str(c)).is_file():
+                    _run(["sudo", "touch", str(candidate_depth_file(str(c)))])
             raise
         finally:
             if hold:
