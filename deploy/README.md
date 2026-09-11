@@ -142,7 +142,7 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 - **The pool-manager refuses to start without `AUTHENTICODE_EXIT`** (design change #7): an env file that never named an
   exit driver must gain one (`direct` is the minimum) or the explicit `AUTHENTICODE_EXIT=none`. `upgrade.sh --restart` refuses
   BEFORE the tree moves when the line is missing; without `--restart` it warns. With more than one worker the start also needs
-  `AUTHENTICODE_BLOCK_INTERNAL=1` (or `AUTHENTICODE_EGRESS_PORTS`), or the pool-manager refuses by name (design change #8);
+  `AUTHENTICODE_BLOCK_INTERNAL=1` (or an `AUTHENTICODE_EGRESS_PORTS` that does not admit the agent port, or the `drop` exit), or the pool-manager refuses by name (design change #8);
   `upgrade.sh --restart` refuses before the move for that too. The unit itself loads `br_netfilter` and sets
   `net.bridge.bridge-nf-call-iptables=1` at every start; a host that cannot load the module is refused by name with the remedy — by
   `upgrade.sh --restart` before the move and by the rotation preflight before a promotion (both probe with a `modprobe` dry run), and by
@@ -186,7 +186,7 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   host-destined traffic except established, DHCP and gated DNS, and `AUTHENTICODE_BLOCK_INTERNAL=1` drops the
   docker-published 8099 in FORWARD. Worker-to-worker traffic on the bridge is switched, not routed: it meets the
   FORWARD rules only with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe br_netfilter`), and is
-  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1`, a port allowlist, or the `drop` exit (whose chain ends in DROP). With more
+  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1`, a port allowlist that does not admit the agent port, or the `drop` exit (whose chain ends in DROP). With more
   than one worker the pool-manager refuses to start unless both are in place (one of those three, AND the sysctl at 1). The golden's
   own rule for the agent port admits the pool-manager's address alone (learned from the libvirt network at bake
   time; `AUTHENTICODE_AGENT_CALLER` overrides it, `AUTHENTICODE_LIBVIRT_NETWORK` names another network) — a golden
