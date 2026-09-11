@@ -392,7 +392,7 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str, int]:
     return src, copy, depth
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
-# would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
+# would log "PROMOTED" every night and never reach a job. The old name GOLDEN_BASE is refused by the preflight (below).
 GOLDEN_BASE = ((os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t")
                or "/dev/shm/golden-base.qcow2")   # blank is the default, space and tab only are trimmed, as the unit's sed does (a newline, a no-break space or any control byte is refused by the
                                                  # preflight's printable-ASCII check), as the pool's spec and the unit's pre-start read it
@@ -520,17 +520,41 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     The estimate is the larger of the current golden and the master, or the caller's (the
     build entry point passes its own base); with nothing to estimate from, refuse rather than
     pass a full disk. Raises NothingPublished."""
-    if not all(32 <= ord(c) < 127 for c in GOLDEN_BASE):   # static knobs: refused before the lock, the prune and the hour-long build —
-        # as the pool's spec and the unit's pre-start refuse it (winval_blastbox.vm_pool.golden_base)
-        raise NothingPublished(f"AUTHENTICODE_GOLDEN_BASE={GOLDEN_BASE!r} carries a character outside printable ASCII (a pasted U+00A0, a stray newline?): only a plain ASCII path is supported")
-    if LEGACY_GOLDEN_BASE and "AUTHENTICODE_GOLDEN_BASE" not in os.environ:
+    if LEGACY_GOLDEN_BASE and LEGACY_GOLDEN_BASE != GOLDEN_BASE:   # static knobs: refused before the lock, the prune and the hour-long build.
+        # Presence of the new name says nothing — both units set AUTHENTICODE_GOLDEN_BASE themselves (Environment=), and a blank value resolves
+        # to the default — so the old name is refused whenever it names a path the rotation would NOT promote to
         raise NothingPublished(f"GOLDEN_BASE={LEGACY_GOLDEN_BASE!r} is the rotator's OLD name for the RAM base and nothing else reads it: the pool and the "
-                               f"pool-manager unit boot from AUTHENTICODE_GOLDEN_BASE (default {GOLDEN_BASE}). Rename the knob (deploy/winval.env.example)")
+                               f"pool-manager unit boot from AUTHENTICODE_GOLDEN_BASE ({GOLDEN_BASE}, which this rotation would promote to). Rename the knob (deploy/winval.env.example)")
     try:
         validate_graveyard(GRAVEYARD)
         validate_warm_dir(WARM_DIR)
     except ValueError as exc:
         raise NothingPublished(str(exc)) from exc
+    try:   # EVERY promoting entry point restarts the pool-manager afterwards, the retry/rollback CLI (no gate) included: the
+        # (static knobs, so before the root check, the lock wait and the prune; the golden base is judged INSIDE authenticode_spec(), at the manager's position)
+        # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
+        from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
+        from winval_blastbox.pool_manager import _refuse_open_egress
+        _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
+        # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
+        # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
+        # cannot load br_netfilter at all is refused here
+        # then the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name), in the manager's order — its
+        # start runs _refuse_open_egress first, these later: with two knobs wrong the same one is named here and there
+        from winval_blastbox.vm_pool import smoke_expect
+        smoke_sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
+        if smoke_sample and not os.path.isfile(smoke_sample):
+            raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} is not a file: the pool-manager would refuse to start")
+        if smoke_sample:
+            smoke_expect()
+        pool_warm_dir = (os.environ.get("AUTHENTICODE_WARM_DIR") or "").strip()
+        if pool_warm_dir and not os.path.isdir(pool_warm_dir):
+            raise RuntimeError(f"AUTHENTICODE_WARM_DIR={pool_warm_dir!r} is not a directory: the pool-manager would refuse to start")
+        validate_egress_posture(authenticode_spec())   # last, as the manager runs it (inside WarmVmPool.__init__, after the knob guards)
+    except (ValueError, RuntimeError) as exc:
+        raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
+    except SystemExit as exc:
+        raise NothingPublished(f"the pool-manager would refuse to start after the promotion ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     if os.geteuid() != 0:
         raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     import fcntl
@@ -594,30 +618,6 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         raise NothingPublished(f"GOLDEN_BENIGN_SAMPLE={BENIGN!r} is not a file: the gate could not run, so the build would be wasted")
     if gate_samples and REVOKED and not Path(REVOKED).is_file():
         raise NothingPublished(f"GOLDEN_REVOKED_SAMPLE={REVOKED} does not exist: the gate could not run, so the build would be wasted")
-    try:   # EVERY promoting entry point restarts the pool-manager afterwards, the retry/rollback CLI (no gate) included: the
-        # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
-        from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
-        from winval_blastbox.pool_manager import _refuse_open_egress
-        _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
-        # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
-        # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
-        # cannot load br_netfilter at all is refused here
-        # then the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name), in the manager's order — its
-        # start runs _refuse_open_egress first, these later: with two knobs wrong the same one is named here and there
-        from winval_blastbox.vm_pool import smoke_expect
-        smoke_sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
-        if smoke_sample and not os.path.isfile(smoke_sample):
-            raise RuntimeError(f"AUTHENTICODE_SMOKE_SAMPLE={smoke_sample!r} is not a file: the pool-manager would refuse to start")
-        if smoke_sample:
-            smoke_expect()
-        pool_warm_dir = (os.environ.get("AUTHENTICODE_WARM_DIR") or "").strip()
-        if pool_warm_dir and not os.path.isdir(pool_warm_dir):
-            raise RuntimeError(f"AUTHENTICODE_WARM_DIR={pool_warm_dir!r} is not a directory: the pool-manager would refuse to start")
-        validate_egress_posture(authenticode_spec())   # last, as the manager runs it (inside WarmVmPool.__init__, after the knob guards)
-    except (ValueError, RuntimeError) as exc:
-        raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
-    except SystemExit as exc:
-        raise NothingPublished(f"the pool-manager would refuse to start after the promotion ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     if gate_samples:   # the gate boots under the PRODUCTION spec: a knob blastbox's fail-closed parsers refuse (AUTHENTICODE_BLOCK_INTERNAL=treu) must fail HERE, not as a traceback after the hour-long build
         try:
             _gate_spec("/dev/null")
