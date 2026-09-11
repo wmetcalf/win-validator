@@ -253,13 +253,13 @@ PY
 # a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half as the unit's ExecStartPre will leave it)
 rverdict=$(envfile_py rotation "$ETC/winval.env")   # the weekly rotation's own refusal, its own pass (never masked by a start-time knob's
 case "$rverdict" in ok) ;; *)   # verdict): BOTH halves install the units and the timer, so it is refused in both, before the move
-  echo "upgrade.sh: $ETC/winval.env: $rverdict, then rerun; the tree was not moved (both halves install the timer that would refuse)" >&2; exit 1 ;;
+  printf '%s\n' "upgrade.sh: $ETC/winval.env: $rverdict, then rerun; the tree was not moved (both halves install the timer that would refuse)" >&2; exit 1 ;;   # printf: dash's echo would re-expand the repr's \n \t
 esac
 verdict=$(envfile_py egress "$ETC/winval.env")
 case "$verdict" in ok) ;;
   *)   # unset: / malformed: / refuse: — each names its remedy; they bite only when the pool-manager STARTS, so without --restart a warning
-  if [ "$restart" = yes ]; then echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi
-  echo "upgrade.sh: WARNING: $ETC/winval.env: $verdict" >&2 ;;
+  if [ "$restart" = yes ]; then printf '%s\n' "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi
+  printf '%s\n' "upgrade.sh: WARNING: $ETC/winval.env: $verdict" >&2 ;;
 esac
 if [ "$(git rev-parse --abbrev-ref HEAD)" = HEAD ] && [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
   echo "upgrade.sh: the tree is detached at $(git rev-parse --short HEAD), a commit on no origin branch; the checkout would orphan it — re-attach (git checkout <its branch>) or discard it first; the tree was not moved" >&2; exit 1

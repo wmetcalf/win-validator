@@ -332,8 +332,8 @@ def _keep_as_unrecorded(candidate: str) -> bool:
     sidecar = candidate_depth_file(candidate)
     if not sidecar.exists():
         return unrecorded_marker(candidate).exists()
-    r = _run(["sudo", "mv", "-f", str(sidecar), str(unrecorded_marker(candidate))])
-    ok = getattr(r, "returncode", 1) == 0 and unrecorded_marker(candidate).exists()
+    r = _run(["sudo", "mv", "-fT", str(sidecar), str(unrecorded_marker(candidate))])   # -T as every publish rename: a directory at the
+    ok = getattr(r, "returncode", 1) == 0 and unrecorded_marker(candidate).is_file()      # marker name must fail, not swallow the sidecar
     if ok:
         _run(["sudo", "touch", str(unrecorded_marker(candidate))])   # mv keeps the BUILD time: the marker must date from the promotion, the newest copy chain_length() picks
     if not ok:
@@ -1206,7 +1206,7 @@ def _write_small(path: str, text: str) -> bool:
     # ATOMIC: printf into a sibling temp, then mv over the record — a redirect truncates BEFORE it
     # writes, and a write that then fails (ENOSPC, a store gone read-only) left a 0-byte record that
     # read as depth 0 and reset the master-rebake counter
-    r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2.tmp" && mv -f "$2.tmp" "$2"', "sh", text, path])
+    r = _run(["sudo", "sh", "-c", 'printf %s "$1" > "$2.tmp" && mv -fT "$2.tmp" "$2"', "sh", text, path])   # -fT: never INTO a directory at the name
     if r.returncode != 0:
         logger.error("could not write %s (rc=%s): %s", path, r.returncode, r.stderr.strip()[-200:])
         return False
@@ -1393,8 +1393,23 @@ def _main(cmd: str, argv: list[str]) -> int:
         # the retry is a promoting entry point too: root, lock, space, a writable chain record — sized by
         # the larger of the candidate and the golden the promotion backs up, with the candidate's own
         # allocation already spent
-        rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False, gate_samples=False)
-        rotate(argv[1])
+        # keep= protects the candidate during THIS preflight's prune only: the lock is released between the preflight and rotate(),
+        # and a concurrent rotation's preflight (the weekly timer firing) prunes candidates older than CANDIDATE_KEEP_DAYS with no
+        # keep. A build-style hold (valid while this pid runs, removed below and by the next prune once it is gone) covers the gap
+        suffix = build_hold_suffix()
+        if suffix is None:
+            raise NothingPublished(f"cannot read this process's start time (/proc/{os.getpid()}/stat): refusing to retry {argv[1]} unheld "
+                                   f"(a concurrent rotation's prune could take it); nothing published")
+        with rotation_lock("holding the retried candidate out of a concurrent prune"):   # the prune reads the holds under this lock
+            hold = _mark_kept(os.path.realpath(str(c)), suffix=suffix)
+        if hold is None:
+            raise NothingPublished(f"could not hold the candidate {argv[1]} out of the prune (no sidecar could be written beside it or "
+                                   f"beside the chain mirror); nothing published")
+        try:
+            rotation_preflight(estimate_bytes=max(c.stat().st_size, g.stat().st_size if g.is_file() else 0) if c.is_file() else None, candidate_built=True, keep=str(c), source_copy=False, gate_samples=False)
+            rotate(argv[1])
+        finally:
+            _run(["sudo", "rm", "-f", hold])
         try:
             restarted = restart_pool()   # the retry path is a promoting entry point too: warm workers ran the old golden
         except RestartFailed as exc:   # the promotion stands; a pool left down is a non-zero exit, as the timer answers it
