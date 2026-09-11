@@ -576,6 +576,8 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
                 logger.warning("the chain-record mirror %s cannot be written (GOLDEN_CHAIN_MIRROR; root filesystem full or an unmounted path?): a promotion during an images-store outage would then lose its depth", _mirror_file())
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
+    if not all(32 <= ord(c) < 127 for c in GOLDEN_BASE):   # as the pool's spec and the unit's pre-start refuse it (winval_blastbox.vm_pool.golden_base)
+        raise NothingPublished(f"AUTHENTICODE_GOLDEN_BASE={GOLDEN_BASE!r} carries a character outside printable ASCII (a pasted U+00A0?): only a plain ASCII path is supported")
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
         if Path(base).is_symlink() or Path(base).is_dir():
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")

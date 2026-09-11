@@ -46,6 +46,20 @@ _POOL_LOCK = threading.Lock()
 
 
 
+KNOB_VALUES = {"AUTHENTICODE_REV": "online|offline|none", "AUTHENTICODE_SCRIPTS": "ps|native"}   # winval.env.example's vocabulary
+
+
+def unknown_knob_values() -> dict[str, str]:
+    """The per-verdict knobs whose (stripped) value names nothing the agent knows: the agent answers such a value with its startup
+    default and says nothing, so the verdict carries a warning naming the knob instead."""
+    out = {}
+    for k, allowed in KNOB_VALUES.items():
+        v = (os.environ.get(k) or "").strip()
+        if v and v not in allowed.split("|"):
+            out[k] = v
+    return out
+
+
 def get_pool(stop_event=None) -> WarmVmPool:
     """Return the started WarmPool-backed VM pool, booting it on first use (thread-safe)."""
     global _POOL
@@ -201,6 +215,8 @@ class AuthenticodeEngine:
         verdict = get_pool().validate(str(input), params=req_params or None)
 
         warnings: list[BbWarning] = []
+        for k, bad in unknown_knob_values().items():   # a value the agent does not know is answered with its startup default, silently
+            warnings.append(BbWarning(code="param_unknown_value", message=f"{k}={bad!r} is not a value the agent knows ({KNOB_VALUES[k]}); the agent used its default"))
         unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())
         if unforwardable:
             warnings.append(

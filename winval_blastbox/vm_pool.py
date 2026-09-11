@@ -35,6 +35,16 @@ from .knobs import agent_port, env_int
 logger = logging.getLogger("winval.vm_pool")
 
 
+def golden_base() -> str:
+    """AUTHENTICODE_GOLDEN_BASE as the three readers agree to read it (this spec, golden_rotate.GOLDEN_BASE, the unit's pre-start):
+    stripped, blank is the default, and a byte outside printable ASCII is refused by name — a pasted U+00A0 is what Python would
+    strip and a C-locale shell cannot, and three readers naming two files is the one thing that must never happen."""
+    raw = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip() or "/dev/shm/golden-base.qcow2"
+    if not all(32 <= ord(c) < 127 for c in raw):
+        raise RuntimeError(f"AUTHENTICODE_GOLDEN_BASE={raw!r} carries a character outside printable ASCII (a pasted U+00A0?): only a plain ASCII path is supported")
+    return raw
+
+
 def pool_size() -> int:
     """AUTHENTICODE_POOL_SIZE — the ONE reader for the warm size and the claim concurrency: an empty or
     non-numeric value is a warning plus the default (2) instead of a bare traceback that latches the
@@ -218,8 +228,7 @@ def authenticode_spec() -> VmWorkerSpec:
         )
     return VmWorkerSpec(
         name="authenticode",
-        image=VmImageSpec(golden=(os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip() or "/dev/shm/golden-base.qcow2"),   # blank is the default, as the
-        # rotation (golden_rotate.GOLDEN_BASE) and the unit's pre-start read it: the three must name ONE file
+        image=VmImageSpec(golden=golden_base()),
         agent_port=agent_port(),
         warm_size=pool_size(),
         egress=egress,
