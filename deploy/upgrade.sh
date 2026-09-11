@@ -8,7 +8,8 @@
 # has no deploy/compose-env.sh (a version without these rules); a detached HEAD on no origin branch (the checkout
 # would orphan it); a local branch that is not an ancestor of origin's tip (local commits AHEAD of origin fast-forward
 # "successfully" and would build the untrusted-facing ingress and install root units from an unreviewed tree); and,
-# with --restart, an egress posture this version's pool-manager refuses at start (without --restart, a WARNING).
+# with --restart, an egress posture this version's pool-manager refuses at start (without --restart, a WARNING); and, in BOTH halves
+# (both install the timer), a winval.env whose old GOLDEN_BASE names a path the weekly rotation would not promote to.
 # It never mints a database password: that is the bring-up's, and a fresh one would lock both tiers out of the
 # initialised volume.
 # Without --restart it stops before anything restarts and prints what --restart does: restarting both tiers
@@ -113,6 +114,13 @@ except ValueError as exc:
     env = {"(unreadable)": str(exc)}
 if sys.argv[1] == "get":
     print(env.get(sys.argv[3], "")); sys.exit(0)
+if sys.argv[1] == "rotation":   # the ROTATION's own refusal (golden_rotate.rotation_preflight, right after its root check): its own pass, so
+    # no start-time knob's verdict can mask it — the egress mode below prints ONE verdict, the pool-manager's first
+    legacy = (env.get("GOLDEN_BASE") or "").strip(" \t")   # the rotator's OLD name for the RAM base (golden_rotate.LEGACY_GOLDEN_BASE): read by
+    # nothing else, refused by the preflight whenever it names a path other than the one the rotation would promote to — the weekly timer included
+    effective = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
+    if legacy and legacy != effective: print(f"rotation: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the weekly rotation refuses that posture — rename the knob"); sys.exit(0)
+    print("ok"); sys.exit(0)
 if sys.argv[1] == "egress":
     import os, subprocess
     # the pool-manager's START, judged in ITS order, read the way it reads the env: _refuse_open_egress first (an unset exit; then, with
@@ -227,11 +235,6 @@ if sys.argv[1] == "egress":
             print("malformed: AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink); the pool-manager refuses that posture at start"); sys.exit(0)
         if ex in ("openvpn", "wireguard") and bool((env.get("AUTHENTICODE_GATEWAY") or "").strip()) != bool((env.get("AUTHENTICODE_LEG") or "").strip()):
             print(f"malformed: AUTHENTICODE_EXIT={ex} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (or neither); the pool-manager refuses that posture at start"); sys.exit(0)
-    legacy = (env.get("GOLDEN_BASE") or "").strip(" \t")   # the rotator's OLD name for the RAM base (golden_rotate.LEGACY_GOLDEN_BASE): read by nothing
-    # else, refused by the rotation's preflight whenever it names a path other than the one the rotation would promote to — so the nightly
-    # rotation would refuse every night after this upgrade; judged LAST, after every knob the pool-manager itself names
-    effective = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
-    if legacy and legacy != effective: print(f"rotation: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the nightly rotation refuses that posture — rename the knob"); sys.exit(0)
     print("ok"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
@@ -248,10 +251,12 @@ PY
 
 # design change #8, the half an env file decides, read the way the pool-manager reads it (the helper mirrors its rules): with --restart
 # a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half as the unit's ExecStartPre will leave it)
+rverdict=$(envfile_py rotation "$ETC/winval.env")   # the weekly rotation's own refusal, its own pass (never masked by a start-time knob's
+case "$rverdict" in ok) ;; *)   # verdict): BOTH halves install the units and the timer, so it is refused in both, before the move
+  echo "upgrade.sh: $ETC/winval.env: $rverdict, then rerun; the tree was not moved (both halves install the timer that would refuse)" >&2; exit 1 ;;
+esac
 verdict=$(envfile_py egress "$ETC/winval.env")
 case "$verdict" in ok) ;;
-  rotation:*)   # the weekly rotation would refuse it — and THIS half installs the units and the timer, so it is refused in both halves
-    echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved (this half would install the timer that refuses)" >&2; exit 1 ;;
   *)   # unset: / malformed: / refuse: — each names its remedy; they bite only when the pool-manager STARTS, so without --restart a warning
   if [ "$restart" = yes ]; then echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi
   echo "upgrade.sh: WARNING: $ETC/winval.env: $verdict" >&2 ;;

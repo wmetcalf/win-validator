@@ -915,7 +915,8 @@ def _backup_current() -> str | None:
             logger.error("could not remove the partial backup %s (rc=%s): the next rotation's temp sweep reclaims it", part, c.returncode)
         raise NothingPublished(f"backup of the current golden -> {bak} failed (rc={r.returncode}, {got} of {want} bytes); "
                                f"golden NOT promoted (nothing published, no backup kept)")
-    m = _run(["sudo", "mv", "-f", str(part), str(bak)])   # same directory: a rename, never a second copy
+    m = _run(["sudo", "mv", "-fT", str(part), str(bak)])   # same directory: a rename, never a second copy; -T as every publish rename here
+    # (a symlink-to-directory planted at the name would otherwise swallow the copy, outside the sweep's reach)
     if m.returncode != 0 or not bak.is_file():
         _run(["sudo", "rm", "-f", str(part)])
         raise NothingPublished(f"backup of the current golden: {part} -> {bak} rename failed (rc={m.returncode}); "

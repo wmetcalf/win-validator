@@ -118,7 +118,8 @@ argument that is not a branch on origin (tags are not supported), a target whose
 a detached HEAD on no origin branch (the checkout would orphan it), a local branch carrying commits that are not on
 origin (they fast-forward "successfully" and would otherwise build the untrusted-facing ingress and install root
 units from an unreviewed tree), and — with `--restart` — an egress posture this version's pool-manager refuses at
-start (a warning without). It never mints a database password. The unit files are installed and reloaded in BOTH
+start (a warning without) — and, in BOTH halves, a `winval.env` whose old `GOLDEN_BASE` names a path the weekly rotation would not
+promote to (both halves install the timer). It never mints a database password. The unit files are installed and reloaded in BOTH
 halves (installing a unit restarts nothing): the checked-out code depends on what its unit does at start, so a
 crash or reboot between the halves must not start it under the old unit. It upgrades BOTH tiers — the ingress container is built from this checkout
 (`Dockerfile.ingress` copies `winval_blastbox/`), and this version's ingress changes are the security ones (the
