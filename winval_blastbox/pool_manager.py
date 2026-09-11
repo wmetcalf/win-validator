@@ -37,7 +37,7 @@ from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .host_runner import HostRunner
-from .knobs import ENGINE, env_float, upload_mb
+from .knobs import ENGINE, agent_port, env_float, upload_mb
 from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
@@ -197,6 +197,10 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
         return
     from winval_blastbox.vm_pool import authenticode_spec
     eg = authenticode_spec().egress
+    if eg is not None and eg.exit_driver != "drop" and not eg.block_internal and eg.egress_ports is not None and agent_port() in eg.egress_ports:
+        raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge, AUTHENTICODE_BLOCK_INTERNAL off and AUTHENTICODE_EGRESS_PORTS "
+                         f"admitting the agent port {agent_port()}: a compromised worker reaches its siblings' agent through the allowlist. Set "
+                         "AUTHENTICODE_BLOCK_INTERNAL=1, drop the agent port from the allowlist, or run one worker")
     if eg is not None and eg.exit_driver != "drop" and not eg.block_internal and eg.egress_ports is None:   # () is the CLOSED allowlist (drops siblings
         # too); only None is 'no allowlist: ACCEPT'. The drop exit ends its chain in an unconditional DROP (blastbox's rooter): closed already
         raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "

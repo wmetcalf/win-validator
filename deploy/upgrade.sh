@@ -148,7 +148,16 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if workers < 2: print("ok"); sys.exit(0)
-    if ex == "drop" or "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist, even a closed one, drops siblings; the drop exit ends in DROP
+    if "AUTHENTICODE_EGRESS_PORTS" in env and ex != "drop" and bi not in ("1", "true", "yes", "on"):   # an allowlist admitting the AGENT port opens the siblings' agent to a compromised worker
+        try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))
+        except ValueError: agent = 8765
+        listed = set()
+        for tok in (env.get("AUTHENTICODE_EGRESS_PORTS") or "").replace(";", ",").split(","):
+            tok = tok.strip()
+            if tok.lstrip("+").isdigit() and 1 <= int(tok) <= 65535: listed.add(int(tok))
+        if agent in listed:
+            print(f"refuse: AUTHENTICODE_EGRESS_PORTS admits the agent port {agent} with AUTHENTICODE_BLOCK_INTERNAL off and {workers} workers: the pool-manager refuses to start (a compromised worker reaches its siblings' agent through the allowlist); set AUTHENTICODE_BLOCK_INTERNAL=1 or drop the port"); sys.exit(0)
+    if ex == "drop" or "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist (not admitting the agent port), even a closed one, drops siblings; the drop exit ends in DROP
         # the kernel half, as the restart will find it: the unit's ExecStartPre loads br_netfilter and sets the sysctl (both with `-`, so a host
         # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
         import os, subprocess
