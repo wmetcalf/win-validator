@@ -123,10 +123,10 @@ if sys.argv[1] == "egress":
     SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
     ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
     if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
-    bi = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip().lower()
+    bi_raw = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip(); bi = bi_raw.lower()
     def bool_guard():   # the spec parses the boolean fail-closed (blastbox's parse_strict_bool) wherever it is first built
         if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
-            print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)
+            print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi_raw!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)   # the value as written, for the grep
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if ex.lower() != "none" and workers >= 2:   # _refuse_open_egress's rules beyond the unset exit
@@ -201,7 +201,7 @@ if sys.argv[1] == "egress":
         wd = (env.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if wd and not os.path.isdir(wd): print(f"malformed: AUTHENTICODE_WARM_DIR={wd!r} is not a directory; the pool-manager refuses that posture at start"); sys.exit(0)
     pool_guards()
-    bool_guard()
+    if ex.lower() != "none": bool_guard()   # under none the spec builds no policy and never parses the boolean (authenticode_spec)
     pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()
     if pool_spec:
         import ipaddress
