@@ -148,6 +148,11 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `upgrade.sh --restart` before the move and by the rotation preflight before a promotion (both probe with a `modprobe` dry run), and by
   the pool-manager itself at start. The next golden bake scopes the agent-port firewall rule to the
   pool-manager's address; a bake refuses if it cannot learn that address (`AUTHENTICODE_AGENT_CALLER` names it by hand).
+- **The rotator's old `GOLDEN_BASE` name is refused**: the pool and the pool-manager unit boot from `AUTHENTICODE_GOLDEN_BASE`
+  (default `/dev/shm/golden-base.qcow2`), and nothing else ever read the old name, so a rotation started with it promoted to a path no
+  worker boots from. An env file whose `GOLDEN_BASE` names another path is refused by name by the rotation's preflight (the weekly
+  timer included) and by `upgrade.sh` in BOTH halves, before the tree moves — the half without `--restart` is the one that installs
+  the timer. Rename the line to `AUTHENTICODE_GOLDEN_BASE` (or drop it for the default).
 - **`GOLDEN_KEEP_N=0` now means keep NO rollback backups** (it used to mean prune nothing). The first
   rotation preflight after the upgrade prunes every backup. Set it to the number you want kept (default 5).
 - **Backup retention orders by modification time**, not by name: backups made before this version are stamped in local time, the new ones in UTC, and in a zone ahead of UTC the old names sort lexically newer than a fresh backup for hours. The mtime is the promotion time on every backup, so both populations rank alike.

@@ -231,7 +231,7 @@ if sys.argv[1] == "egress":
     # else, refused by the rotation's preflight whenever it names a path other than the one the rotation would promote to — so the nightly
     # rotation would refuse every night after this upgrade; judged LAST, after every knob the pool-manager itself names
     effective = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
-    if legacy and legacy != effective: print(f"malformed: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the nightly rotation refuses that posture — rename the knob"); sys.exit(0)
+    if legacy and legacy != effective: print(f"rotation: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the nightly rotation refuses that posture — rename the knob"); sys.exit(0)
     print("ok"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
@@ -249,7 +249,10 @@ PY
 # design change #8, the half an env file decides, read the way the pool-manager reads it (the helper mirrors its rules): with --restart
 # a posture the manager would refuse is refused HERE, before the move; without it, said loudly (the sysctl half as the unit's ExecStartPre will leave it)
 verdict=$(envfile_py egress "$ETC/winval.env")
-case "$verdict" in ok) ;; *)   # unset: / malformed: / refuse: — each names its remedy
+case "$verdict" in ok) ;;
+  rotation:*)   # the weekly rotation would refuse it — and THIS half installs the units and the timer, so it is refused in both halves
+    echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved (this half would install the timer that refuses)" >&2; exit 1 ;;
+  *)   # unset: / malformed: / refuse: — each names its remedy; they bite only when the pool-manager STARTS, so without --restart a warning
   if [ "$restart" = yes ]; then echo "upgrade.sh: $ETC/winval.env: $verdict, then rerun; the tree was not moved" >&2; exit 1; fi
   echo "upgrade.sh: WARNING: $ETC/winval.env: $verdict" >&2 ;;
 esac

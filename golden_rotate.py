@@ -901,11 +901,24 @@ def _backup_current() -> str | None:
     assert _BACKUP_NAME.match(bak.name), bak
     logger.info("backing up current golden -> %s", bak)
     want = Path(GOLDEN_BASE_DISK).stat().st_size
-    r = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(bak)], 3600)
-    got = bak.stat().st_size if bak.exists() else -1
+    free = shutil.disk_usage(_existing_ancestor(str(BACKUP_DIR))).free   # the preflight sized this from an estimate; the real size is known now
+    if free < want:
+        raise NothingPublished(f"not enough space in {BACKUP_DIR} for the backup of the current golden: {free} free, {want} needed; "
+                               f"golden NOT promoted (nothing published, no backup taken)")
+    part = Path(str(bak) + ".part")   # copied under a name NO reader matches (_BACKUP_NAME, the golden-base.*.qcow2 globs, the unit's
+    # rollback set): a copy cut short can never be taken for a backup even if its cleanup fails; _sweep_own_temps reclaims a stranded one
+    r = _run(["sudo", "cp", "--reflink=auto", GOLDEN_BASE_DISK, str(part)], 3600)
+    got = part.stat().st_size if part.exists() else -1
     if r.returncode != 0 or got != want:
-        _run(["sudo", "rm", "-f", str(bak)])
+        c = _run(["sudo", "rm", "-f", str(part)])
+        if c.returncode != 0 and part.exists():
+            logger.error("could not remove the partial backup %s (rc=%s): the next rotation's temp sweep reclaims it", part, c.returncode)
         raise NothingPublished(f"backup of the current golden -> {bak} failed (rc={r.returncode}, {got} of {want} bytes); "
+                               f"golden NOT promoted (nothing published, no backup kept)")
+    m = _run(["sudo", "mv", "-f", str(part), str(bak)])   # same directory: a rename, never a second copy
+    if m.returncode != 0 or not bak.is_file():
+        _run(["sudo", "rm", "-f", str(part)])
+        raise NothingPublished(f"backup of the current golden: {part} -> {bak} rename failed (rc={m.returncode}); "
                                f"golden NOT promoted (nothing published, no backup kept)")
     return str(bak)
 
@@ -931,6 +944,10 @@ def _sweep_own_temps() -> None:
     for t in Path(GOLDEN_BASE).parent.glob(Path(GOLDEN_BASE).name + ".??????"):
         if t.is_file() and not t.is_symlink():
             logger.info("removing stranded pool-manager temporary %s", t)
+            _run(["sudo", "rm", "-f", str(t)])
+    for t in BACKUP_DIR.glob("golden-base.*.qcow2.part"):   # a backup copy cut short (a rotation killed mid-cp, or a cleanup rm that failed)
+        if t.is_file() and not t.is_symlink():
+            logger.info("removing partial backup %s", t)
             _run(["sudo", "rm", "-f", str(t)])
 
 
