@@ -265,7 +265,7 @@ def _warm_crl(slot) -> None:
     """Pre-snapshot CRL/OCSP warm: validate every benign sample in AUTHENTICODE_WARM_DIR with
     online revocation, so the major CAs' CRLs are fetched+cached and the snapshot captures a hot
     cache (warm-restores then serve revocation from cache, no per-job live fetch)."""
-    warm_dir = os.environ.get("AUTHENTICODE_WARM_DIR")
+    warm_dir = (os.environ.get("AUTHENTICODE_WARM_DIR") or "").strip()   # read as the guard in __init__ reads it: a padded path is the same dir
     if not warm_dir or not os.path.isdir(warm_dir):
         return
     for name in sorted(os.listdir(warm_dir)):
