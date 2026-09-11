@@ -511,6 +511,20 @@ def _existing_ancestor(path: str) -> Path:
 
 def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool = False, keep: str | None = None,
                        source_copy: bool = True, gate_samples: bool = True, hold_suffix: str | None = None) -> str | None:
+    """_rotation_preflight, with the hold it may write for ``keep`` removed again when a later check refuses: the caller only
+    learns the sidecar's name from a preflight that returns, and a hold outliving its refusal would litter the images store
+    (self-healing for golden-base.* names once this pid is gone, never for any other)."""
+    holder: list[str] = []
+    try:
+        return _rotation_preflight(estimate_bytes, candidate_built, keep, source_copy, gate_samples, hold_suffix, holder)
+    except BaseException:
+        for h in holder:
+            _run(["sudo", "rm", "-f", h])
+        raise
+
+
+def _rotation_preflight(estimate_bytes: int | None, candidate_built: bool, keep: str | None, source_copy: bool, gate_samples: bool,
+                        hold_suffix: str | None, holder: list[str]) -> str | None:
     """Everything the cycle will need, checked BEFORE the hour-long build and gate: root (the
     lock lives in root-owned /run and every publish step is sudo), a usable lock, the gate's
     samples, and space for the run's PEAK — the candidate the build writes into the backup dir,
@@ -585,6 +599,8 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
             # A build-style hold (valid while this pid runs; the next prune removes it once the pid is gone) covers the gap; written
             # here, under the lock the prune reads holds under, after the root check and every static knob
             hold = _mark_kept(os.path.realpath(keep), suffix=hold_suffix)
+            if hold:
+                holder.append(hold)   # for the wrapper's cleanup should a later check refuse
             if hold is None:
                 raise NothingPublished(f"could not hold the candidate {keep} out of the prune (no sidecar could be written beside it or "
                                        f"beside the chain mirror); nothing published")
@@ -1415,12 +1431,15 @@ def _main(cmd: str, argv: list[str]) -> int:
                                   candidate_built=True, keep=str(c), source_copy=False, gate_samples=False, hold_suffix=suffix)
         try:
             rotate(argv[1])
-        except (NothingPublished, SplitState):
-            if c.is_file():   # kept for the retry: fresh again — the image, and its depth sidecar only when it HAS one (a rollback of a
-                # retained backup has none, and an empty sidecar would read as a fabricated depth at the next promotion)
-                _run(["sudo", "touch", str(c)])
-                if candidate_depth_file(str(c)).is_file():
-                    _run(["sudo", "touch", str(candidate_depth_file(str(c)))])
+        except NothingPublished:
+            # kept for the retry: fresh again — ONLY a name the age prune reclaims (.candidate-/.built-, never a retained backup: the KEEP_N
+            # prune orders those by mtime, and re-dating one would pin the oldest and evict a newer generation), the image and its depth
+            # sidecar only when it HAS one (an empty sidecar reads as depth 0). Not after a SplitState: the disk twin IS published then,
+            # and the remedy is the restart the message names, not a retry
+            if c.is_file() and not _BACKUP_NAME.match(c.name):
+                for f in (str(c), str(candidate_depth_file(str(c)))):
+                    if Path(f).is_file() and _run(["sudo", "touch", f]).returncode != 0:
+                        logger.warning("could not refresh %s: the next rotation's prune may reclaim the kept candidate before a retry", f)
             raise
         finally:
             if hold:
