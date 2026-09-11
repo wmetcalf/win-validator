@@ -35,7 +35,7 @@ envfile_py() {   # $1 = mode, $2 = file [, $3 = key]. 'redacted': the file's ASS
   # compose-env.sh and golden_rotate.py carry), one KEY=value line per knob sorted by name, a secret's value replaced (a redaction
   # over physical lines printed the second line of a quoted multi-line secret and a URL landed mid-line by a continuation).
   # 'get': one knob's value as the units read it (empty when unset)
-  python3 - "$1" "$2" "${3:-}" <<'PY'
+  python3 -I - "$1" "$2" "${3:-}" <<'PY'   # -I: the caller's cwd is not on sys.path (a planted json.py never imports as root)
 import re, sys
 # --- envfile parser (systemd src/basic/env-file.c parse_env_file_internal, verified against systemd-run over 77 files) ---
 import re as _re

@@ -16,6 +16,7 @@ ETC="${WINVAL_ETC:-/etc/winval}"; mint=no; check=no
 # cwd: root ran <cwd>/.venv/bin/python, a shim planted in any directory an operator happened to be in. Read from a pipe
 # (upgrade.sh's `sh -s`, run from the tree it cd'd into) the cwd IS the tree
 case "$0" in */*) TREE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd) ;; *) TREE=$PWD ;; esac   # readlink -f: a symlink to the script from $HOME/bin resolved to $HOME and found a planted ~/.venv
+# every python below runs with -I (isolated): the caller's cwd is not on sys.path, so a json.py planted where root runs this cannot be imported; no user site, no PYTHON* env
 PY=python3; [ -x "$TREE/.venv/bin/python" ] && [ "$(stat -c %u "$TREE/.venv/bin/python" 2>/dev/null)" = "$(id -u)" ] && PY="$TREE/.venv/bin/python"   # and only a venv the invoking user owns: piped in (`sh -s`) from a stranger's writable cwd, a planted ./.venv ran as root
 case "${1:-}" in --mint) mint=yes ;; --check) check=yes ;; "") ;; *) echo "usage: compose-env.sh [--mint|--check]" >&2; exit 2 ;; esac
 [ -f "$ETC/winval.env" ] || { echo "compose-env: $ETC/winval.env does not exist" >&2; exit 1; }
@@ -35,7 +36,7 @@ envfile_py() {   # $1 = file, $2 = mode: 'url' prints BLASTBOX_DATABASE_URL as t
   # systemd-run: quoted values run across lines, an open quote swallows the rest of the file, a closing quote returns to the value, the
   # last assignment wins); 'unterminated' exits 3 when the file ends inside an open quote. A file systemd would reject (an assignment
   # that is not UTF-8) is a refusal here — grep '^KEY=' | tail -1 chose another line than systemd, and the pool-manager was locked out
-  "$PY" - "$1" "$2" <<'PY'
+  "$PY" -I - "$1" "$2" <<'PY'
 import sys
 # --- envfile parser (systemd src/basic/env-file.c parse_env_file_internal, verified against systemd-run over 77 files) ---
 import re as _re
@@ -123,7 +124,7 @@ if [ -z "$URL" ]; then
     echo "compose-env: $ETC/winval.env has no BLASTBOX_DATABASE_URL line; nothing written. The bring-up mints one (compose-env.sh --mint); an upgrade never does — a fresh password would lock both tiers out of the initialised database volume" >&2; exit 1
   fi
   PW=$(openssl rand -hex 16)
-  if [ -s "$ETC/winval.env" ] && tail -1 "$ETC/winval.env" | "$PY" -c 'import sys; raw = sys.stdin.read().rstrip("\n"); sys.exit(0 if not raw.lstrip().startswith("#") and (len(raw) - len(raw.rstrip("\\"))) % 2 == 1 else 1)'; then
+  if [ -s "$ETC/winval.env" ] && tail -1 "$ETC/winval.env" | "$PY" -I -c 'import sys; raw = sys.stdin.read().rstrip("\n"); sys.exit(0 if not raw.lstrip().startswith("#") and (len(raw) - len(raw.rstrip("\\"))) % 2 == 1 else 1)'; then
     echo "compose-env: the last line of $ETC/winval.env ends in a backslash, a continuation to every reader: the minted URL would be swallowed into that knob (and a second --mint would then mint a second password); end that line first" >&2; exit 1
   fi
   uq=0; envfile_py "$ETC/winval.env" unterminated || uq=$?; case $uq in 3) echo "compose-env: $ETC/winval.env ends inside an open quote: systemd reads everything after it as that value, the minted URL included (and the pool-manager would fall back to an in-memory job store, never claiming the ingress's rows); close that quote first" >&2; exit 1 ;; 0) ;; *) exit 1 ;; esac
@@ -137,7 +138,7 @@ fi
 # '$' as '$$', because compose interpolates its env file and a bare '$' would truncate the secret) and the percent-encoded
 # one (the ingress embeds it in a URL)
 [ "$mint" = yes ] && [ -z "$URL" ] && URL=$(db_url)   # the line --mint just wrote
-PWLINE=$(URL="$URL" "$PY" - <<'PY'
+PWLINE=$(URL="$URL" "$PY" -I - <<'PY'
 import json, os, sys
 from urllib.parse import urlsplit, unquote, quote
 # the password AS LIBPQ READS THE URL (the pool-manager connects through psycopg): a query parameter overrides the userinfo
@@ -203,7 +204,7 @@ compose_reads() {
   printf 'services:\n  p:\n    image: scratch\n    environment:\n      A: ${WINVAL_PG_PASSWORD:-}\n      B: ${WINVAL_PG_PASSWORD_URLENC:-}\n' > "$d/probe.yml"
   if cfg=$(docker compose --env-file "$1" -f "$d/probe.yml" config --format json 2>"$d/err"); then
     rm -rf "$d"
-    CFG="$cfg" "$PY" - <<'PY'
+    CFG="$cfg" "$PY" -I - <<'PY'
 import json, os, re, sys
 from urllib.parse import unquote
 e = json.loads(os.environ["CFG"])["services"]["p"].get("environment") or {}
@@ -223,7 +224,7 @@ PY
   else
     # compose quotes the token it choked on (Go-quoted: the password, once a survivor's open quote swallowed the password
     # line, or the operator's own hand-written one): every quoted segment is elided before the message leaves this script
-    MSG="$(cat "$d/err")" "$PY" - <<'PY'
+    MSG="$(cat "$d/err")" "$PY" -I - <<'PY'
 import os, re, sys
 # compose echoes the token it choked on in the OPERATOR'S quote character (a single quote too), or after 'in variable name':
 # everything from the first quote of either kind, backtick or colon past the line number is dropped, whatever the shape
