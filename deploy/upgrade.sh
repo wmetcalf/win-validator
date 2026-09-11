@@ -273,6 +273,7 @@ ready="${WINVAL_READY_FILE:-$(envfile_py get "$ETC/winval.env" WINVAL_READY_FILE
 settle="${GOLDEN_RESTART_SETTLE_S:-$(envfile_py get "$ETC/winval.env" GOLDEN_RESTART_SETTLE_S)}"; case "$settle" in ''|*[!0-9]*) settle=3600;; esac
 t0=$(date +%s)
 systemctl restart winval-pool-manager
+if [ "$settle" = 0 ]; then echo "upgrade.sh: both tiers restarted on $(git rev-parse --short HEAD); GOLDEN_RESTART_SETTLE_S=0: the pool-manager was NOT waited for (it reports the pool warm at $ready)"; exit 0; fi   # 0 skips the wait, as in the rotation
 # a Type=simple unit is 'active' the instant systemctl returns: wait for the manager to SAY the pool is warm (the marker, newer than the
 # restart), fail on the unit's failure signals meanwhile, give up by name at the ceiling — the rotation's restart_pool, in sh
 while :; do
