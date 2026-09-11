@@ -39,8 +39,8 @@ def golden_base() -> str:
     """AUTHENTICODE_GOLDEN_BASE as the three readers agree to read it (this spec, golden_rotate.GOLDEN_BASE, the unit's pre-start):
     stripped, blank is the default, and a byte outside printable ASCII is refused by name — a pasted U+00A0 is what Python would
     strip and a C-locale shell cannot, and three readers naming two files is the one thing that must never happen."""
-    raw = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t\n\r\f\v") or "/dev/shm/golden-base.qcow2"   # ASCII whitespace only,
-    # as the unit's sed in the C locale trims: a no-break space is NOT trimmed here either, so it reaches the check below on all three sides
+    raw = (os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"   # space and tab only, as the unit's
+    # sed trims: a newline (which sed cannot reach at the front of a value), a no-break space or any control byte reaches the check below on every side
     if not all(32 <= ord(c) < 127 for c in raw):
         raise RuntimeError(f"AUTHENTICODE_GOLDEN_BASE={raw!r} carries a character outside printable ASCII (a pasted U+00A0?): only a plain ASCII path is supported")
     return raw

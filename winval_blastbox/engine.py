@@ -61,6 +61,17 @@ def unknown_knob_values() -> dict[str, str]:
     return out
 
 
+def knob_warnings() -> list[BbWarning]:
+    """One warning per knob whose value the agent does not know (it is answered with the startup default, silently).
+    The VALUE is capped at 200 (an unclosed quote hands systemd the rest of the file as the value) and the MESSAGE at the
+    contract's 2000: repr() of an astral code point is ten characters, so a value cap alone does not deliver the contract."""
+    out: list[BbWarning] = []
+    for k, bad in unknown_knob_values().items():
+        msg = f"{k}={bad[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
+        out.append(BbWarning(code="param_unknown_value", message=msg[:2000]))
+    return out
+
+
 def get_pool(stop_event=None) -> WarmVmPool:
     """Return the started WarmPool-backed VM pool, booting it on first use (thread-safe)."""
     global _POOL
@@ -215,9 +226,7 @@ class AuthenticodeEngine:
         # and the harness writes a clean engine_error envelope.
         verdict = get_pool().validate(str(input), params=req_params or None)
 
-        warnings: list[BbWarning] = []
-        for k, bad in unknown_knob_values().items():   # a value the agent does not know is answered with its startup default, silently
-            warnings.append(BbWarning(code="param_unknown_value", message=f"{k}={bad[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"))   # capped: the contract's message is 2000 chars, and an unclosed quote hands systemd the rest of the file as the value
+        warnings: list[BbWarning] = knob_warnings()
         unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())
         if unforwardable:
             warnings.append(

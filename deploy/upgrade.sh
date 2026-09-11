@@ -127,10 +127,15 @@ if sys.argv[1] == "egress":
     def bool_guard():   # the spec parses the boolean fail-closed (blastbox's parse_strict_bool) wherever it is first built
         if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
             print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi_raw!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)   # the value as written, for the grep
+    def golden_guard():   # vm_pool.golden_base and the unit's pre-start, mirrored: space and tab trimmed at the ends, any other byte outside
+        # printable ASCII refused — read where the manager builds its spec: right after the boolean, on both the several-workers path
+        # (_refuse_open_egress) and the others (WarmVmPool.__init__, after the smoke and warm-dir guards)
+        gb = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
+        if not all(32 <= ord(c) < 127 for c in gb): print(f"malformed: AUTHENTICODE_GOLDEN_BASE={gb[:200]!r} carries a character outside printable ASCII (a pasted U+00A0, a stray newline?); the pool-manager's pre-start refuses that posture"); sys.exit(0)
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
     if ex.lower() != "none" and workers >= 2:   # _refuse_open_egress's rules beyond the unset exit
-        bool_guard()
+        bool_guard(); golden_guard()   # authenticode_spec() is built here: the boolean, then the golden base
         if "AUTHENTICODE_EGRESS_PORTS" in env and ex != "drop" and bi not in ("1", "true", "yes", "on"):   # an allowlist admitting the AGENT port opens the siblings' agent to a compromised worker
             try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))   # knobs.env_int: int() of the stripped value, floored at 1, the default on a non-integer
             except ValueError: agent = 8765
@@ -200,10 +205,9 @@ if sys.argv[1] == "egress":
             if exp.lower() not in AGENT: print(f"malformed: AUTHENTICODE_SMOKE_EXPECT={exp!r} is not a status the agent maps; the pool-manager refuses that posture at start"); sys.exit(0)
         wd = (env.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if wd and not os.path.isdir(wd): print(f"malformed: AUTHENTICODE_WARM_DIR={wd!r} is not a directory; the pool-manager refuses that posture at start"); sys.exit(0)
-        gb = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t\n\r\f\v") or "/dev/shm/golden-base.qcow2"   # vm_pool.golden_base and the unit's pre-start, mirrored: ASCII whitespace trimmed, a byte outside printable ASCII refused
-        if not all(32 <= ord(c) < 127 for c in gb): print(f"malformed: AUTHENTICODE_GOLDEN_BASE={gb[:200]!r} carries a character outside printable ASCII (a pasted U+00A0?); the pool-manager's pre-start refuses that posture"); sys.exit(0)
     pool_guards()
     if ex.lower() != "none": bool_guard()   # under none the spec builds no policy and never parses the boolean (authenticode_spec)
+    golden_guard()   # __init__ builds the spec after the smoke and warm-dir guards
     pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()
     if pool_spec:
         import ipaddress
