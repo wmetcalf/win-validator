@@ -42,10 +42,12 @@ After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 Requires=libvirtd.service
 
+# no readiness marker from a previous life: the pool-manager writes WINVAL_READY_FILE once the pool is warm (the rotation's
+# restart_pool waits for it) and clears it itself at start and on exit, but a start refused before that point never reaches its clear
+ExecStartPre=-/bin/sh -c 'rm -f "$${WINVAL_READY_FILE:-/run/winval-pool-manager.ready}"'
 [Service]
 # design change #8: worker-to-worker frames on the bridge meet the FORWARD rules only with br_netfilter loaded and the sysctl at 1;
 # both are set at every start ('-': a host that cannot is not failed here — the manager then refuses by name, with the remedy)
-ExecStartPre=-/bin/rm -f /run/winval-pool-manager.ready
 ExecStartPre=-/usr/sbin/modprobe br_netfilter
 ExecStartPre=-/usr/sbin/sysctl -q -w net.bridge.bridge-nf-call-iptables=1
 Type=simple

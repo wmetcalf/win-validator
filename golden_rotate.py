@@ -1251,7 +1251,8 @@ def restart_pool() -> bool:
     # manager writes READY_FILE once the pool is warm and removes it at start and on exit; a start that fails shows meanwhile as the
     # unit's auto-restart (Restart=on-failure counts it in NRestarts; the baseline is read after the restart returned, whatever a
     # stop, a reset-failed or the restart did to the counter), as 'failed' once the start limit latches, or as no longer active.
-    # Wait for the marker, refuse on any of those, give up by name at the ceiling.
+    # Wait for the marker; 'failed' and inactive are terminal and refuse at once; an auto-restart is a warning only (a second life
+    # may warm, and the marker is the verdict); give up by name at the ceiling, naming the restarts seen.
     before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
     baseline = int(before) if before.isdigit() else 0
     settle = restart_settle_s()
@@ -1260,6 +1261,7 @@ def restart_pool() -> bool:
     if not settle:
         return True
     tick = 0
+    seen_restarts = 0
     while True:
         try:
             if os.stat(READY_FILE).st_mtime >= started - 2:   # written by THIS start (the manager clears a previous life's marker first)
@@ -1268,7 +1270,8 @@ def restart_pool() -> bool:
         except OSError:
             pass
         if time.time() >= deadline:
-            raise RestartFailed(f"{svc} did not report the pool warm within {settle}s of the restart ({READY_FILE} not written): the golden is "
+            raise RestartFailed(f"{svc} did not report the pool warm within {settle}s of the restart ({READY_FILE} not written"
+                                + (f"; it auto-restarted {seen_restarts} time(s) meanwhile" if seen_restarts else "") + "): the golden is "
                                 f"promoted but the pool is not in service (journalctl -u {svc}); GOLDEN_RESTART_SETTLE_S raises the wait")
         time.sleep(min(1, max(0.0, deadline - time.time())))   # the marker is looked for every second, the unit's state every fifth
         tick += 1
@@ -1280,8 +1283,11 @@ def restart_pool() -> bool:
         if now_active not in ("active", "activating"):
             raise RestartFailed(f"{svc} is {now_active or 'not active'} within {settle}s of the restart: the pool is DOWN (journalctl -u {svc})")
         restarts = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
-        if restarts.isdigit() and int(restarts) > baseline:
-            raise RestartFailed(f"{svc} auto-restarted {int(restarts) - baseline} time(s) within {settle}s of the restart: its start is failing (journalctl -u {svc}); the pool is not up")
+        if restarts.isdigit() and int(restarts) > baseline and int(restarts) - baseline != seen_restarts:
+            # the marker is the verdict, not this: a life that died and a second that warms is one warm pool (the unit's own
+            # StartLimitBurst says retry-and-recover is normal). Said once per rise, and again at the ceiling if no marker came
+            seen_restarts = int(restarts) - baseline
+            logger.warning("%s auto-restarted %d time(s) since the restart (journalctl -u %s); still waiting for it to report the pool warm", svc, seen_restarts, svc)
 
 
 def refresh_and_rotate() -> int:
