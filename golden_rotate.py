@@ -1232,6 +1232,8 @@ def restart_pool() -> bool:
         logger.warning("GOLDEN_RESTART_SERVICE is empty: the promoted golden is NOT in service until winval-pool-manager is restarted")
         return False
     logger.info("restarting %s to warm off the refreshed golden", svc)
+    started = time.time()   # BEFORE the restart is issued: a marker this life writes while systemctl is still returning (or while the
+    # counter's baseline is read) is newer than this, and the previous life's was cleared by the unit's ExecStartPre
     state = _run(["sudo", "systemctl", "is-failed", svc]).stdout.strip()
     if state == "failed":   # crashed or start-limit-latched: clear the latch and bring it back
         _run(["sudo", "systemctl", "reset-failed", svc])
@@ -1256,8 +1258,7 @@ def restart_pool() -> bool:
     before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
     baseline = int(before) if before.isdigit() else 0
     settle = restart_settle_s()
-    started = time.time()
-    deadline = started + settle
+    deadline = time.time() + settle
     if not settle:
         return True
     tick = 0
