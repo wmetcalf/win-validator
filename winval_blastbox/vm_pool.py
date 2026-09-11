@@ -244,7 +244,8 @@ def smoke_expect() -> str:
     for status in AGENT_STATUSES:
         if status.lower() == raw.lower():
             return status
-    raise RuntimeError(f"AUTHENTICODE_SMOKE_EXPECT={raw!r} is not a status the agent returns (one of {', '.join(sorted(AGENT_STATUSES))})")
+    raise RuntimeError(f"AUTHENTICODE_SMOKE_EXPECT={raw!r} is not a status the agent maps (one of {', '.join(sorted(AGENT_STATUSES))}; an unmapped "
+                       "PowerShell status passes through the agent verbatim and is not accepted here)")
 
 
 def _smoke(slot) -> bool:
