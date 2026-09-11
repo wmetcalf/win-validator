@@ -149,12 +149,14 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
     except ValueError: workers = 2
     if workers < 2: print("ok"); sys.exit(0)
     if "AUTHENTICODE_EGRESS_PORTS" in env and ex != "drop" and bi not in ("1", "true", "yes", "on"):   # an allowlist admitting the AGENT port opens the siblings' agent to a compromised worker
-        try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))
+        try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))   # knobs.env_int: int() of the stripped value, floored at 1, the default on a non-integer
         except ValueError: agent = 8765
-        listed = set()
-        for tok in (env.get("AUTHENTICODE_EGRESS_PORTS") or "").replace(";", ",").split(","):
-            tok = tok.strip()
-            if tok.lstrip("+").isdigit() and 1 <= int(tok) <= 65535: listed.add(int(tok))
+        listed = set()   # blastbox's parse_egress_ports, mirrored: split on commas AND whitespace, int() (so +8765 and 8_765 count, as there), 1..65535, the rest dropped
+        for tok in re.split(r"[,\s]+", (env.get("AUTHENTICODE_EGRESS_PORTS") or "").strip()):
+            if not tok: continue
+            try: n = int(tok)
+            except ValueError: continue
+            if 1 <= n <= 65535: listed.add(n)
         if agent in listed:
             print(f"refuse: AUTHENTICODE_EGRESS_PORTS admits the agent port {agent} with AUTHENTICODE_BLOCK_INTERNAL off and {workers} workers: the pool-manager refuses to start (a compromised worker reaches its siblings' agent through the allowlist); set AUTHENTICODE_BLOCK_INTERNAL=1 or drop the port"); sys.exit(0)
     if ex == "drop" or "AUTHENTICODE_EGRESS_PORTS" in env or bi in ("1", "true", "yes", "on"):   # a SET allowlist (not admitting the agent port), even a closed one, drops siblings; the drop exit ends in DROP
