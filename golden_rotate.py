@@ -1258,7 +1258,8 @@ def restart_pool() -> bool:
     before = (_run(["sudo", "systemctl", "show", "-p", "NRestarts", "--value", svc]).stdout or "").strip()
     baseline = int(before) if before.isdigit() else 0
     settle = restart_settle_s()
-    deadline = time.time() + settle
+    returned = time.time()   # the restart command is back: the wait, and the operator's numbers, count from here (the stop is not warm time)
+    deadline = returned + settle
     if not settle:
         return True
     tick = 0
@@ -1266,7 +1267,7 @@ def restart_pool() -> bool:
     while True:
         try:
             if os.stat(READY_FILE).st_mtime >= started - 2:   # written by THIS start (the manager clears a previous life's marker first)
-                logger.info("%s reported the pool warm %ds after the restart", svc, int(time.time() - started))
+                logger.info("%s reported the pool warm %ds after the restart returned", svc, int(time.time() - returned))
                 return True
         except OSError:
             pass
