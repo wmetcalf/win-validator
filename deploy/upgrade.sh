@@ -227,6 +227,11 @@ if sys.argv[1] == "egress":
             print("malformed: AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink); the pool-manager refuses that posture at start"); sys.exit(0)
         if ex in ("openvpn", "wireguard") and bool((env.get("AUTHENTICODE_GATEWAY") or "").strip()) != bool((env.get("AUTHENTICODE_LEG") or "").strip()):
             print(f"malformed: AUTHENTICODE_EXIT={ex} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (or neither); the pool-manager refuses that posture at start"); sys.exit(0)
+    legacy = (env.get("GOLDEN_BASE") or "").strip(" \t")   # the rotator's OLD name for the RAM base (golden_rotate.LEGACY_GOLDEN_BASE): read by nothing
+    # else, refused by the rotation's preflight whenever it names a path other than the one the rotation would promote to — so the nightly
+    # rotation would refuse every night after this upgrade; judged LAST, after every knob the pool-manager itself names
+    effective = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
+    if legacy and legacy != effective: print(f"malformed: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the nightly rotation refuses that posture — rename the knob"); sys.exit(0)
     print("ok"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)

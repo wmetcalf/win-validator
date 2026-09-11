@@ -520,6 +520,9 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     The estimate is the larger of the current golden and the master, or the caller's (the
     build entry point passes its own base); with nothing to estimate from, refuse rather than
     pass a full disk. Raises NothingPublished."""
+    if os.geteuid() != 0:   # FIRST: /etc/winval is root-only, so without sudo the env file is unreadable and every knob below would be
+        # judged unset — the operator would be told to fix a knob that is set, instead of to use sudo
+        raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     if LEGACY_GOLDEN_BASE and LEGACY_GOLDEN_BASE != GOLDEN_BASE:   # static knobs: refused before the lock, the prune and the hour-long build.
         # Presence of the new name says nothing — both units set AUTHENTICODE_GOLDEN_BASE themselves (Environment=), and a blank value resolves
         # to the default — so the old name is refused whenever it names a path the rotation would NOT promote to
@@ -531,7 +534,7 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     except ValueError as exc:
         raise NothingPublished(str(exc)) from exc
     try:   # EVERY promoting entry point restarts the pool-manager afterwards, the retry/rollback CLI (no gate) included: the
-        # (static knobs, so before the root check, the lock wait and the prune; the golden base is judged INSIDE authenticode_spec(), at the manager's position)
+        # (static knobs, so after the root check but before the lock wait and the prune; the golden base is judged INSIDE authenticode_spec(), at the manager's position)
         # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
         from winval_blastbox.pool_manager import _refuse_open_egress
@@ -555,8 +558,6 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
         raise NothingPublished(f"the worker spec the pool-manager would start with is invalid ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
     except SystemExit as exc:
         raise NothingPublished(f"the pool-manager would refuse to start after the promotion ({exc}): fix the AUTHENTICODE_* knobs before promoting anything") from exc
-    if os.geteuid() != 0:
-        raise NothingPublished("rotation must run as root (sudo): the rotation lock lives in /run and every publish step is privileged")
     import fcntl
     try:
         fd = os.open(ROTATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
