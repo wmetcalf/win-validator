@@ -127,8 +127,8 @@ written before this version does not carry.
 
 ```bash
 cd /opt/win-validator && sudo git fetch --prune origin
-sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch>             # code, venv, compose.env; stops before any restart and says what --restart does
-sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch> --restart   # rebuilds the ingress, installs the three unit files + daemon-reload, restarts the pool-manager
+sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch>             # code, unit files + daemon-reload, venv, compose.env; stops before any restart and says what --restart does
+sudo git show origin/<branch>:deploy/upgrade.sh | sudo sh -s -- <branch> --restart   # the same, then rebuilds the ingress and restarts the pool-manager, waiting until it reports the pool warm
 ```
 
 The script is read from origin rather than from the checkout because a host still on a version without it (it

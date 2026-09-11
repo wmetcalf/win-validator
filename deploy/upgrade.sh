@@ -113,7 +113,8 @@ except ValueError as exc:
     env = {"(unreadable)": str(exc)}
 if sys.argv[1] == "get":
     print(env.get(sys.argv[3], "")); sys.exit(0)
-if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads the env: _refuse_open_egress (#7/#8) AND the posture the warm-up
+if sys.argv[1] == "egress":
+    import os   # the pool-manager's START, read the way it reads the env: _refuse_open_egress (#7/#8) AND the posture the warm-up
     # validates (validate_egress_posture: the IP pool, a supported exit name, inetsim's sink, gateway-and-leg together, a well-formed boolean) — a
     # posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
     SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
@@ -134,7 +135,17 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
             if start.strip().split(".")[:2] != end.strip().split(".")[:2]: raise ValueError("must fit in one /16")
         except (ValueError, ipaddress.AddressValueError) as exc:
             print(f"malformed: AUTHENTICODE_IP_POOL is not a usable range ({exc}); the pool-manager refuses that posture at start"); sys.exit(0)
-    if ex.lower() == "none": print("ok"); sys.exit(0)
+    def pool_guards():   # WarmVmPool.__init__'s own refusals (after _refuse_open_egress, as the manager orders them): the smoke sample, its
+        # expected status, the warm dir — each refused by name at start, so refused HERE before the move
+        AGENT = {"valid", "revoked", "distrusted", "untrustedroot", "hashmismatch", "expired", "notyetvalid", "unknownerror", "notsigned"}
+        smp = (env.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
+        if smp and not os.path.isfile(smp): print(f"malformed: AUTHENTICODE_SMOKE_SAMPLE={smp!r} is not a file; the pool-manager refuses that posture at start"); sys.exit(0)
+        if smp:
+            exp = (env.get("AUTHENTICODE_SMOKE_EXPECT") or "").strip() or "Valid"
+            if exp.lower() not in AGENT: print(f"malformed: AUTHENTICODE_SMOKE_EXPECT={exp!r} is not a status the agent maps; the pool-manager refuses that posture at start"); sys.exit(0)
+        wd = (env.get("AUTHENTICODE_WARM_DIR") or "").strip()
+        if wd and not os.path.isdir(wd): print(f"malformed: AUTHENTICODE_WARM_DIR={wd!r} is not a directory; the pool-manager refuses that posture at start"); sys.exit(0)
+    if ex.lower() == "none": pool_guards(); print("ok"); sys.exit(0)
     if ex not in SUPPORTED:
         print(f"malformed: AUTHENTICODE_EXIT names an exit the VM rooter does not support (one of {', '.join(SUPPORTED)}); the pool-manager refuses that posture at start"); sys.exit(0)
     # the rest of validate_egress_posture: inetsim needs its sink; a shared-router VPN needs BOTH gateway and leg or neither
@@ -147,7 +158,7 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)
     try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
     except ValueError: workers = 2
-    if workers < 2: print("ok"); sys.exit(0)
+    if workers < 2: pool_guards(); print("ok"); sys.exit(0)
     if "AUTHENTICODE_EGRESS_PORTS" in env and ex != "drop" and bi not in ("1", "true", "yes", "on"):   # an allowlist admitting the AGENT port opens the siblings' agent to a compromised worker
         try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))   # knobs.env_int: int() of the stripped value, floored at 1, the default on a non-integer
         except ValueError: agent = 8765
@@ -163,7 +174,7 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
         # the kernel half, as the restart will find it: the unit's ExecStartPre loads br_netfilter and sets the sysctl (both with `-`, so a host
         # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
         import os, subprocess
-        if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): print("ok"); sys.exit(0)
+        if os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"): pool_guards(); print("ok"); sys.exit(0)
         # the VERBOSE dry run (the exit code says nothing: with an `install br_netfilter /bin/false` directive `-n` exits 0 for a module it
         # would not insert) is the plan, and `modprobe -c` names whose install directive a plan line is (the plan does not): loadable = rc 0
         # and EITHER br_netfilter's own directive is the documented `modprobe --ignore-install br_netfilter` self-load (the command's words
@@ -204,7 +215,7 @@ if sys.argv[1] == "egress":   # the pool-manager's START, read the way it reads 
                 if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan): why = f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
                 elif installs: why = f"a dependency in the plan carries an install directive ({installs[0][:120]}): whether the load survives it cannot be told from the plan"
         except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
-        if not why: print("ok"); sys.exit(0)
+        if not why: pool_guards(); print("ok"); sys.exit(0)
         print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
     print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor an AUTHENTICODE_EGRESS_PORTS that does not admit the agent port (nor the drop exit): the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
@@ -258,5 +269,17 @@ MSG
   exit 0
 fi
 docker compose --env-file "$ETC/compose.env" -f deploy/docker-compose.yml up --build -d   # rebuilds the ingress from this checkout
+ready="${WINVAL_READY_FILE:-$(envfile_py get "$ETC/winval.env" WINVAL_READY_FILE)}"; ready="${ready:-/run/winval-pool-manager.ready}"   # the marker the pool-manager writes once warm
+settle="${GOLDEN_RESTART_SETTLE_S:-$(envfile_py get "$ETC/winval.env" GOLDEN_RESTART_SETTLE_S)}"; case "$settle" in ''|*[!0-9]*) settle=3600;; esac
+t0=$(date +%s)
 systemctl restart winval-pool-manager
-echo "upgrade.sh: both tiers restarted on $(git rev-parse --short HEAD)"
+# a Type=simple unit is 'active' the instant systemctl returns: wait for the manager to SAY the pool is warm (the marker, newer than the
+# restart), fail on the unit's failure signals meanwhile, give up by name at the ceiling — the rotation's restart_pool, in sh
+while :; do
+  if [ -f "$ready" ] && [ "$(stat -c %Y "$ready" 2>/dev/null || echo 0)" -ge "$((t0 - 2))" ]; then break; fi
+  if [ "$(systemctl is-failed winval-pool-manager 2>/dev/null)" = failed ]; then echo "upgrade.sh: winval-pool-manager went 'failed' after the restart: its start is failing (journalctl -u winval-pool-manager); the code is upgraded, the pool is DOWN" >&2; exit 1; fi
+  case "$(systemctl is-active winval-pool-manager 2>/dev/null)" in active|activating) ;; *) echo "upgrade.sh: winval-pool-manager is not active after the restart (journalctl -u winval-pool-manager); the code is upgraded, the pool is DOWN" >&2; exit 1;; esac
+  if [ "$(( $(date +%s) - t0 ))" -ge "$settle" ]; then echo "upgrade.sh: winval-pool-manager did not report the pool warm within ${settle}s ($ready not written; journalctl -u winval-pool-manager): the code is upgraded, the pool is not in service; GOLDEN_RESTART_SETTLE_S raises the wait" >&2; exit 1; fi
+  sleep 1
+done
+echo "upgrade.sh: both tiers restarted on $(git rev-parse --short HEAD); the pool-manager reported the pool warm $(( $(date +%s) - t0 ))s after the restart"

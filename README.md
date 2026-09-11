@@ -132,7 +132,7 @@ and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RF
 anonymize that beacon, protocol-limit it, and block SSRF/lateral movement. An unreachable responder
 just yields `revocation_checked="unknown"`. **Two hops to know about:** (1) worker to worker on the same
 libvirt bridge is switched, not routed: the FORWARD rules see it only with `net.bridge.bridge-nf-call-iptables=1`
-(`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist, or the `drop` exit, whose chain ends in DROP) drops it —
+(`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist that does not admit the agent port, or the `drop` exit, whose chain ends in DROP) drops it —
 the documented default `direct` exit with block_internal off ends in ACCEPT, so a compromised worker reaches
 its siblings' agent port 8765 (a golden baked before this version opened that port to any source); (2) the host's own
 listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
