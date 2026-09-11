@@ -393,9 +393,11 @@ def snapshot_source(ts: str, src: str | None = None) -> tuple[str, str, int]:
 # ONE name for the RAM base, the pool's (winval_blastbox/vm_pool.py + the pool-manager unit read
 # AUTHENTICODE_GOLDEN_BASE): a rotation that promoted to a different path than the pool boots from
 # would log "PROMOTED" every night and never reach a job. GOLDEN_BASE is kept as a legacy alias.
-GOLDEN_BASE = ((os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or (os.environ.get("GOLDEN_BASE") or "").strip(" \t")
+GOLDEN_BASE = ((os.environ.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t")
                or "/dev/shm/golden-base.qcow2")   # blank is the default, space and tab only are trimmed, as the unit's sed does (a newline, a no-break space or any control byte is refused by the
                                                  # preflight's printable-ASCII check), as the pool's spec and the unit's pre-start read it
+LEGACY_GOLDEN_BASE = (os.environ.get("GOLDEN_BASE") or "").strip(" \t")   # the old name: read by NOTHING else (the pool and the unit boot from
+# AUTHENTICODE_GOLDEN_BASE), so honouring it here would promote to a path no worker boots from — the preflight refuses it by name instead
 GOLDEN_BASE_DISK = os.environ.get("GOLDEN_BASE_DISK", "/var/lib/libvirt/images/golden-base.qcow2")
 BACKUP_DIR = Path(os.environ.get("GOLDEN_BACKUP_DIR", "/var/lib/libvirt/images/golden-backups"))
 # A second copy of the chain record OFF the images store: the record beside the golden is the one a
@@ -518,8 +520,14 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
     The estimate is the larger of the current golden and the master, or the caller's (the
     build entry point passes its own base); with nothing to estimate from, refuse rather than
     pass a full disk. Raises NothingPublished."""
+    if not all(32 <= ord(c) < 127 for c in GOLDEN_BASE):   # static knobs: refused before the lock, the prune and the hour-long build —
+        # as the pool's spec and the unit's pre-start refuse it (winval_blastbox.vm_pool.golden_base)
+        raise NothingPublished(f"AUTHENTICODE_GOLDEN_BASE={GOLDEN_BASE!r} carries a character outside printable ASCII (a pasted U+00A0, a stray newline?): only a plain ASCII path is supported")
+    if LEGACY_GOLDEN_BASE and "AUTHENTICODE_GOLDEN_BASE" not in os.environ:
+        raise NothingPublished(f"GOLDEN_BASE={LEGACY_GOLDEN_BASE!r} is the rotator's OLD name for the RAM base and nothing else reads it: the pool and the "
+                               f"pool-manager unit boot from AUTHENTICODE_GOLDEN_BASE (default {GOLDEN_BASE}). Rename the knob (deploy/winval.env.example)")
     try:
-        validate_graveyard(GRAVEYARD)   # static knobs: refused before the lock, the prune and the hour-long build
+        validate_graveyard(GRAVEYARD)
         validate_warm_dir(WARM_DIR)
     except ValueError as exc:
         raise NothingPublished(str(exc)) from exc
@@ -577,8 +585,6 @@ def rotation_preflight(estimate_bytes: int | None = None, candidate_built: bool 
                 logger.warning("the chain-record mirror %s cannot be written (GOLDEN_CHAIN_MIRROR; root filesystem full or an unmounted path?): a promotion during an images-store outage would then lose its depth", _mirror_file())
     finally:
         os.close(fd)   # released again: the build does not hold the lock, rotate() takes it
-    if not all(32 <= ord(c) < 127 for c in GOLDEN_BASE):   # as the pool's spec and the unit's pre-start refuse it (winval_blastbox.vm_pool.golden_base)
-        raise NothingPublished(f"AUTHENTICODE_GOLDEN_BASE={GOLDEN_BASE!r} carries a character outside printable ASCII (a pasted U+00A0?): only a plain ASCII path is supported")
     for base in (GOLDEN_BASE_DISK, GOLDEN_BASE):   # what _promote refuses, refused here, before the build
         if Path(base).is_symlink() or Path(base).is_dir():
             raise NothingPublished(f"{base} is a symlink or a directory, not a regular file: the promotion would refuse it")
