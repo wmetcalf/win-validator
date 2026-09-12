@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The same floor deploy/upgrade.sh installs. The suite imports winval_blastbox,
+      # which imports blastbox; nothing else here is needed, because no test starts a
+      # pool, opens a database or talks to libvirt.
+      - run: pip install "blastbox>=0.1.33" pytest
+      - run: pytest
