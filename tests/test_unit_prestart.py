@@ -102,3 +102,19 @@ def test_the_unit_parses(key):
     output = proc.stdout + proc.stderr
     for complaint in ("Unbalanced quoting", "Invalid ", "Unknown key", "ignoring"):
         assert complaint not in output, output[-400:]
+
+
+def test_the_helper_refuses_to_materialise_outside_the_sandbox(tmp_path):
+    """The guard that keeps this file honest.
+
+    The pre-start really removes and copies the path it is handed. A case written with
+    the literal default would therefore overwrite the live RAM golden of a deployment on
+    whichever machine ran the suite -- and that machine is a developer's own. The helper
+    refuses rather than trusting every future test to remember.
+    """
+    from conftest import run_unit_prestart
+
+    with pytest.raises(AssertionError, match="outside"):
+        run_unit_prestart(tmp_path, "/dev/shm/golden-base.qcow2", disk_twin="DISK-TWIN")
+    with pytest.raises(AssertionError, match="outside"):
+        run_unit_prestart(tmp_path, "", disk_twin="DISK-TWIN")  # empty falls to the default

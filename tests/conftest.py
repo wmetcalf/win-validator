@@ -174,6 +174,17 @@ def run_unit_prestart(tmp_path, golden_base, *, disk_twin=None, master=None, env
     ownership branch behaves as it does under a real start, where the RAM base found on
     /dev/shm was not written by this unit.
     """
+    # The pre-start really removes and copies the path it is given, so a test that hands
+    # it an absolute /dev/shm path would overwrite the live RAM golden of a deployment on
+    # the machine running the suite -- the very machine a developer would run it on.
+    # A value the pre-start would itself refuse writes nothing, so it is allowed through.
+    effective = golden_base.strip(" \t") or "/dev/shm/golden-base.qcow2"
+    refusable = not all(32 <= ord(c) < 127 for c in effective)
+    if not refusable and not effective.startswith(str(tmp_path) + os.sep):
+        raise AssertionError(
+            f"run_unit_prestart would materialise {effective!r}, outside {tmp_path}: "
+            "give it a path under tmp_path"
+        )
     images = tmp_path / "img"
     images.mkdir(exist_ok=True)
     ram = tmp_path / "shm"

@@ -74,16 +74,52 @@ def test_rotation(raw, expected):
         assert printable and kept == expected
 
 
-@pytest.mark.parametrize("raw,expected", CASES)
-def test_unit_prestart(raw, expected, tmp_path):
+# The same shapes as CASES, applied to a path inside the test's own sandbox. The unit's
+# pre-start really removes and copies what it is handed, so it is the one reader of this
+# knob a test must not point at /dev/shm: on a machine where win-validator is deployed --
+# a developer's own -- that would overwrite the live RAM golden with a fixture.
+SHAPES = [
+    pytest.param(lambda p: p, False, id="plain"),
+    pytest.param(lambda p: f"  {p}  ", False, id="spaces-trimmed"),
+    pytest.param(lambda p: f"\t{p}\t", False, id="tabs-trimmed"),
+    pytest.param(lambda p: f"\xa0{p}", True, id="leading-no-break-space"),
+    pytest.param(lambda p: p.replace(".qcow2", "\u00f6.qcow2"), True, id="non-ascii-letter"),
+    pytest.param(lambda p: p.replace(".qcow2", "\t.qcow2"), True, id="inner-tab"),
+    pytest.param(lambda p: p.replace(".qcow2", "\x7f.qcow2"), True, id="delete-byte"),
+    pytest.param(lambda p: f"\n{p}", True, id="leading-newline"),
+    pytest.param(lambda p: f"{p}\n", True, id="trailing-newline"),
+    pytest.param(lambda p: f"\x0b{p}", True, id="leading-vertical-tab"),
+    pytest.param(lambda p: f"{p}\x0b", True, id="trailing-vertical-tab"),
+]
+
+
+@pytest.mark.parametrize("shape,refused", SHAPES)
+def test_unit_prestart(shape, refused, tmp_path):
     """The pool-manager unit's pre-start, which materialises the RAM base at boot."""
+    sandbox = str(tmp_path / "shm" / "golden-base.qcow2")
+    raw = shape(sandbox)
     rc, out = run_unit_prestart(tmp_path, raw, disk_twin="DISK-TWIN", master="MASTER")
-    if expected is REFUSED:
+    if refused:
         assert rc == 1, f"the unit accepted {raw!r}: {out[-200:]}"
         assert "printable ASCII" in out, out[-200:]
+        assert not (tmp_path / "shm" / "golden-base.qcow2").exists()
     else:
         assert rc == 0, out[-300:]
-        assert out.count("printable ASCII") == 0
+        assert (tmp_path / "shm" / "golden-base.qcow2").read_text() == "DISK-TWIN"
+
+
+def test_the_unit_falls_back_to_the_same_default_as_the_others():
+    """The empty case, for the one reader a test must not point at /dev/shm.
+
+    Every other reader is a pure computation over the knob and is checked above against
+    the real default; the unit copies images, so its fallback is read out of the shipped
+    pre-start rather than exercised against the host's own RAM base.
+    """
+    from conftest import unit_prestart_body
+
+    assert f"b={DEFAULT}" in unit_prestart_body(), (
+        "the unit's fallback is not the default the other three readers use"
+    )
 
 
 @pytest.mark.parametrize("raw,expected", CASES)
