@@ -33,3 +33,24 @@ with what ships.
 A test earns its place by failing when the fix it describes is undone. Before adding
 one, revert the change it covers and watch it go red; a test that passes either way is
 worse than none, because it reads like coverage.
+
+## What these do not cover
+
+Worth knowing before trusting a green run, because the gap is large and uneven. The
+suite was written around the invariants this branch established, not around the branch's
+whole surface, and a reader who assumes otherwise will be wrong in a specific direction.
+
+Reached: the rotation's preflight, retry and backup paths; the worker spec's reading of
+the knobs; the refusal that keeps workers off each other's network; the unit's pre-start;
+and the env-file half of the upgrade gate.
+
+Not reached at all: `golden_build.py`, `winval_blastbox/ingress.py`,
+`winval_blastbox/orchestrator.py`, `winval_blastbox/body_cap.py`, and every line of
+`deploy/compose-env.sh`. Barely reached: `winval_blastbox/pool_manager.py`, where only
+the egress refusal runs — the claim loop, the job sweep and the kernel-module probe do
+not. Of `golden_rotate.py` roughly two functions in five are ever entered; the promotion
+itself, the build, the gate boot and the pool restart are not among them, because each
+needs libvirt, qemu or systemd.
+
+So a green run means the behaviours listed above still hold. It does not mean the
+branch works. Nothing here starts a worker, boots an image or promotes a golden.

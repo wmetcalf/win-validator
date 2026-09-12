@@ -58,20 +58,28 @@ def test_worker_pool_spec(raw, expected, monkeypatch):
         assert vm_pool.golden_base() == expected
 
 
-@pytest.mark.parametrize("raw,expected", CASES)
-def test_rotation(raw, expected):
-    """The rotation's own read, which decides what a promotion publishes to.
+@pytest.mark.parametrize("raw,expected", [c for c in CASES if c.values[1] is not REFUSED])
+def test_rotation_keeps_the_same_path(raw, expected):
+    """What the rotation would promote to, read in a subprocess because golden_rotate
+    resolves this knob at import."""
+    assert module_global("GOLDEN_BASE", {"AUTHENTICODE_GOLDEN_BASE": raw}) == expected
 
-    Read in a subprocess because golden_rotate resolves this knob at import; the
-    printable-ASCII refusal itself lives in rotation_preflight, so the test applies that
-    same rule to the value the module kept.
+
+@pytest.mark.parametrize("raw,expected", [c for c in CASES if c.values[1] is REFUSED])
+def test_rotation_refuses_and_publishes_nothing(raw, expected, gr, golden_tree, as_root, monkeypatch):
+    """The refusal itself, executed rather than described.
+
+    The rotation has no printable-ASCII check of its own: it refuses because its preflight
+    builds the spec the pool-manager would start with, and that build refuses. Asserting
+    the rule again inside the test would keep passing with the real check deleted, which
+    is the failure mode a test suite is supposed to make impossible.
     """
-    kept = module_global("GOLDEN_BASE", {"AUTHENTICODE_GOLDEN_BASE": raw})
-    printable = all(32 <= ord(c) < 127 for c in kept)
-    if expected is REFUSED:
-        assert not printable, f"the rotation kept {kept!r}, which its preflight would accept"
-    else:
-        assert printable and kept == expected
+    monkeypatch.setenv("AUTHENTICODE_EXIT", "none")
+    monkeypatch.setenv("AUTHENTICODE_GOLDEN_BASE", raw)
+    with pytest.raises(gr.NothingPublished) as refusal:
+        gr.rotation_preflight(estimate_bytes=1)
+    assert "printable ASCII" in str(refusal.value), str(refusal.value)
+    assert "AUTHENTICODE_GOLDEN_BASE" in str(refusal.value)
 
 
 # The same shapes as CASES, applied to a path inside the test's own sandbox. The unit's

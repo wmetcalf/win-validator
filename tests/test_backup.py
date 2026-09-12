@@ -26,9 +26,13 @@ def cp_control(gr, golden_tree, monkeypatch):
         if argv[0] == "cp":
             src, dst = argv[-2], argv[-1]
             data = open(src, "rb").read()
+            short = state["cp"] in ("short", "short-but-rc-0")
             with open(dst, "wb") as fh:
-                fh.write(data if state["cp"] == "full" else data[: len(data) // 2])
-            return Completed(0 if state["cp"] == "full" else 1)
+                fh.write(data[: len(data) // 2] if short else data)
+            # "short-but-rc-0" is the case the size check exists for on its own: a copy
+            # that reports success and is not whole. "rc-1-but-whole" is the converse.
+            failed = state["cp"] in ("short", "rc-1-but-whole")
+            return Completed(1 if failed else 0)
         if argv[0] == "rm" and state["rm"] == "fail":
             return Completed(1)
         if argv[0] in ("rm", "mv", "touch", "mkdir", "chmod"):
@@ -72,6 +76,23 @@ def test_a_truncated_copy_whose_cleanup_fails_is_not_a_backup(gr, cp_control):
     assert list(gr.BACKUP_DIR.glob("golden-base.*.qcow2")) == []
     cp_control["rm"] = "ok"
     gr._sweep_own_temps()
+    assert names(gr) == []
+
+
+def test_a_copy_that_reports_success_but_is_not_whole_is_still_refused(gr, cp_control):
+    """The size check on its own. A timeout or a full disk can end a copy that still
+    exits zero, and a short backup satisfies every reader that would later trust it."""
+    cp_control["cp"] = "short-but-rc-0"
+    with pytest.raises(gr.NothingPublished, match="backup of the current golden"):
+        gr._backup_current()
+    assert names(gr) == []
+
+
+def test_a_whole_copy_that_reports_failure_is_still_refused(gr, cp_control):
+    """The return-code check on its own, so neither guard can be deleted unnoticed."""
+    cp_control["cp"] = "rc-1-but-whole"
+    with pytest.raises(gr.NothingPublished, match="backup of the current golden"):
+        gr._backup_current()
     assert names(gr) == []
 
 

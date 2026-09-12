@@ -172,8 +172,16 @@ def test_a_start_time_verdict_only_warns_without_a_restart(tmp_path):
 def test_the_verdict_is_printed_not_echoed(tmp_path):
     """dash's echo expands the backslash escapes a repr() puts in the value, so a knob
     carrying a tab would print as several lines with the escape undone."""
+    import re
+
     text = (REPO / "deploy" / "upgrade.sh").read_text()
-    for line in text.splitlines():
-        if "$verdict" in line or "$rverdict" in line:
-            if line.strip().startswith(("echo ", "  echo ")):
-                raise AssertionError(f"a verdict goes through echo: {line.strip()}")
+    offenders = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if "$verdict" not in line and "$rverdict" not in line:
+            continue
+        # the printing command anywhere on the line, not only at its start: one of the
+        # three sits inside an `if ...; then ...; fi`, which a start-of-line check misses
+        if re.search(r"(^|[;&|]|\bthen\b)\s*echo\s", line):
+            offenders.append(f"{number}: {line.strip()}")
+    assert offenders == [], offenders
+    assert text.count("printf '%s\\n' \"upgrade.sh:") >= 3, "a verdict line stopped using printf"

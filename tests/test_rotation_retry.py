@@ -169,10 +169,25 @@ def test_a_refusing_preflight_leaves_no_hold(gr, retry, monkeypatch):
     assert holds(gr) == []
 
 
-def test_a_mistyped_path_writes_nothing(gr, retry):
-    """The guard for a path that is not a regular file runs before anything is written."""
+def test_a_mistyped_path_prunes_nothing(gr, retry, monkeypatch):
+    """The guard for a path that is not a regular file runs before anything is written.
+
+    Ordering is the whole point of it: the preflight takes the lock and prunes surplus
+    backups keeping only the candidate it was given, so a typo used to delete the oldest
+    rollback backup and then report that no backup had been taken. Asserting only the
+    message would keep passing on the duplicate guard further in, after the prune.
+    """
+    monkeypatch.setattr(gr, "KEEP_N", 1)
+    kept = []
+    for stamp in ("20250101-000000", "20260101-000000"):
+        backup = gr.BACKUP_DIR / f"golden-base.{stamp}.qcow2"
+        backup.write_bytes(b"B" * 4096)
+        kept.append(backup)
+    before = sorted(p.name for p in gr.BACKUP_DIR.iterdir())
     with pytest.raises(gr.NothingPublished, match="not a regular file"):
         gr._main("rotate", ["rotate", str(gr.BACKUP_DIR / "typo.qcow2")])
+    assert sorted(p.name for p in gr.BACKUP_DIR.iterdir()) == before, "a typo pruned a backup"
+    assert all(b.is_file() for b in kept)
     assert holds(gr) == []
 
 

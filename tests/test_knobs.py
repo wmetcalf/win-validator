@@ -45,6 +45,47 @@ def test_a_float_knob(raw, expected):
     assert got == expected
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        pytest.param("4", 4, id="a-plain-value"),
+        pytest.param("", 2, id="blanked-out-line-is-the-default"),
+        pytest.param("two", 2, id="a-typo-is-the-default"),
+        pytest.param("0", 1, id="below-the-floor-is-the-floor"),
+        pytest.param("-1", 1, id="negative-is-the-floor"),
+    ],
+)
+def test_the_pool_size(raw, expected, monkeypatch):
+    """AUTHENTICODE_POOL_SIZE goes through the other integer reader, the one the
+    pool-manager and ingress tiers use. A typo here used to be a traceback at import."""
+    import winval_blastbox.vm_pool as vm_pool
+
+    monkeypatch.setenv("AUTHENTICODE_POOL_SIZE", raw)
+    assert vm_pool.pool_size() == expected
+
+
+@pytest.mark.parametrize(
+    "reader,knob,default",
+    [
+        pytest.param("upload_mb", "AUTHENTICODE_MAX_UPLOAD_MB", 1024, id="upload-cap"),
+        pytest.param("agent_port", "AUTHENTICODE_AGENT_PORT", 8765, id="agent-port"),
+    ],
+)
+def test_the_other_integer_knobs(reader, knob, default, monkeypatch):
+    """Same reader, and the same two answers: a typo is the default, a value below the
+    floor is the floor. The agent port matters twice over, because the egress refusal
+    decides whether an allowlist admits it."""
+    import winval_blastbox.knobs as knobs
+
+    read = getattr(knobs, reader)
+    monkeypatch.setenv(knob, "abc")
+    assert read() == default
+    monkeypatch.setenv(knob, "0")
+    assert read() == 1
+    monkeypatch.setenv(knob, "7")
+    assert read() == 7
+
+
 def test_no_knob_is_parsed_bare():
     """One bare int() is all it takes to put a crash back before the first log line."""
     import re

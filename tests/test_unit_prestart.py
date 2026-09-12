@@ -80,8 +80,7 @@ def test_with_nothing_to_copy_from_the_start_refuses_by_name(tmp_path):
     assert not ram_base(tmp_path).exists()
 
 
-@pytest.mark.parametrize("key", ["ExecStartPre", "ExecStart"])
-def test_the_unit_parses(key):
+def test_the_units_parse():
     """systemd's own parser on the shipped units: an unbalanced quote in a pre-start is
     a unit that never starts, and the failure names a line number, not a knob."""
     import shutil
