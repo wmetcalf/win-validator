@@ -8,8 +8,8 @@ Add-MpPreference -ExclusionPath C:\scan,'C:\Windows\Temp\scan'
 # upload dir + install path + process by NAME so this survives even if realtime protection is
 # re-enabled later (Windows silently flips DisableRealtimeMonitoring back on Server SKUs).
 New-Item -Force -ItemType Directory 'C:\ProgramData\myatg\uploads' | Out-Null
-Add-MpPreference -ExclusionPath 'C:\ProgramData\myatg','C:\Program Files\myatg'
-Add-MpPreference -ExclusionProcess 'C:\Program Files\myatg\myatg.exe'
+Add-MpPreference -ExclusionPath 'C:\ProgramData\myatg','C:\Program Files\myatg','C:\agent'   # C:\agent is where golden_build.py installs and runs the agent
+Add-MpPreference -ExclusionProcess 'C:\Program Files\myatg\myatg.exe','C:\agent\myatg.exe'
 Add-MpPreference -ExclusionExtension exe,dll,sys,scr,ocx,cpl,efi,msi,ps1,psm1,vbs,js,jse,vbe,wsf,hta,bat,cmd,jar,lnk,chm,com
 Set-MpPreference -DisableRealtimeMonitoring $true -DisableScriptScanning $true -DisableIOAVProtection $true -DisableArchiveScanning $true -DisableBehaviorMonitoring $true
 Set-MpPreference -MAPSReporting Disabled -SubmitSamplesConsent NeverSend

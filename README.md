@@ -63,7 +63,8 @@ flowchart TB
 3. The worker is a **libvirt qcow2 overlay clone** off the golden base with an internal `clean`
    snapshot. A baked-in guest agent (`myatg.exe`, running as **NETWORK SERVICE, unprivileged**)
    validates the file over an HTTP `POST /validate` call and returns myatg's JSON verdict
-   (per-job `?rev=`/`?scripts=` overrides ride along on that request).
+   (the operator-wide `AUTHENTICODE_REV`/`AUTHENTICODE_SCRIPTS` from the engine's environment ride along
+   as `?rev=`/`?scripts=`; nothing on a scan request can change them).
 4. blastbox **re-seals** that output from disk (recomputing every hash/size, confining paths)
    before a byte of it is trusted, and writes it back as the job result. The client polls
    `GET /scan/{id}`.
@@ -83,8 +84,9 @@ stateDiagram-v2
     Provision --> Warm: boot · start agent · sync clock (domtime)<br/>smoke-test · snapshot-create-as 'clean'
     Warm --> Validating: claim one sample
     Validating --> Warm: virsh snapshot-revert 'clean' (~5–8s)<br/>[every K jobs — jobs_per_recycle]
-    Warm --> Reprovision: after M recycles (recycles_per_reprovision)
-    Reprovision --> [*]: destroy + undefine + rebuild
+    Warm --> Respawn: 2 consecutive failures to REACH the agent on one worker (connection refused / unreachable)<br/>(blastbox max_consecutive_failures — the worker is destroyed and a fresh overlay booted, no rotation involved. An agent that answered with HTTP — an error status, a bad or oversize body — is the sample's evidence; one that accepted the connection and then stalled, reset or died is nobody's: the worker is snapshot-reverted either way and never evicted for it)
+    Respawn --> Warm
+    Warm --> [*]: golden rotation (the pool restarts on the new base)<br/>no rebuild ceiling of its own: max_jobs_per_slot is 0 (deploy/vmcompose.yml)
 ```
 
 - **`snapshot-revert`** restores a warm baseline (agent up, CRL cache primed) in ~5–8 s, wiping any
@@ -99,8 +101,11 @@ stateDiagram-v2
 `golden_rotate.py` keeps the golden image **fresh** and keeps the last N as **rollback backups**:
 
 ```
-build_candidate()  master --overlay--> myatg.exe --refresh
+build_candidate()  private copy of the PROMOTED golden --overlay--> myatg.exe --refresh
                    (disallowed kill-list + CRL cache + roots/CTL via syncWithWU) --> flatten
+                   (every GOLDEN_MAX_CHAIN cycles, or with GOLDEN_REBAKE_FROM=master, the cycle is instead the
+                   full golden_build bake from the packer master — the Disallowed store is add-only, so the
+                   chain of goldens is reset from the pristine image; see deploy/README.md)
 validate_golden()  boot a throwaway worker off the candidate
                    GATE:  benign binary == Valid  AND  known-revoked == Revoked
 rotate()           back up current golden (keep last N) --> promote candidate --> restart pool-manager
@@ -116,12 +121,28 @@ corrupted image is rejected and the current golden is kept.
 
 ## Locked-down egress — why it matters here
 
-The worker's network is a **class policy, not a host allowlist**: an anonymizing exit
+**Required, or opted out by name:** the pool-manager refuses to start unless `AUTHENTICODE_EXIT` names an exit
+driver (`direct` is the minimum: it installs the per-worker chains) or is set to `none`, the explicit opt-out that
+gives a worker whatever the libvirt network allows (plain NAT, RFC1918 included) on purpose. An unset knob used to
+mean the same as `none` silently; it is a refusal now.
+With it set, the worker's network is a **class policy, not a host allowlist**: an anonymizing exit
 (VPN/SOCKS, tor optional) + **DNS/HTTP/HTTPS only (53/80/443)** + **block all RFC1918/internal**,
 fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
 and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RFC3161 timestamp). So we
 anonymize that beacon, protocol-limit it, and block SSRF/lateral movement. An unreachable responder
-just yields `revocation_checked="unknown"`.
+just yields `revocation_checked="unknown"`. **Two hops to know about:** (1) worker to worker on the same
+libvirt bridge is switched, not routed: the FORWARD rules see it only with `net.bridge.bridge-nf-call-iptables=1`
+(`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist that does not admit the agent port, or the `drop` exit, whose chain ends in DROP) drops it —
+the documented default `direct` exit with block_internal off ends in ACCEPT, so a compromised worker reaches
+its siblings' agent port 8765 (a golden baked before this version opened that port to any source); (2) the host's own
+listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
+blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
+`block_internal` covers the docker-published 8099; with `none` there is no chain at all — see `deploy/README.md`.
+Both hops are checked at start (with an exit driver set; `none` opts out of both): with more than one worker, the pool-manager refuses to start unless
+`AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist that does not admit the agent port, or the `drop` exit) is set AND `net.bridge.bridge-nf-call-iptables` is 1, so a
+policy that could not drop worker-to-worker traffic never runs a pool. And the golden's own firewall rule for the
+agent port admits the pool-manager's address alone (the host's address on the libvirt network, learned at bake
+time; `AUTHENTICODE_AGENT_CALLER` overrides it), so a sibling never reaches the port even where the host rules miss.
 
 ## Repo layout
 
@@ -147,15 +168,16 @@ curl -F file=@suspect.dll 'http://127.0.0.1:8099/scan'   # -> {job_id, status: q
 curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict(s)
 ```
 
-`GET /cert/{tbs_sha256}` returns every scanned file whose signer or chain carries that cert.
+`GET /cert/{tbs_sha256}` on the orchestrator returns every scanned file (its own in-memory store) whose signer or
+chain carries that cert; the ingress's `/cert/{tbs}` searches its store's newest 2000 scans only and says so
+(`scanned` / `truncated`), see `deploy/README.md`.
 
 ## Status
 
 - **`authenticode` engine + orchestrator: built and validated end-to-end** (engine → myatg VM pool
   → sealed envelope; verdicts match the reference corpus). myatg is baked into the golden (no per-boot
   compile); the disposable-VM primitive is upstreamed into blastbox's `libvirt_vm` runtime.
-- **Follow-ups:** plumb per-job params (`--rev`/`--gv`/`--scripts`) through the guest-agent transport;
-  parameterize the remaining toolz3-specific paths; the designed **ember-legacy / ember-2024** ML
+- **Follow-ups:** the designed **ember-legacy / ember-2024** ML
   engines (the orchestrator already fans out to them and returns per-engine verdicts side-by-side —
   it reports components, not a single opinion).
 
@@ -163,6 +185,7 @@ curl http://127.0.0.1:8099/scan/<job_id>                 # -> per-engine verdict
 
 This project exists to handle **untrusted, frequently-malicious files**. It never *executes* a
 sample — it only parses signatures (WinVerifyTrust / catalog / SignedCms) — so residual risk is a
-signature-*parser* exploit, contained to a throwaway, egress-locked VM that resets every few jobs.
+signature-*parser* exploit, contained to a throwaway VM that resets every few jobs and is egress-locked
+once `AUTHENTICODE_EXIT` is set (above).
 Do not repurpose the workers to detonate samples without revisiting that model. Malware corpora,
 VM images, keys, and infra config are excluded from this repo by `.gitignore` — keep them out.

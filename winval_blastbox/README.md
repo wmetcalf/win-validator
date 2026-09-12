@@ -29,7 +29,7 @@ HostRunner.validate(file)
 | File | Role |
 |------|------|
 | `engine.py` | `AuthenticodeEngine` — the blastbox `Engine`; maps myatg JSON → `DetonationResult`. Module-level warm VM-pool singleton (`get_pool`/`warmup`/`shutdown_pool`). |
-| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>`. |
+| `host_runner.py` | `HostRunner` — in-process bridge that keeps the pool warm and drives each job through `run_detonation`. CLI: `python -m winval_blastbox.host_runner <file>` — exit 0 for any verdict, 1 when the sealed envelope is an `engine_error` (VM or transport failure), 2 for a usage or configuration error (no file, not a file, a bad `BLASTBOX_*` value; one line on stderr), 143 when a SIGTERM ended it before a verdict (empty stdout). |
 | `vm_pool.py` | `WarmVmPool` — blastbox `WarmPool` over `LibvirtVmRuntime` (overlay-clone workers off the golden, recycle-after-N). `agent_validate` is the HTTP client. The guest agent is **`myatg.exe --serve-http`**, baked into the golden as the ONSTART task (`NT AUTHORITY\NETWORK SERVICE`, LIMITED) — so there is no PowerShell shim anymore. |
 | `orchestrator.py` | **P3** — thin FastAPI fan-out (`POST /scan`, `GET /scan/{id}`, `GET /cert/{tbs}`, `GET /healthz`). Warms the pool at startup, runs engines off-request-path via a bounded executor, returns each engine's verdict side-by-side (components, not an opinion). |
 
@@ -46,8 +46,9 @@ curl http://127.0.0.1:8099/scan/<job_id>                       # -> per-engine v
 `POST /scan` accepts a file + optional `engines=authenticode,...` (default `authenticode`);
 unbuilt engines (`ember-legacy`/`ember-2024`, P4) return `status:"unavailable"`. The
 authenticode result is the parsed myatg verdict (status / signer / chain / graveyard) plus
-the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns every
-scanned file whose signer or chain carries that cert.
+the sealed `authenticode.json` artifact reference. `GET /cert/{tbs_sha256}` returns every scanned
+file (the orchestrator's own in-memory store) whose signer or chain carries that cert. The ingress's
+`/cert/{tbs}` is the bounded one — see `deploy/README.md`.
 
 ## Output (payload `Record` fields)
 
@@ -67,20 +68,16 @@ a `graveyard_hit` warning.
 | `AUTHENTICODE_GOLDEN_BASE` | golden qcow2 (default `/dev/shm/golden-base.qcow2`) |
 | `MYATG_SRC` | (build only) dir holding the myatg `*.cs` sources to compile in-guest — a myatg checkout; default `../myatg` beside this repo |
 
-Per-job param keys are declared in `engine.PARAM_KEYS` and gated by the orchestrator allowlist
-(`BLASTBOX_ENGINE_AUTHENTICODE_PARAM_KEYS`):
-
-- **`AUTHENTICODE_REV`** / **`AUTHENTICODE_SCRIPTS`** → **forwarded per request** as `?rev=` / `?scripts=`
-  on the agent HTTP call (myatg validates the value and falls back to its startup default on an
-  unknown one).
-- **`AUTHENTICODE_GV`** (graveyard) is **server-global** — loaded once into the golden's
-  `--serve-http` startup — so it can't be varied per job; **`AUTHENTICODE_TIER`** isn't a myatg
-  parameter. A request that sets either gets an honest `param_not_forwarded` warning.
+Per-job parameters are not forwarded by either tier: `/scan` takes the file (and, on the orchestrator, an engine
+list) only, and the engine reads `AUTHENTICODE_REV` / `AUTHENTICODE_SCRIPTS` from its process environment — one
+operator-wide value for every job. `AUTHENTICODE_GV` and `AUTHENTICODE_TIER` are read by nothing (the graveyard knob
+is `GOLDEN_GRAVEYARD`, baked into the golden's serve startup; TIER is not a myatg parameter): exporting either into the
+engine process puts an honest `param_not_forwarded` warning on every verdict. A request cannot set any of them.
 
 ## Status
 
 P2 engine: **built + validated end-to-end on toolz3** (engine → myatg VM pool → sealed
 envelope; 4/4 verdicts match the corpus `results.jsonl` reference). myatg.exe is baked into
-the golden as the `--serve-http` ONSTART agent (no per-boot compile), and per-job `rev`/`scripts`
-are forwarded. Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
+the golden as the `--serve-http` ONSTART agent (no per-boot compile); `rev`/`scripts` are the engine
+process's operator-wide setting (above), never per job. Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
 already fans out to them).

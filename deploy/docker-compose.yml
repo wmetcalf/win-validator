@@ -9,8 +9,11 @@
 # HOST (it needs libvirt + iptables) as a systemd unit and connects to the Postgres published below
 # + reads the same job_root host path. Bring up:
 #     mkdir -p /var/lib/winval/jobs && chown 10001:10001 /var/lib/winval/jobs
-#     docker compose -f deploy/docker-compose.yml up --build -d
+#     sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
 #     sudo systemctl start winval-pool-manager
+# ALWAYS with --env-file (deploy/README.md mints WINVAL_PG_PASSWORD into it): a bare `up` resolves
+# ${WINVAL_PG_PASSWORD:-winval} to the fallback and recreates the ingress locked out of a Postgres
+# volume that holds the real password.
 services:
   postgres:
     image: postgres:16-alpine
@@ -34,9 +37,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.ingress
     environment:
-      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD:-winval}@postgres:5432/winval
+      # the URL form needs the PERCENT-ENCODED password (deploy/README.md writes both into
+      # compose.env); POSTGRES_PASSWORD above takes the literal one
+      # NEVER the raw password here: a literal '@' or '#' would split the URL. A hand-written
+      # compose.env must carry WINVAL_PG_PASSWORD_URLENC too (deploy/README.md writes both).
+      BLASTBOX_DATABASE_URL: postgresql://winval:${WINVAL_PG_PASSWORD_URLENC:?set in /etc/winval/compose.env by deploy/README.md (percent-encoded password)}@postgres:5432/winval
       WINVAL_JOB_ROOT: /var/lib/winval/jobs
-      AUTHENTICODE_MAX_UPLOAD_MB: "1024"
+      AUTHENTICODE_MAX_UPLOAD_MB: "${WINVAL_UPLOAD_MB:-1024}"   # compose.env may raise it — together with WINVAL_SPOOL_SIZE below and the pool-manager unit's value
     volumes:
       - /var/lib/winval/jobs:/var/lib/winval/jobs   # SHARED host path with the pool-manager
     ports:
@@ -44,7 +51,7 @@ services:
     user: "10001:10001"
     read_only: true            # defense-in-depth: only the job_root volume + /tmp are writable
     tmpfs:
-      - /tmp
+      - /tmp:size=${WINVAL_SPOOL_SIZE:-2g}   # the multipart spool: bounded per request by the body cap (WINVAL_UPLOAD_MB), here for all of them at once — keep it >= 2x the cap (two concurrent max-size uploads; a third gets ENOSPC, not the host's RAM)
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     depends_on:

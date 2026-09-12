@@ -19,17 +19,29 @@ Run on the libvirt host (toolz3):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
+
+from blastbox.host.netwire import parse_strict_bool
+import concurrent.futures.thread as _futures_thread
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
+
+from .body_cap import FRAMING_SLACK, BodyCap
+from .knobs import upload_mb
+
+_log = logging.getLogger("winval.orchestrator")
+from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
 from .host_runner import HostRunner
 
@@ -64,6 +76,10 @@ def _authenticode_verdict(env: dict) -> dict:
     }
 
 
+class NotQueued(RuntimeError):
+    """submit() refused BEFORE queueing: nothing will ever run this job (the executor is shut down)."""
+
+
 class JobStore:
     """In-memory job store + a bounded executor that drives the engines off the request path."""
 
@@ -72,6 +88,10 @@ class JobStore:
         self._max_jobs = max_jobs  # bound this in-memory store (non-persistent; see PR follow-up)
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="scan")
+        try:   # see _poke_loop; a thread the process cannot start at THIS moment must not fail the startup the poker exists to rescue
+            threading.Thread(target=_poke_loop, args=(weakref.ref(self),), name="poke-executor", daemon=True).start()
+        except RuntimeError as exc:
+            _log.warning("no poker thread (%s): a job queued while no worker can start waits for the next submission", exc)
 
     def create(self, filename: str, engines: list[str]) -> str:
         jid = uuid.uuid4().hex
@@ -95,18 +115,39 @@ class JobStore:
 
     def _update(self, jid: str, **kw: Any) -> None:
         with self._lock:
+            if jid not in self._jobs:
+                raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid].update(kw)
 
     def _update_engine(self, jid: str, engine: str, value: dict) -> None:
         with self._lock:
+            if jid not in self._jobs:
+                raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid]["engines"][engine] = value
 
     def submit(self, jid: str, path: str, engines: list[str]) -> None:
-        self._pool.submit(self._run, jid, path, engines)
+        # the executor refuses BEFORE the put in three ways, all under its own lock (a broken pool, its shutdown, the interpreter's
+        # shutdown), and raises AFTER the put in one (a worker thread that cannot start): the first three are NotQueued, the last
+        # means the job is queued — classified by the executor's own exceptions, so no check of ours can race its shutdown
+        from concurrent.futures.thread import BrokenThreadPool
+        try:
+            self._pool.submit(self._run, jid, path, engines)
+        except BrokenThreadPool as exc:
+            raise NotQueued(f"the worker pool is broken ({exc})") from exc
+        except RuntimeError as exc:
+            if "shutdown" in str(exc):   # "cannot schedule new futures after (interpreter) shutdown": refused before the put
+                raise NotQueued("the orchestrator is shutting down") from exc
+            raise   # "can't start new thread": the item is queued
 
     def _run(self, jid: str, path: str, engines: list[str]) -> None:
-        self._update(jid, status="running")
         try:
+            self._run_inner(jid, path, engines)
+        except KeyError as exc:   # the executor never reads the future: an eviction must be SAID here, or it leaves no trace anywhere
+            _log.warning("job %s: %s; its upload was removed", jid, exc)
+
+    def _run_inner(self, jid: str, path: str, engines: list[str]) -> None:
+        try:   # the finally owns the upload temp file whatever happens — a job evicted by the max_jobs cap while queued raised KeyError before the old try, leaking the file
+            self._update(jid, status="running")
             for e in engines:
                 runner = ENGINES.get(e)
                 if runner is None:
@@ -169,9 +210,9 @@ _store: JobStore | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _store
-    pool_size = int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2"))
+    pool_size = _pool_size()
     _store = JobStore(max_workers=pool_size)
-    if os.environ.get("ORCHESTRATOR_WARM", "1").lower() in ("1", "true", "yes"):
+    if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM"), default=True):   # blastbox's strict boolean: unset or blank is the default (on), a typo raises at startup, never reads as OFF
         runner = HostRunner()
         runner.warmup()  # boot the VM pool once
         ENGINES["authenticode"] = lambda p: _authenticode_verdict(runner.validate(p))
@@ -187,7 +228,7 @@ app = FastAPI(title="win-validator orchestrator", lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok", "engines": sorted(ENGINES), "pool_size": int(os.environ.get("AUTHENTICODE_POOL_SIZE", "2"))}
+    return {"status": "ok", "engines": sorted(ENGINES), "pool_size": _pool_size()}
 
 
 @app.post("/scan", status_code=202)
@@ -198,8 +239,17 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
     # Stream the upload to a private temp file in chunks with a hard size cap, so a huge (or
     # slow-loris many-concurrent) upload can't be buffered whole into RAM and OOM the service.
     # Clean up the temp file on any failure before the job is queued (only _run unlinks otherwise).
-    max_bytes = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
-    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + Path(file.filename or "input").name)
+    max_bytes = upload_mb() * 1024 * 1024
+    name = Path(file.filename or "input").name
+    if not name or name in (".", "..") or "\x00" in name:   # a NUL made mkstemp raise ValueError as a 500
+        raise HTTPException(status_code=400, detail="filename has no usable name")
+    if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX, as the ingress twin bounds it: the row stored and served a 4 KB name verbatim
+        raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
+    # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
+    # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
+    stem, ext = os.path.splitext(name)
+    hint = stem.encode("utf-8", "surrogateescape")[:100].decode("utf-8", "ignore") + ext.encode("utf-8", "surrogateescape")[:20].decode("utf-8", "ignore")
+    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + hint)
     try:
         written = 0
         with os.fdopen(fd, "wb") as f:
@@ -214,9 +264,84 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         except OSError:
             pass
         raise
-    jid = _store.create(file.filename or "input", sel)
-    _store.submit(jid, path, sel)
+    try:
+        jid = _store.create(name, sel)   # the sanitised basename, as the ingress records it — not ../../evil.exe verbatim
+    except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    try:
+        _store.submit(jid, path, sel)
+    except NotQueued as exc:   # refused BEFORE the item is queued — nothing will ever run it
+        _store._update(jid, status="error", error=f"could not queue the job: {exc}")
+        for e in sel:   # the UI reads the ENGINE pane first: a pane still 'queued' under an error row spun forever
+            _store._update_engine(jid, e, {"status": "error", "error": f"not queued: {exc}"})
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        # a 503, not the bare re-raise's generic 500: the service could not take the job (shutting down, the executor broken) and a
+        # retry is the answer; the row it recorded is named so the operator can find it, and the client's next submission is a new job
+        _log.error("job %s: could not queue it (%s); recorded as error, the upload removed, the client told to retry (503)", jid, exc)   # a handled
+        # response logs nothing on its own; the post-queue sibling below logs, this more severe case must too
+        raise HTTPException(503, f"could not queue the job (recorded as {jid} with status error): {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — raised by the executor AFTER the item was queued (a worker thread could not start — a RuntimeError
+        # too, which is why the pre-queue case is a class of its own): the job IS queued and an idle worker may already be running it, so
+        # the request succeeded — say so (a 500 here, with the upload deleted, let a worker run an engine on a missing file and report done)
+        alive = len(getattr(_store._pool, "_threads", ()) or ())
+        _log.warning("job %s: the executor raised after queueing it (%s); the job is queued and will run%s", jid, exc,
+                     "" if alive else " — once a worker thread can start (none is alive now: the process limit?)")
+        # with none alive, nothing would run the queued job until the NEXT submission: the store's poker thread (started with the
+        # store, before any thread limit could bite; nothing is started HERE, where a new thread is what just failed) submits a
+        # no-op every _POKE_S until a worker lives
     return {"job_id": jid, "status": "queued", "engines": sel}
+
+
+_POKE_S = 30.0
+_POKE_MAX = 120   # an hour of failed pokes, then the operator is told once
+
+
+def _poke_loop(ref: "weakref.ref[JobStore]") -> None:
+    """The executor only tries to start a worker on a submit, so a job queued while a worker could NOT start (the process
+    limit) would wait for the next submission. This daemon thread, started with the store, asks the executor to start a
+    worker (its own _adjust_thread_count: nothing is queued by the asking) whenever work is queued and no worker is alive,
+    until one starts. It holds the store weakly and ends with it, or with its pool."""
+    fails = 0
+    while True:
+        time.sleep(_POKE_S)
+        store = ref()
+        if store is None:
+            return
+        pool = store._pool
+        del store
+        if getattr(pool, "_shutdown", False):
+            return
+        if getattr(pool, "_threads", ()) or pool._work_queue.empty():
+            fails = 0
+            continue
+        try:
+            # CPython's own worker start (a submit would leave a queued no-op behind every failure), under the SAME locks submit()
+            # holds and behind the same checks: unlocked, a submit landing during the start read len(_threads)==0 too and a second
+            # worker ran past max_workers (the claim concurrency); and _adjust_thread_count mutates the module's _threads_queues,
+            # which its own comment says the global lock must be held for. At interpreter shutdown, or a shut/broken pool, nothing
+            with pool._shutdown_lock, _futures_thread._global_shutdown_lock:
+                if _futures_thread._shutdown or pool._shutdown or getattr(pool, "_broken", False):
+                    return
+                if getattr(pool, "_threads", ()) or pool._work_queue.empty():   # re-read under the lock: a submit may just have started one
+                    fails = 0
+                    continue
+                pool._adjust_thread_count()
+        except Exception as exc:  # noqa: BLE001 — a worker still cannot start: keep trying, say so once
+            fails += 1
+            if fails == _POKE_MAX:
+                _log.error("no worker thread could be started in %d attempts over %.0f s (%s): the queued jobs wait for the process limit to clear", fails, fails * _POKE_S, exc)
+            continue
+        finally:
+            del pool
+        _log.info("a worker thread started after %d failed attempt(s); the queued jobs run", fails)
+        fails = 0
 
 
 @app.get("/scan/{job_id}")
@@ -300,7 +425,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="detail" class="panel"><div class="empty">Submit a file or pick a scan to see its verdict.</div></div>
 </div>
 <script>
-const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), js=s=>esc(JSON.stringify(String(s==null?'':s)));
 const pill=(s,extra='')=>`<span class="pill ${esc(s||'unknown')}">${esc(s||'—')}</span>${extra}`;
 let chosen=null, poll=null;
 async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json();}
@@ -311,13 +436,15 @@ $('#drop').onclick=()=>$('#file').click();
   $('#drop').classList.toggle('over',ev==='dragover');if(ev==='drop'&&e.dataTransfer.files[0])pick(e.dataTransfer.files[0]);}));
 $('#go').onclick=async()=>{if(!chosen)return;$('#go').disabled=true;
   const fd=new FormData();fd.append('file',chosen);
-  try{const r=await(await fetch('/scan',{method:'POST',body:fd})).json();watch(r.job_id);await refresh();}
-  catch(e){$('#detail').innerHTML='<div class="empty">submit failed: '+esc(e)+'</div>';}
+  try{const res=await fetch('/scan',{method:'POST',body:fd});const r=await res.json().catch(()=>({}));
+    if(!res.ok||!r.job_id)throw new Error(res.status+(r.detail?': '+(typeof r.detail==='string'?r.detail:JSON.stringify(r.detail)):''));   // a refusal is JSON too (400/413/503): its detail is the message, never a poll on /scan/undefined
+    watch(r.job_id);await refresh();}
+  catch(e){clearInterval(poll);$('#detail').innerHTML='<div class="empty">submit failed: '+esc(e)+'</div>';}   // the previous job's poll would repaint over the message
   $('#go').disabled=false;};
 function watch(id){clearInterval(poll);const tick=async()=>{const j=await jget('/scan/'+id);render(j);
   if(j.status==='done'||j.status==='error'){clearInterval(poll);refresh();}};tick();poll=setInterval(tick,1200);}
 async function refresh(){try{const {jobs}=await jget('/jobs?limit=80');
-  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch('${j.job_id}')">
+  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch(${js(j.job_id)})">
     <span class="fn" title="${esc(j.filename)}">${esc(j.filename)}</span>
     ${pill(j.verdict||j.status)}${j.graveyard_hit?' <span class="flag bad">graveyard</span>':''}</div>`).join('')
     :'<div class="empty">none yet</div>';}catch(e){}}
@@ -330,8 +457,9 @@ function flags(c){const f=[];const F=(ok,t,bad)=>f.push(`<span class="flag ${ok?
 function certRow(c){const cn=c.subject_cn||c.subject||'—';
   return `<li><b>${esc(cn)}</b> ${c.self_signed?'<span class="flag bad">self-signed</span>':''}
     <div class="muted">issuer: ${esc(c.issuer_cn||c.issuer||'—')}${c.not_after?' · expires '+esc(c.not_after.slice(0,10)):''}</div>
-    ${c.tbs_sha256?`<div class="mono"><a onclick="cert('${c.tbs_sha256}')">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
+    ${c.tbs_sha256?`<div class="mono"><a onclick="cert(${js(c.tbs_sha256)})">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
 function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac.warnings||[];
+  if(j.status==='error'&&!v){$('#detail').innerHTML=`<h3>${esc(j.filename||'')}</h3><div class="flag bad">${esc(j.error||ac.error||'failed')}</div>`;return;}
   if(ac.status==='queued'||ac.status==='running'||j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||j.status)} <span class="muted">validating…</span>`;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}
@@ -348,7 +476,7 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
-  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert('${s.tbs_sha256}')">${esc(s.tbs_sha256)}</a></span>`);
+  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);
   if(ch.chain&&ch.chain.length) row('chain ('+ch.chain.length+')',`<div>${flags(ch)}</div><ul class="chain">${ch.chain.map(certRow).join('')}</ul>`);
   else if(Object.keys(ch).length) row('chain',flags(ch));
   if(v.timestamped) row('timestamp',`${esc((v.sign_time||'').replace('T',' ').slice(0,19))} ${v.sign_time_verified?'<span class="flag ok">verified</span>':'<span class="flag">unverified</span>'}<div class="muted">${esc((v.timestamper||{}).subject_cn||'')}</div>`);
@@ -359,6 +487,9 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
 async function cert(tbs){const r=await jget('/cert/'+tbs);
   $('#detail').innerHTML=`<h3>cert <span class="mono">${esc(tbs)}</span></h3>
     <p class="muted">files signed by / chaining to this cert (${r.seen_in.length}):</p>
-    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch('${x.job_id}')"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
+    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
+
+_inner_app = app
+app = BodyCap(_inner_app, upload_mb() * 1024 * 1024 + FRAMING_SLACK)   # the cap runs BEFORE the multipart parser spools a part

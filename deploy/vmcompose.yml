@@ -1,18 +1,28 @@
-# Declarative win-validator VM worker — the "docker-compose for libvirt/kvm/qemu" (blastbox
-# vm_compose). `VmWorkerSpec.from_dict` builds the WarmPool from this; `build_image()` runs the
-# reproducible golden bake. The OS-install base (autounattend WS2025) is produced once and lives at
-# image.base_qcow2; golden_build.py layers the worker value-add on top, gated + promoted.
+# DESCRIPTIVE ONLY — the shape of the win-validator VM worker in blastbox vm_compose terms. NOTHING in
+# this repo parses this file: the pool is configured in code by winval_blastbox/vm_pool.py from the
+# AUTHENTICODE_* variables in /etc/winval/winval.env (POOL_SIZE, GOLDEN_BASE, AGENT_PORT — baked into the
+# golden's URL ACL/firewall/task by golden_build, so changing it needs a build-and-promote — IP_POOL,
+# SSH_KEY, SMOKE_SAMPLE, SMOKE_EXPECT, WARM_DIR, and for egress: AUTHENTICODE_EXIT,
+# AUTHENTICODE_EGRESS_PORTS, AUTHENTICODE_BLOCK_INTERNAL, AUTHENTICODE_VPN_TABLE/VPN_TUN,
+# AUTHENTICODE_FAKENET_ADDR, AUTHENTICODE_GATEWAY, AUTHENTICODE_LEG). Editing this file changes
+# nothing; set those instead. The domain-shape values below (mem_mb, vcpus, network, disk_bus,
+# nic_model, overlay_dir, max_jobs_per_slot) have NO knob: they are blastbox's VmWorkerSpec defaults
+# as authenticode_spec() leaves them, and change only with blastbox.
+# The OS-install base (autounattend WS2025) is produced once and lives at image.base_qcow2;
+# golden_build.py layers the worker value-add on top, gated + promoted.
 workers:
   authenticode:
     image:
       golden: /dev/shm/golden-base.qcow2                                # what workers boot (overlay COW)
-      base_qcow2: /var/lib/libvirt/images/winserver2025-base.qcow2      # post-OS-install WS2025
+      base_qcow2: /var/lib/libvirt/images/winserver2025-core.qcow2      # the packer's output, installed as GOLDEN_MASTER
       builder: qemu
       provisioners:
         # one reproducible, ordered, idempotent bake -> validation gate -> promote (keeps backups).
         # Run from the win-validator checkout (cwd), or set an absolute path to golden_build.py.
         # Point MYATG_SRC at a myatg checkout (defaults to ../myatg beside this repo).
-        - "python3 golden_build.py build-and-promote"
+        # NOTHING parses this file: the base is passed to the builder explicitly (or set
+        # GOLDEN_BUILD_BASE in winval.env) — keep it equal to image.base_qcow2 above.
+        - "sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote /var/lib/libvirt/images/winserver2025-core.qcow2"
 
     # domain shape
     mem_mb: 4096
@@ -28,7 +38,8 @@ workers:
     jobs_per_recycle: 25
     max_jobs_per_slot: 0
 
-    # egress (rooter model). exit: direct | openvpn | wireguard | tor | inetsim.
+    # egress (rooter model) — documentation of the AUTHENTICODE_EXIT / EGRESS_PORTS / BLOCK_INTERNAL knobs above;
+    # this block is not read. exit: direct | openvpn | wireguard | tor | inetsim.
     # egress_ports composes onto any exit; unset = all traffic over the exit. tor blocks non-TCP.
     egress:
       exit: direct

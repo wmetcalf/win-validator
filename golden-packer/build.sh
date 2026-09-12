@@ -25,11 +25,17 @@ command -v "$QEMU" >/dev/null 2>&1 || [ -x "$QEMU" ] || die "qemu not found: '$Q
 
 # The gotcha that bites people: a qemu compiled WITHOUT slirp (libslirp) can't do Packer's user-mode
 # networking. Crucially, `-netdev help` LISTS 'user' even when it's compiled OUT — so test it FOR REAL.
-if "$QEMU" -machine none -netdev user,id=slirptest 2>&1 | grep -qi "not compiled"; then
+# a slirp-enabled qemu ACCEPTS the netdev and then sits in its main loop forever — nothing asks it to
+# quit — so the probe feeds it `quit` on a stdio monitor (a qemu without slirp rejects the option
+# before the monitor exists) and is bounded by a timeout either way
+# (captured first, then grepped: under `set -o pipefail` a slirp-less qemu's exit 1 made the whole
+# pipeline non-zero even when grep matched, so the check could never fire)
+slirp_probe="$(printf 'quit\n' | timeout 30 "$QEMU" -machine none -display none -monitor stdio -netdev user,id=slirptest 2>&1 || true)"
+if printf '%s' "$slirp_probe" | grep -qi "not compiled"; then
     die "'$QEMU' has no slirp (user-mode networking) compiled in — Packer's qemu builder can't reach
        the guest. Install a slirp-enabled qemu, or point QEMU_BINARY at one (e.g. a stock Ubuntu qemu)."
 fi
-[ -w /dev/kvm ] || echo "WARNING: /dev/kvm not writable — the build will be very slow (no KVM accel)." >&2
+[ -w /dev/kvm ] || { echo "ERROR: /dev/kvm is not writable. The template needs KVM (accelerator = \"kvm\", -cpu host; there is no TCG fallback): run on a KVM-capable host, or add this user to the kvm group." >&2; exit 1; }
 
 # ---- inputs ---------------------------------------------------------------------------------------
 ISO="${ISO_PATH:-iso/windows.iso}"
@@ -64,13 +70,29 @@ if [ ! -f keys/build_key ]; then
     say "generated throwaway build key: keys/build_key(.pub)"
 fi
 PUBKEY="$(cat keys/build_key.pub)"
+case "$(printf %s "$PUBKEY" | tr -d "[:space:]")" in "") die "keys/build_key.pub is empty: the guest would get an empty authorized_keys and packer (key-only ssh) would wait out its ssh_timeout with nothing naming the cause; regenerate the pair (rm keys/build_key*) or restore the public half";; esac
 
-# ---- render the answer file (literal substitution — safe for any password/key chars) --------------
+# ---- render the answer file (XML-escaped substitution, then parsed back: an operator ADMIN_PASSWORD with
+#      & < or > used to land raw in two <Value> elements, and Windows Setup silently ignores an unparseable
+#      Autounattend — the failure surfaced only as packer waiting out ssh_timeout) ---------------------
 PUBKEY="$PUBKEY" ADMIN_PW="$ADMIN_PW" python3 - <<'PY'
-import os
-t = open("answer/Autounattend.xml.tmpl").read()
-t = t.replace("@@SSH_PUBKEY@@", os.environ["PUBKEY"]).replace("@@ADMIN_PASSWORD@@", os.environ["ADMIN_PW"])
-open("answer/Autounattend.xml", "w").write(t)
+import os, sys, xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
+t = open("answer/Autounattend.xml.tmpl", encoding="utf-8").read()
+pubkey = os.environ["PUBKEY"].replace("'", "''")   # the key lands inside a PowerShell single-quoted string: an apostrophe in a supplied key's comment doubles
+if '"' in pubkey:   # the key lands inside a -Command "..." in the answer file, and Windows Setup decodes any XML entity back to the quote before
+    # the command runs: no escape survives, so a quote (a key comment) is refused by name rather than ending the command early (no authorized
+    # key, the ssh_timeout burned). The password lands in a plain <Value> element and needs no such care
+    sys.exit("the SSH public key contains a double quote (in its comment?): the answer file's -Command cannot carry it; strip it from the key")
+t = t.replace("@@SSH_PUBKEY@@", escape(pubkey)).replace("@@ADMIN_PASSWORD@@", escape(os.environ["ADMIN_PW"]))
+try:
+    ET.fromstring(t)
+    data = t.encode("utf-8")   # a value the environment could not decode (not UTF-8) is refused here, not as a traceback
+except (ET.ParseError, UnicodeError) as exc:
+    sys.exit(f"rendered Autounattend.xml is not well-formed UTF-8 XML ({exc}); refusing to build with it")
+fd = os.open("answer/Autounattend.xml", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # it carries the Administrator password: 0600, like keys/admin_password.txt
+os.chmod(fd, 0o600)   # an existing file from an earlier render keeps its old mode otherwise
+os.write(fd, data); os.close(fd)
 PY
 say "rendered answer/Autounattend.xml"
 

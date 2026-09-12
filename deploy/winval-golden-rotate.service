@@ -3,6 +3,9 @@
 # validates the candidate (benign==Valid + revoked==Revoked), and promotes it ONLY if it passes,
 # keeping the last N goldens as rollback backups. A failing gate keeps the current golden + exits
 # non-zero (surfaced by systemd). Restarts the pool-manager on success to re-warm off the new base.
+# Every GOLDEN_MAX_CHAIN cycles (and always with GOLDEN_REBAKE_FROM=master) the cycle is the FULL
+# golden_build bake from the packer master: it COMPILES the agent from MYATG_SRC (below) — whatever
+# that checkout holds is what ships to every worker.
 [Unit]
 Description=win-validator golden refresh + validation-gated rotation
 After=libvirtd.service winval-pool-manager.service
@@ -11,15 +14,29 @@ Requires=libvirtd.service
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/home/coz/winval
-Environment=PYTHONPATH=/home/coz/winval
+WorkingDirectory=/opt/win-validator
+# the C locale for EVERYTHING this unit runs: blastbox's libvirt runtime and the rotation gate match
+# virsh's English output ("running", "shut off", "not running"); a translated host locale (systemd hands
+# services /etc/locale.conf's LANG) would reap every healthy worker and fail every gate
+Environment=LC_ALL=C
+Environment=LANG=C
+Environment=PYTHONPATH=/opt/win-validator
 Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
-Environment=GOLDEN_BASE=/dev/shm/golden-base.qcow2
+# the SAME name the pool-manager unit and vm_pool.py read: one path, promoted to and booted from
+Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
 Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
 Environment=GOLDEN_BACKUP_DIR=/var/lib/libvirt/images/golden-backups
 Environment=GOLDEN_KEEP_N=5
-Environment=GOLDEN_BENIGN_SAMPLE=/home/coz/winval/samples/whoami.exe
+# a second copy of the golden's chain-depth record OFF the images store (the copy that survives that store
+# refusing writes at promotion time); the preflight warns every run it cannot be written
+Environment=GOLDEN_CHAIN_MIRROR=/var/lib/winval/golden-base.chain
+# The benign signed sample the rotation gate validates (benign==Valid, and revoked==Revoked when
+# GOLDEN_REVOKED_SAMPLE is set): set both in /etc/winval/winval.env (see the deploy README).
 # Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
-# Environment=GOLDEN_REVOKED_SAMPLE=/home/coz/winval/samples/revoked.dll
+#   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
-ExecStart=/home/coz/winval/.venv/bin/python /home/coz/winval/golden_rotate.py refresh-and-rotate
+Environment=MYATG_SRC=/opt/myatg
+EnvironmentFile=-/etc/winval/winval.env
+# the gate samples live under /var/lib/winval/samples (root-owned), never /tmp
+PrivateTmp=true
+ExecStart=/opt/win-validator/.venv/bin/python /opt/win-validator/golden_rotate.py refresh-and-rotate

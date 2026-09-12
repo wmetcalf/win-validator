@@ -4,8 +4,11 @@ A **portable, reproducible** builder for a hardened **Windows Server 2025 (Core)
 (`qcow2`) — for KVM/libvirt hosts. Clone, drop in an ISO, run one script. No host-specific setup.
 
 The image installs unattended, enables in-box **OpenSSH** (key-only), and bakes a hardened feature
-set via ordered PowerShell provisioners (cert-store sync, Windows Update, WDAC/AppLocker, Defender,
-CIS-ish hardening, eval-rearm). It's the *OS base*; layering an application/agent on top is a separate
+set via ordered PowerShell provisioners (cert-store sync, one Windows Update pass, AppLocker in
+AUDIT mode — no WDAC policy is built — CIS-ish hardening, an eval-licence status log, and a Defender
+configuration that DISABLES real-time/behaviour/script/archive scanning with executable extensions
+excluded: right for a disposable validation worker, not a hardened general-purpose base). It's the
+*OS base* for this validator; layering an application/agent on top is a separate
 downstream step.
 
 ## Prerequisites
@@ -14,20 +17,23 @@ downstream step.
 - **qemu-kvm** with **slirp** (user-mode networking). Packer's qemu builder reaches the guest over an
   SSH port-forward through slirp — no bridge/tap/root needed. Verify:
   ```sh
-  qemu-system-x86_64 -netdev help | grep -w user     # must print "user"
+  printf 'quit\n' | timeout 30 qemu-system-x86_64 -machine none -display none -monitor stdio -netdev user,id=t 2>&1 | grep -i "not compiled"
   ```
-  If it doesn't, your qemu was compiled without `libslirp`; install a slirp-enabled qemu. `build.sh`
-  checks this and fails early with a clear message.
+  prints nothing on a slirp-enabled qemu; "network backend 'user' is not compiled into this binary"
+  means yours was built without `libslirp` — install a slirp-enabled qemu. (`-netdev help` LISTS `user`
+  even when it is compiled out, so it proves nothing.) `build.sh` runs this same probe and fails early.
 - **xorriso** (or `genisoimage`/`mkisofs`) — for the answer CD.
 - **openssh-client** + **python3** — key generation + answer-file rendering.
-- Read/write **`/dev/kvm`** (for acceleration; the build works without it but is very slow).
+- Read/write **`/dev/kvm`** — **required**: the template sets `accelerator = "kvm"` and `-cpu host`, and neither
+  qemu nor the packer qemu plugin falls back to TCG, so without KVM (a nested VM, a CI container) the build fails
+  after the ISO download with an opaque qemu exit. `build.sh` refuses up front.
 
 On Debian/Ubuntu: `apt-get install qemu-system-x86 qemu-utils xorriso openssh-client python3` (+ Packer).
 
 ## Use it
 
 ```sh
-git clone <this-repo> win-golden-packer && cd win-golden-packer
+git clone <this-repo> win-golden-packer && cd win-golden-packer/golden-packer   # this directory of the win-validator repo
 
 # 1. Drop your Windows Server 2025 ISO here (eval or retail):
 cp /path/to/Windows_Server_2025.iso iso/windows.iso     # or: export ISO_PATH=/path/to.iso
@@ -52,7 +58,7 @@ ISO_PATH=/mnt/iso/w2025.iso   ./build.sh          # ISO location
 winserver2025-core.pkr.hcl      Packer template (qemu builder + SSH + provisioners), fully var-driven
 build.sh                        one-shot: prereq checks (incl. slirp) → keygen → render answer → build
 answer/Autounattend.xml.tmpl    unattended-install template; build.sh injects the build pubkey + password
-variables.pkrvars.hcl.example   optional var file (copy to variables.auto.pkvars.hcl to persist settings)
+variables.pkrvars.hcl.example   optional var file (copy to variables.auto.pkrvars.hcl to persist settings)
 scripts/                        ordered PowerShell provisioners (10-openssh … 90-defender)
 iso/                            drop your Windows + (optional) virtio ISOs here  (gitignored)
 keys/                           throwaway per-build ed25519 keypair, auto-generated  (gitignored)
@@ -68,9 +74,9 @@ output/                         build output qcow2  (gitignored)
 2. Packer boots the ISO with the answer file on an **OEMDRV** CD → unattended WS2025-Core install →
    first-boot enables OpenSSH and installs the build pubkey.
 3. Packer connects over SSH (via slirp port-forward, **key-only**) and runs the provisioners: OpenSSH
-   hardening, then **Windows Update in an install→reboot loop** (so cumulative/servicing-stack updates
-   fully apply), then the feature-bake steps, ending with **95-freeze-windows-update** which disables WU
-   in the image.
+   hardening, then **one best-effort Windows Update pass + one reboot** (the checkpoint cumulative is
+   excluded — see Notes; the golden is not fully patched), then the feature-bake steps, ending with
+   **95-freeze-windows-update** which disables WU in the image.
 4. Clean shutdown → `output/winserver2025-core.qcow2`.
 
 The keypair is **per-build and disposable** — nothing is hardcoded. Rotate the golden's real access
@@ -80,12 +86,18 @@ key downstream if you deploy it.
 
 - **Image index**: `answer/Autounattend.xml.tmpl` installs `/IMAGE/INDEX = 1` (Server Standard Core).
   Change it for Desktop Experience / Datacenter.
-- **Eval ISO**: the WS2025 eval ISO works; `80-eval-rearm.ps1` re-arms the 180-day eval. For retail,
-  add a product key in the autounattend `<UserData>`.
+- **Eval ISO**: the WS2025 eval ISO works, but the 180-day evaluation is NOT re-armed by anything here:
+  `80-eval-rearm.ps1` only installs a daily task that LOGS the licence state (`slmgr /dlv` to
+  `C:\prov\slmgr-dlv.txt`). Every rebake clones the promoted golden and the MAX_CHAIN reset returns to
+  the same packer master, so the eval clock is inherited and expires inside every worker (hourly forced
+  shutdowns). Re-arm before it does (`slmgr /rearm`, at most 5 times, then rebuild) or, for a service,
+  use a retail/VLSC ISO with a product key in the autounattend `<UserData>`.
 - **`x86_64` template**: this builds an x86_64 golden. (For an ARM64 golden — e.g. targeting managed
   microVM runtimes — the machine type / ISO / arch would need adjusting.)
-- **Windows Update**: applied at build time in an **install→reboot loop** (`20-windows-update.ps1` ×3
-  with `windows-restart` between), so the golden ships fully patched. The **deployed image then has WU
+- **Windows Update**: ONE best-effort pass at build time (`20-windows-update.ps1`, then one
+  `windows-restart`), and the ~22 GB checkpoint cumulative KB5094125 is excluded inside the script
+  (`-NotTitle`), so the golden is NOT fully patched; for a fully-patched golden build from a
+  pre-integrated VLSC/MSDN ISO. The **deployed image then has WU
   frozen** (`95-freeze-windows-update.ps1`: `NoAutoUpdate=1`, WU/UsoSvc/WaaSMedic disabled, update tasks
   off) — a disposable analysis VM stays deterministic and won't self-patch or phone home mid-job.
   Re-patch by **rebuilding** the golden, not at runtime.

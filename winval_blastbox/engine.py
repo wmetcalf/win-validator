@@ -31,6 +31,7 @@ from blastbox.contract import Warning as BbWarning
 from blastbox.limits import Limits
 from blastbox.worker.engine import DetonationResult
 
+from .knobs import env_int
 from .vm_pool import WarmVmPool
 
 # ---------------------------------------------------------------------------
@@ -44,14 +45,34 @@ _POOL: WarmVmPool | None = None
 _POOL_LOCK = threading.Lock()
 
 
-def _bool_env(key: str, default: bool = False) -> bool:
-    v = os.environ.get(key)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
+
+KNOB_VALUES = {"AUTHENTICODE_REV": "online|offline|none", "AUTHENTICODE_SCRIPTS": "ps|native"}   # winval.env.example's vocabulary
+KNOB_FALLBACK = {"AUTHENTICODE_REV": "the agent read it as online", "AUTHENTICODE_SCRIPTS": "the agent read it as native (only the exact word ps selects PowerShell)"}   # myatg's ternaries, unvalidated
 
 
-def get_pool() -> WarmVmPool:
+def unknown_knob_values() -> dict[str, str]:
+    """The per-verdict knobs whose (stripped) value names nothing the agent knows: the agent answers such a value with its startup
+    default and says nothing, so the verdict carries a warning naming the knob instead."""
+    out = {}
+    for k, allowed in KNOB_VALUES.items():
+        v = (os.environ.get(k) or "").strip()
+        if v and v not in allowed.split("|"):
+            out[k] = v
+    return out
+
+
+def knob_warnings() -> list[BbWarning]:
+    """One warning per knob whose value the agent does not know (it is answered with the startup default, silently).
+    The VALUE is capped at 200 (an unclosed quote hands systemd the rest of the file as the value) and the MESSAGE at the
+    contract's 2000: repr() of an astral code point is ten characters, so a value cap alone does not deliver the contract."""
+    out: list[BbWarning] = []
+    for k, bad in unknown_knob_values().items():
+        msg = f"{k}={bad[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
+        out.append(BbWarning(code="param_unknown_value", message=msg[:2000]))
+    return out
+
+
+def get_pool(stop_event=None) -> WarmVmPool:
     """Return the started WarmPool-backed VM pool, booting it on first use (thread-safe)."""
     global _POOL
     if _POOL is None:
@@ -62,10 +83,9 @@ def get_pool() -> WarmVmPool:
                 # snapshot-revert ("clear the job") after EVERY validation (max isolation, ~6-8s/job)
                 # vs reuse-then-recycle for throughput. Smoke gating is independent (AUTHENTICODE_
                 # SMOKE_SAMPLE → health_check runs before the snapshot + after every recycle).
-                jpr = int(os.environ.get("AUTHENTICODE_JOBS_PER_RECYCLE",
-                                         getattr(AuthenticodeEngine, "jobs_per_recycle", 1)))
+                jpr = env_int("AUTHENTICODE_JOBS_PER_RECYCLE", int(getattr(AuthenticodeEngine, "jobs_per_recycle", 1)), floor=1)
                 pool = WarmVmPool(jobs_per_recycle=jpr)
-                pool.start()
+                pool.start(stop_event=stop_event)   # reaps its own workers on every failed exit; nothing else can
                 _POOL = pool
     return _POOL
 
@@ -80,12 +100,11 @@ def shutdown_pool() -> None:
             _POOL = None
 
 
-# Per-job param keys a client may set (forwarded by the orchestrator through the
-# blastbox allowlist as BLASTBOX_ENGINE_AUTHENTICODE_PARAM_KEYS). These tune the
-# in-guest myatg invocation; see host_runner / the design doc §3a.
-PARAM_KEYS = frozenset(
-    {"AUTHENTICODE_REV", "AUTHENTICODE_SCRIPTS", "AUTHENTICODE_GV", "AUTHENTICODE_TIER"}
-)
+# Per-job parameters are NOT forwarded by either tier: /scan takes the file (and an engine list on the orchestrator) only,
+# and detonate() reads AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS from the process environment — one operator-wide value for
+# every job. AUTHENTICODE_GV and AUTHENTICODE_TIER are read by nothing (the graveyard is GOLDEN_GRAVEYARD, baked into the
+# golden's serve startup; TIER is not a myatg parameter): an operator who exports either into the ENGINE PROCESS gets a
+# param_not_forwarded warning on every verdict (below) — a request cannot set them at all.
 
 # Extension → (detection label, mime) for the file-type tag on the envelope.
 _EXT_TYPE = {
@@ -147,6 +166,13 @@ def _summary(verdict: dict) -> Record:
         "chain_len": len(chain.get("chain") or []),
         "chain_explicit_distrust": chain.get("explicit_distrust"),
         "chain_valid_at_sign_time": chain.get("valid_at_sign_time"),
+        "chain_chains_to_trusted_root": chain.get("chains_to_trusted_root"),
+        "chain_builds": chain.get("chain_builds"),
+        "chain_revoked": chain.get("revoked"),
+        # myatg reports 'unknown' here WITHOUT downgrading status when the responders were unreachable: an hour of
+        # dead egress made Records byte-identical to fully checked Valid ones until this was indexed
+        "chain_revocation_checked": chain.get("revocation_checked"),
+        "error": verdict.get("error"),
         # timestamper
         "timestamper_subject_cn": tsa.get("subject_cn"),
         "timestamper_tbs_sha256": tsa.get("tbs_sha256"),
@@ -179,28 +205,29 @@ class AuthenticodeEngine:
         label, mime = _EXT_TYPE.get(input.suffix.lower(), ("binary", "application/octet-stream"))
         return Detection(label=label, mime=mime, confidence=1.0, source="authenticode")
 
-    def warmup(self) -> None:
-        """Pre-pay the VM-pool boot for the host runner (optional)."""
-        get_pool()
+    def warmup(self, stop_event=None) -> None:
+        """Pre-pay the VM-pool boot for the host runner (optional); `stop_event` ends the wait early."""
+        get_pool(stop_event=stop_event)
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
-        # Per-job myatg overrides come in via the blastbox allowlist as AUTHENTICODE_* env.
-        # rev/scripts are per-REQUEST (forwarded as ?rev=/?scripts= on the agent HTTP call);
-        # gv (graveyard) is server-global — baked into the golden's --serve-http startup, so it
-        # can't be applied per job — and TIER isn't a myatg parameter. Forward what we can and be
-        # honest about what we can't.
+        # rev/scripts come from THIS process's environment (see the module comment: nothing forwards per-job
+        # parameters) and go to the agent as ?rev=/?scripts=; gv (graveyard) is baked into the golden's
+        # --serve-http startup and TIER isn't a myatg parameter, so an operator export of either is
+        # answered with a warning rather than silently ignored.
         req_params = {}
-        if os.environ.get("AUTHENTICODE_REV"):
-            req_params["rev"] = os.environ["AUTHENTICODE_REV"]
-        if os.environ.get("AUTHENTICODE_SCRIPTS"):
-            req_params["scripts"] = os.environ["AUTHENTICODE_SCRIPTS"]
+        rev = (os.environ.get("AUTHENTICODE_REV") or "").strip()   # stripped like every knob: whitespace-only is unset (an agent answers a stray
+        if rev:                                                   # ?rev=++ with its startup default, silently)
+            req_params["rev"] = rev
+        scripts = (os.environ.get("AUTHENTICODE_SCRIPTS") or "").strip()
+        if scripts:
+            req_params["scripts"] = scripts
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
         verdict = get_pool().validate(str(input), params=req_params or None)
 
-        warnings: list[BbWarning] = []
-        unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if os.environ.get(k))
+        warnings: list[BbWarning] = knob_warnings()
+        unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())
         if unforwardable:
             warnings.append(
                 BbWarning(

@@ -1,10 +1,12 @@
-# Optional: copy to variables.auto.pkvars.hcl to persist settings (Packer auto-loads *.auto.pkvars.hcl).
-# You can also pass any of these via `./build.sh -var 'name=value'` or the ADMIN_PASSWORD / ISO_PATH env.
-iso_path       = "iso/windows.iso"   # drop your WS2025 ISO here (or set ISO_PATH)
+# Optional: copy to variables.auto.pkrvars.hcl to persist settings (Packer auto-loads *.auto.pkrvars.hcl).
+# NOT settable here: iso_path, admin_password, ssh_key_file and qemu_binary — build.sh passes each as
+# -var on every run (command-line vars outrank an auto var file). Use ISO_PATH, ADMIN_PASSWORD (else the
+# random one in keys/admin_password.txt) and QEMU_BINARY in the environment instead.
+# iso_path     = "iso/windows.iso"   # INERT here: set ISO_PATH (build.sh -var wins)
 # iso_checksum = "sha256:<hex>"      # optional integrity check; "none" (default) skips it
-# admin_password = "Set#Me!2026"     # optional — build.sh AUTO-GENERATES a strong random one
-                                     # (saved to keys/admin_password.txt); only set to force a specific pw
-disk_size_mb   = 61440               # 60 GB
-memory_mb      = 4096
-cpus           = 2
+# admin_password = "Set#Me!2026"     # INERT here: build.sh always passes -var admin_password (ADMIN_PASSWORD env,
+                                     # else a strong random one saved to keys/admin_password.txt)
+disk_size_mb   = 81920               # 80 GB — the template's default; RAISE, never lower (WS2025 + a cumulative + WinSxS servicing needs it)
+memory_mb      = 8192                # the template's default; update finalization (TrustedInstaller) is slow on less
+cpus           = 4                   # the template's default; fewer cores and the cumulative does not finalize inside WU's window
 # headless     = false               # uncomment to watch the install in a QEMU window

@@ -4,35 +4,143 @@
 # kill-switch). It is NEVER client-facing: it only claims queued jobs from the same Postgres the
 # ingress container writes to, reads their spooled inputs from the shared job_root, validates them
 # in a warm VM worker, and writes the verdict back. Install:
-#     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/
-#     sudo systemctl daemon-reload && sudo systemctl enable --now winval-pool-manager
+#     sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator && cd /opt/win-validator
+#     sudo python3 -m venv --system-site-packages .venv && sudo .venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
+#     sudo git clone https://github.com/wmetcalf/myatg /opt/myatg   # MYATG_SRC: the agent golden_build.py compiles   # ROOT-owned: this unit runs as root
+#     sudo install -d -m 0700 /etc/winval   # ROOT-ONLY (DB password)
+#     sudo test -e /etc/winval/winval.env || sudo install -m 0600 deploy/winval.env.example /etc/winval/winval.env   # first time only, then edit
+#       (two statements on purpose: `A && B || C` would run C — overwriting a live winval.env and the Postgres
+#        password it alone holds — whenever A failed, not only when the file was missing)
+#     sudo mkdir -p /var/lib/winval/jobs && sudo chown 10001:10001 /var/lib/winval/jobs   # WINVAL_JOB_ROOT, shared with the ingress container
+#     # Postgres + ingress (the unit claims jobs from that Postgres): deploy/compose-env.sh --mint mints the DB password once
+#     # (greenfield only) and derives compose.env from it — the one implementation of the rules (it reads winval.env the way
+#     # systemd does; a grep-based recipe here minted a SECOND password over an indented URL line and locked pgdata out)
+#     sudo sh deploy/compose-env.sh --mint
+#     sudo docker compose --env-file /etc/winval/compose.env -f deploy/docker-compose.yml up --build -d
+#     sudo cp deploy/winval-pool-manager.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#     sudo install -m 0600 <packer checkout>/golden-packer/keys/build_key /etc/winval/win_golden   # the ONLY key the packer image authorises
+#     sudo install -m 0644 <packer checkout>/golden-packer/output/winserver2025-core.qcow2 /var/lib/libvirt/images/winserver2025-core.qcow2   # GOLDEN_MASTER (built per golden-packer/README.md)
+#     sudo install -d /var/lib/winval/samples && sudo install -m 0644 /path/to/whoami.exe /var/lib/winval/samples/whoami.exe   # GOLDEN_BENIGN_SAMPLE: the gate refuses to bake without it
+#     sudo /opt/win-validator/.venv/bin/python golden_build.py build-and-promote   # the first golden: the unit refuses to start without a golden or a master
+#     sudo systemctl enable --now winval-pool-manager
 [Unit]
 Description=win-validator pool-manager (libvirt VM worker dispatcher)
+# The start limit is for FAST failures — Postgres not yet accepting connections after a reboot
+# (PoolManager gives up after BLASTBOX_DB_POOL_TIMEOUT, 10 s), a bad winval.env, a missing venv:
+# eight starts 30 s apart cover a Postgres container that takes minutes to come up, and only a
+# fault that outlives those ~4 minutes latches the unit `failed` (recover with
+# `systemctl reset-failed winval-pool-manager` once fixed). A start that dies in the start budget
+# (TimeoutStartSec below: up to 30 min behind a rotation's lock plus the copy) is one start per
+# window and never latches: retrying a wedged store each budget is the intended behaviour, not a
+# loop to cap. Nor does a CRASH with a virsh/ssh child still running count as fast: KillMode=mixed
+# (below) leaves that child to TimeoutStopSec, so such a restart can be up to 15 min away and, being
+# more than 10 min apart, never latches either — the child is the validation in flight, and losing
+# it at the first instant of every stop was the worse trade.
+StartLimitIntervalSec=10min
+StartLimitBurst=8
 After=network-online.target libvirtd.service docker.service
 Wants=network-online.target
 Requires=libvirtd.service
 
 [Service]
+# no readiness marker from a previous life: the pool-manager writes WINVAL_READY_FILE once the pool is warm (the rotation's
+# restart_pool waits for it) and clears it itself at start and on exit, but a start refused before that point never reaches its clear
+ExecStartPre=-/bin/sh -c 'rm -f "$${WINVAL_READY_FILE:-/run/winval-pool-manager.ready}"'
+# design change #8: worker-to-worker frames on the bridge meet the FORWARD rules only with br_netfilter loaded and the sysctl at 1;
+# both are set at every start ('-': a host that cannot is not failed here — the manager then refuses by name, with the remedy)
+ExecStartPre=-/usr/sbin/modprobe br_netfilter
+ExecStartPre=-/usr/sbin/sysctl -q -w net.bridge.bridge-nf-call-iptables=1
 Type=simple
-# Needs libvirt + iptables. Run as root (simplest) or a user in the libvirt group with passwordless
-# sudo for virsh/iptables — LibvirtVmConfig.sudo prefixes those, so root makes the sudo a no-op.
+# Needs libvirt + iptables, and ROOT: the ExecStartPre below creates and locks /run/winval-golden-rotate.lock
+# (0600, shared with the root-run rotation) and owns the RAM base in /dev/shm; a non-root User= fails the
+# pre-step with 'Permission denied' and latches the unit failed in ~4 min. (LibvirtVmConfig.sudo prefixes
+# virsh/iptables, which root makes a no-op.)
 User=root
-WorkingDirectory=/home/coz/winval
-Environment=PYTHONPATH=/home/coz/winval
-# MUST match the ingress: same JobStore (the Postgres published by the compose) + same job_root path.
+# The checkout (or a symlink to it) at a canonical path — nothing host-specific in this unit.
+WorkingDirectory=/opt/win-validator
+# the C locale for EVERYTHING this unit runs: blastbox's libvirt runtime and the rotation gate match
+# virsh's English output ("running", "shut off", "not running"); a translated host locale (systemd hands
+# services /etc/locale.conf's LANG) would reap every healthy worker and fail every gate
+Environment=LC_ALL=C
+Environment=LANG=C
+Environment=PYTHONPATH=/opt/win-validator
+# Defaults; /etc/winval/winval.env (deploy/winval.env.example) overrides any of them and is the
+# place for the Postgres password, the pool size, the ssh key, egress and smoke settings.
 Environment=BLASTBOX_DATABASE_URL=postgresql://winval:winval@127.0.0.1:5433/winval
 Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
+# The manager's OWN scratch tree (created 0700 at start): the engine never reads from or writes into the
+# ingress-owned job_root directly; sealed outputs are published into <job>/output by descriptor afterwards
+Environment=WINVAL_WORK_ROOT=/var/lib/winval/work
 Environment=AUTHENTICODE_POOL_SIZE=2
+# The upload bound is enforced TWICE — by the ingress container (deploy/docker-compose.yml sets the same
+# variable there) and by this manager on the spooled input it copies into its scratch tree: raise both
+Environment=AUTHENTICODE_MAX_UPLOAD_MB=1024
+Environment=GOLDEN_MASTER=/var/lib/libvirt/images/winserver2025-core.qcow2
 Environment=AUTHENTICODE_GOLDEN_BASE=/dev/shm/golden-base.qcow2
-# Smoke gate: validate this benign sample == Valid BEFORE taking the clean snapshot AND after every
-# recycle — so a booted-but-broken golden/worker never serves a job.
-Environment=AUTHENTICODE_SMOKE_SAMPLE=/home/coz/winval/samples/whoami.exe
+EnvironmentFile=-/etc/winval/winval.env
+# THE RAM BASE IS NOT DURABLE: /dev/shm empties on reboot. Materialise it before a start when it is
+# MISSING, or present but NOT OWNED by this unit (see below) — a present base owned by this unit
+# is the pool's, whoever put it there (a rotation, a hand bake, golden_build.py), and this unit
+# never second-guesses it: comparing it against anything would replace a working golden with an
+# older image on a plain restart.
+#
+# FROM THE PROMOTED GOLDEN, NOT THE PACKER MASTER. golden_rotate.rotate() promotes each gated
+# candidate to GOLDEN_BASE_DISK (the durable on-disk twin) AND to the RAM base; GOLDEN_MASTER is
+# the frozen rung-0 image and is never refreshed. The master is the source only when no golden
+# has ever been promoted — and never to REPLACE a base that is present: with no disk twin, an
+# unowned base in /dev/shm is the only golden in service, and the start refuses rather than
+# publish the agent-less master over it.
+#
+# ATOMIC: the copy lands in a temporary file and is renamed over the base (mv -T: a directory at
+# the base path is a failure, never a destination) only when its size matches the source, so an
+# interrupted copy (a start timeout, a reboot mid-copy) never becomes the base — the next start
+# finds no base and copies again (a temporary a start-timeout kill left behind is swept first —
+# only this unit's own <base>.XXXXXX files; golden_rotate's temporaries are <base>.rot.XXXXXX,
+# a name the sweep never matches, so a start during a rotation cannot unlink a copy in flight). The
+# source is checked BEFORE anything is written or discarded. /dev/shm is WORLD-WRITABLE (sticky),
+# so every path this unit touches there is defended: the temporary is created by mktemp (O_EXCL,
+# root-owned — never a symlink another local user planted for root to write through, and the
+# sticky bit stops them replacing it); a symlink or directory at the base path is refused; and a
+# present base is kept only if it is a regular file OWNED by this unit's user.
+# libvirt's DAC driver chowns the images a domain uses to the qemu user and, after a crash or a
+# stale ownership record, may not give the shared RAM base back. A base NOT owned by this unit is
+# never booted (under the sticky bit its owner can replace it — and the qemu user is the uid an
+# escaped guest runs as) and never adopted: once a source is known to exist it is discarded and
+# materialised afresh from that source, so a routine restart neither latches the unit nor trusts
+# a file the unit did not write, and never destroys the only golden in service.
+Environment=GOLDEN_BASE_DISK=/var/lib/libvirt/images/golden-base.qcow2
+# UNDER THE ROTATION LOCK (the same file golden_rotate.py takes): a start that finds no RAM base
+# while a rotation is publishing one would otherwise copy the OLD source (the frozen master on a
+# host with no promoted golden) over the freshly promoted base — deterministically, since the
+# size check compares against the same untouched source. flock waits for the rotation to finish,
+# then the present-base check sees what it published. golden_rotate releases the lock before it
+# restarts this unit, so the restart cannot wait on itself.
+Environment=GOLDEN_ROTATE_LOCK=/run/winval-golden-rotate.lock
+# the lock must be 0600 BEFORE flock creates it (0644 under umask 022): flock(2) needs only a readable
+# descriptor, so a world-readable lock lets any local user hold it and stall every rotation and start
+ExecStartPre=/bin/sh -c 'umask 077; : >> "$GOLDEN_ROTATE_LOCK" && chmod 0600 "$GOLDEN_ROTATE_LOCK"'
+ExecStartPre=/usr/bin/flock -w 1800 ${GOLDEN_ROTATE_LOCK} /bin/sh -c 'b="$(printf %%s "$${AUTHENTICODE_GOLDEN_BASE:-}" | sed "s/^[ \t]*//;s/[ \t]*$$//"; printf _)"; b="$${b%%_}"; [ -n "$b" ] || b=/dev/shm/golden-base.qcow2; case "$b" in *[![:print:]]*) echo "AUTHENTICODE_GOLDEN_BASE carries a byte outside printable ASCII (a pasted U+00A0?): only a plain ASCII path is supported, as the pool and the rotation read it" >&2; exit 1;; esac; if [ -L "$b" ] || [ -d "$b" ]; then echo "refusing RAM base $b: a symlink or a directory, not a regular file (/dev/shm is world-writable)" >&2; exit 1; fi; for f in "$b".??????; do [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %%u "$f")" = "$(id -u)" ] && rm -f "$f"; done; if [ -f "$b" ] && [ "$(stat -c %%u "$b")" = "$(id -u)" ]; then exit 0; fi; cb="$(readlink -f "$b")"; if [ ! -f "$b" ] && { { [ -n "$cb" ] && [ "$cb" = "$(readlink -f "$GOLDEN_BASE_DISK")" ]; } || [ "$b" = "$GOLDEN_BASE_DISK" ]; }; then echo "the worker base $b is configured as the disk golden itself and there is none: the agent-less master is not materialised in the place of the golden (promote one: golden_build.py build-and-promote)" >&2; exit 1; fi; src="$GOLDEN_BASE_DISK"; [ -f "$src" ] || src="$GOLDEN_MASTER"; [ -f "$src" ] || { echo "no golden to materialise the RAM base $b from: neither $GOLDEN_BASE_DISK nor $GOLDEN_MASTER exists" >&2; exit 1; }; if [ "$b" -ef "$src" ]; then echo "the worker base $b IS the golden it would be materialised from: nothing to materialise, nothing discarded (an unowned one is left as it is)" >&2; exit 0; fi; if [ -f "$b" ] && [ "$src" = "$GOLDEN_MASTER" ]; then echo "RAM base $b is not owned by this unit and there is no disk golden ($GOLDEN_BASE_DISK) to re-materialise it from; the only other source is the agent-less packer master: refusing to replace the only golden in service (promote a golden to GOLDEN_BASE_DISK, or remove $b to fall back to the master deliberately)" >&2; exit 1; fi; if [ -f "$b" ]; then echo "RAM base $b is owned by uid $(stat -c %%u "$b"), not by this unit (libvirt DAC residue, or a planted file on world-writable /dev/shm): discarding it and materialising a fresh one from $src" >&2; rm -f "$b" || exit 1; fi; echo "materialising RAM base from $src"; t="$(mktemp "$b.XXXXXX")" || exit 1; cp "$src" "$t" && [ "$(stat -c %%s "$t")" = "$(stat -L -c %%s "$src")" ] && chmod 0644 "$t" && mv -fT "$t" "$b" || { echo "materialising RAM base $b from $src FAILED (copy, size check, chmod or rename; see above)" >&2; rm -f "$t"; exit 1; }'
+# The start job = up to 30 min waiting for a rotation to release the lock (flock -w 1800 above)
+# PLUS the copy itself (an 18 GB image at a cold cache on a slow store can take 20 min), so the
+# budget is the sum: a contended start must not be killed mid-copy by its own timeout.
+TimeoutStartSec=55min
+# a stop (the rotation's try-restart after every promotion) waits for in-flight validations: run() returns only
+# after the claim threads finish their current job, and systemd's default 90 s stop would SIGKILL them mid-job
+TimeoutStopSec=15min
+# SIGTERM the interpreter only: the default control-group mode also terminates every virsh/ssh/qemu-img
+# child at once, which ended the very validation the stop timeout above was meant to let finish
+KillMode=mixed
+# Smoke gate — OPT-IN, and OFF until you set it in winval.env: with AUTHENTICODE_SMOKE_SAMPLE set,
+# a benign signed sample must validate == Valid BEFORE the clean snapshot is taken AND after every
+# recycle, so a booted-but-broken golden/worker never serves a job. Without it, readiness is
+# port-open only. The deploy README tells you where to put the sample; set it.
+#   AUTHENTICODE_SMOKE_SAMPLE=/var/lib/winval/samples/whoami.exe
 # Recycle cadence ("clear the job"): snapshot-revert wipes the per-job contamination. Default 25
 # (the engine's parse-only risk×cost). Set to 1 to clear after EVERY job (max isolation, ~6-8s/job).
-# Environment=AUTHENTICODE_JOBS_PER_RECYCLE=1
-ExecStart=/home/coz/winval/.venv/bin/python -m winval_blastbox.pool_manager
+#   AUTHENTICODE_JOBS_PER_RECYCLE=1
+ExecStart=/opt/win-validator/.venv/bin/python -m winval_blastbox.pool_manager
 Restart=on-failure
-RestartSec=5
+RestartSec=30
 # /dev/shm holds the RAM-backed golden + worker overlays; don't let systemd sandbox it away.
 PrivateTmp=false
 

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Rendered to answer/Autounattend.xml by build.sh, which substitutes:
-       @@SSH_PUBKEY@@       - the public half of the throwaway build keypair (keys/build_key.pub)
-       @@ADMIN_PASSWORD@@   - the Administrator password (ADMIN_PASSWORD env / -var)
+<!-- Rendered to answer/Autounattend.xml by build.sh, which substitutes two placeholders (spelled with a
+     doubled at-sign on each side; not written out here, because build.sh substitutes into this comment too and a
+     password containing a double hyphen is not allowed inside an XML comment):
+       SSH_PUBKEY       - the public half of the throwaway build keypair (keys/build_key.pub)
+       ADMIN_PASSWORD   - the Administrator password (ADMIN_PASSWORD env / -var)
      Do NOT edit answer/Autounattend.xml directly; edit this template. -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <settings pass="windowsPE">

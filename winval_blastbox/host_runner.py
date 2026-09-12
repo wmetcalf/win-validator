@@ -41,9 +41,9 @@ class HostRunner:
         self.engine = AuthenticodeEngine()
         self.limits = limits or Limits.from_env()
 
-    def warmup(self) -> None:
-        """Boot the VM pool up front (otherwise paid on the first validate)."""
-        self.engine.warmup()
+    def warmup(self, stop_event=None) -> None:
+        """Boot the VM pool up front (otherwise paid on the first validate); `stop_event` ends the wait early."""
+        self.engine.warmup(stop_event=stop_event)
 
     def validate_to_dir(self, input_path: str | Path, output_dir: str | Path) -> dict:
         """Validate ``input_path``, sealing artifacts + metadata.json into ``output_dir``.
@@ -53,13 +53,25 @@ class HostRunner:
         """
         input_path = Path(input_path)
         output_dir = Path(output_dir)
-        run_detonation(
+        envelope = output_dir / "metadata.json"
+        if envelope.exists():   # a populated outdir handed back the PREVIOUS run's envelope when this run wrote nothing
+            raise FileExistsError(f"{envelope} already exists: validate_to_dir needs an output dir without an envelope")
+        rc = run_detonation(
             self.engine,
             input_path=input_path,
             output_dir=output_dir,
             limits=self.limits,
         )
-        return json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+        if rc or not envelope.exists():   # 1 = the envelope could not be written (logged CRITICAL by the harness): there is no verdict to read
+            note = ""
+            if envelope.exists():   # a truncated write (ENOSPC mid-file) leaves a file that is not an envelope and would poison the directory for the next run
+                try:
+                    envelope.unlink()
+                    note = " (a partial file was removed)"
+                except OSError as exc:
+                    note = f" (a partial file is still there and could not be removed: {exc}; remove it before the next run)"
+            raise RuntimeError(f"run_detonation returned {rc}: no envelope at {envelope}{note}")
+        return json.loads(envelope.read_text(encoding="utf-8"))
 
     def validate(self, input_path: str | Path) -> dict:
         """Validate a file in a throwaway output dir; return the sealed envelope."""
@@ -72,23 +84,35 @@ class HostRunner:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if not argv:
+    if len(argv) != 1:
         print("usage: python -m winval_blastbox.host_runner <file>", file=sys.stderr)
         return 2
+    sample = Path(argv[0])
+    if not sample.is_file():   # a usage error, said in one line and exit 2: exit 1 is the VM tier's failure (an engine_error envelope)
+        print(f"host_runner: {sample} is not a file", file=sys.stderr)
+        return 2
 
-    runner = HostRunner()
+    try:
+        runner = HostRunner()
+    except ValueError as exc:   # Limits.from_env() refuses a bad BLASTBOX_* value loudly: one line, not a traceback
+        print(f"host_runner: {exc}", file=sys.stderr)
+        return 2
 
-    # Tear the VM pool down cleanly on Ctrl-C / SIGTERM.
+    # Tear the VM pool down cleanly on Ctrl-C / SIGTERM. A signal before a verdict is NOT a success: exit 143
+    # (128+SIGTERM), never the 0 that let `host_runner.py sample.exe && ...` carry on with an empty stdout.
     def _term(*_: object) -> None:
         runner.shutdown()
-        sys.exit(0)
+        print("host_runner: stopped by SIGTERM before a verdict", file=sys.stderr)
+        sys.exit(143)
 
     signal.signal(signal.SIGTERM, _term)
     try:
         env = runner.validate(argv[0])
         json.dump(env, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
+        # a sealed engine_error envelope (VM/transport failure) is a FAILURE, as the orchestrator and the
+        # pool-manager already treat it: `host_runner.py sample.exe && ...` must not carry on as if validated
+        return 1 if env.get("status") == "engine_error" else 0
     finally:
         runner.shutdown()
 

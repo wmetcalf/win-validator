@@ -23,9 +23,12 @@ from blastbox.host.jobs.factory import build_job_store_from_env
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .body_cap import FRAMING_SLACK, BodyCap
+from .knobs import ENGINE, upload_mb
+
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
-MAX_BYTES = int(os.environ.get("AUTHENTICODE_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
-ENGINE = "authenticode"
+MAX_BYTES = upload_mb() * 1024 * 1024   # the pool-manager enforces the same bound on what it copies: set both tiers alike
+CERT_SCAN_LIMIT = 2000   # /cert/{tbs} searches the newest rows only: it answers "seen in the last N scans", and SAYS so (scanned/truncated)
 
 _store = build_job_store_from_env()
 app = FastAPI(title="win-validator ingress")
@@ -48,7 +51,12 @@ def healthz() -> dict:
 
 @app.post("/scan", status_code=202)
 async def scan(file: UploadFile = File(...)) -> dict:
-    job = Job.new(engine=ENGINE, filename=Path(file.filename or "input").name)
+    name = Path(file.filename or "input").name
+    if not name or name in (".", "..") or "\x00" in name:   # '.', '..' and '/' have an empty basename (the spool path would be the input DIRECTORY); a NUL made open() raise ValueError as a 500 with a rowless dir left behind
+        raise HTTPException(status_code=400, detail="filename has no usable name")
+    if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX: the open() would fail with ENAMETOOLONG as a 500, leaving a rowless job dir per request
+        raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
+    job = Job.new(engine=ENGINE, filename=name)
     job.result_dir = str(JOB_ROOT / job.job_id)
     indir = Path(job.result_dir) / "input"
     indir.mkdir(parents=True, exist_ok=True)
@@ -70,9 +78,27 @@ async def scan(file: UploadFile = File(...)) -> dict:
             path.unlink()
         except OSError:
             pass
+        for d in (indir, Path(job.result_dir)):   # no rowless job dir left for the retention sweep (empty after the unlink)
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         raise
     job.input_sha256 = h.hexdigest()
-    _store.create(job)
+    try:
+        _store.create(job)
+    except Exception:   # the row is what makes the spool a job: without it the upload (up to the cap) and its dir would sit rowless until the retention sweep
+        try:   # an AMBIGUOUS failure (the commit landed, the acknowledgement did not): the job is live, its input must stay
+            committed = _store.get(job.job_id) is not None
+        except Exception:  # noqa: BLE001 — the store cannot say: a store that is DOWN refused the create too (one connection), and keeping every
+            committed = False   # refused upload for the outage's length was a disk lever on this untrusted-facing port (5 x 8 MiB retained, measured)
+        if not committed:
+            for d_ in (path, indir, Path(job.result_dir)):
+                try:
+                    path.unlink() if d_ is path else d_.rmdir()
+                except OSError:
+                    pass
+        raise
     return {"job_id": job.job_id, "status": job.status.value}
 
 
@@ -99,7 +125,13 @@ def jobs(limit: int = 80) -> dict:
 def cert(tbs_sha256: str) -> dict:
     tbs = tbs_sha256.lower()
     hits = []
-    for j in _store.list():  # whole set; fine for the session-scale histories this serves
+    scanned = 0
+    truncated = False
+    for j in _store.list(limit=CERT_SCAN_LIMIT + 1, newest_first=True):  # bounded: an unauthenticated caller must not make the ingress read the whole table (88 MiB at 10k rows)
+        if scanned >= CERT_SCAN_LIMIT:   # one row past the window is asked for and NOT scanned: it says whether the table goes on (exactly 2000 rows used to read as truncated)
+            truncated = True
+            break
+        scanned += 1
         v = _verdict(j)
         certs = []
         s = v.get("signer") or {}
@@ -110,7 +142,8 @@ def cert(tbs_sha256: str) -> dict:
                 certs.append(c["tbs_sha256"].lower())
         if tbs in certs:
             hits.append({"job_id": j.job_id, "filename": j.filename, "status": v.get("status")})
-    return {"tbs_sha256": tbs_sha256, "seen_in": hits}
+    # the bound is part of the answer: an older sighting past the window must not read as "never seen"
+    return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": truncated}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -166,7 +199,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="detail" class="panel"><div class="empty">Submit a file or pick a scan to see its verdict.</div></div>
 </div>
 <script>
-const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), js=s=>esc(JSON.stringify(String(s==null?'':s)));
 const pill=(s,extra='')=>`<span class="pill ${esc(s||'unknown')}">${esc(s||'—')}</span>${extra}`;
 let chosen=null, poll=null;
 async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json();}
@@ -182,7 +215,7 @@ $('#go').onclick=async()=>{if(!chosen)return;$('#go').disabled=true;
 function watch(id){clearInterval(poll);const tick=async()=>{const j=await jget('/scan/'+id);render(j);
   if(j.status==='done'||j.status==='failed'){clearInterval(poll);refresh();}};tick();poll=setInterval(tick,1200);}
 async function refresh(){try{const {jobs}=await jget('/jobs?limit=80');
-  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch('${j.job_id}')">
+  $('#list').innerHTML=jobs.length?jobs.map(j=>`<div class="job" onclick="watch(${js(j.job_id)})">
     <span class="fn" title="${esc(j.filename)}">${esc(j.filename)}</span>
     ${pill(j.verdict||j.status)}${j.graveyard_hit?' <span class="flag bad">graveyard</span>':''}</div>`).join('')
     :'<div class="empty">none yet</div>';}catch(e){}}
@@ -194,7 +227,7 @@ function flags(c){const f=[];const F=(ok,t,bad)=>f.push(`<span class="flag ${ok?
 function certRow(c){const cn=c.subject_cn||c.subject||'—';
   return `<li><b>${esc(cn)}</b> ${c.self_signed?'<span class="flag bad">self-signed</span>':''}
     <div class="muted">issuer: ${esc(c.issuer_cn||c.issuer||'—')}${c.not_after?' · expires '+esc(c.not_after.slice(0,10)):''}</div>
-    ${c.tbs_sha256?`<div class="mono"><a onclick="cert('${c.tbs_sha256}')">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
+    ${c.tbs_sha256?`<div class="mono"><a onclick="cert(${js(c.tbs_sha256)})">${esc(c.tbs_sha256)}</a></div>`:''}</li>`;}
 function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[];
   if(j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)} <span class="muted">validating…</span>`;return;}
@@ -211,7 +244,7 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
-  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert('${s.tbs_sha256}')">${esc(s.tbs_sha256)}</a></span>`);
+  if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);
   if(ch.chain&&ch.chain.length) row('chain ('+ch.chain.length+')',`<div>${flags(ch)}</div><ul class="chain">${ch.chain.map(certRow).join('')}</ul>`);
   else if(Object.keys(ch).length) row('chain',flags(ch));
   if(v.timestamped) row('timestamp',`${esc((v.sign_time||'').replace('T',' ').slice(0,19))} ${v.sign_time_verified?'<span class="flag ok">verified</span>':'<span class="flag">unverified</span>'}<div class="muted">${esc((v.timestamper||{}).subject_cn||'')}</div>`);
@@ -219,7 +252,10 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   h+='</table>'; $('#detail').innerHTML=h;}
 async function cert(tbs){const r=await jget('/cert/'+tbs);
   $('#detail').innerHTML=`<h3>cert <span class="mono">${esc(tbs)}</span></h3>
-    <p class="muted">files signed by / chaining to this cert (${r.seen_in.length}):</p>
-    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch('${x.job_id}')"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):'<div class="empty">none in this session</div>'}`;}
+    <p class="muted">files signed by / chaining to this cert in the last ${r.scanned} scans (${r.seen_in.length})${r.truncated?' — older scans not searched':''}:</p>
+    ${r.seen_in.length?r.seen_in.map(x=>`<div class="job" onclick="watch(${js(x.job_id)})"><span class="fn">${esc(x.filename)}</span>${pill(x.status)}</div>`).join(''):`<div class="empty">none in the last ${r.scanned} scans</div>`}`;}
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
+
+_inner_app = app
+app = BodyCap(_inner_app, MAX_BYTES + FRAMING_SLACK)   # what uvicorn serves: the cap runs BEFORE the multipart parser spools a part

@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches-ignore: []
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The version floor deploy/upgrade.sh installs, and the [host] extra with it:
+      # winval_blastbox imports blastbox.host, whose chain reaches structlog and redis.
+      # Those live in the extra, not in blastbox's base dependencies, so installing
+      # blastbox alone leaves the suite unable to collect.
+      - run: pip install "blastbox[host]>=0.1.33" pytest
+      - run: pytest
