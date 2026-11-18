@@ -58,12 +58,15 @@ def _call_runner(runner: Callable[..., dict], path: str, params: dict | None) ->
     the original one-argument shape (it gets no params, so a scan's rev/scripts mean nothing to it)."""
     try:
         sig = inspect.signature(runner)
-        sig.bind(path, params)
-    except TypeError:
-        return runner(path)
     except ValueError:   # no signature available (a builtin): assume the current shape
-        pass
-    return runner(path, params)
+        return runner(path, params)
+    for args, kwargs in (((path, params), {}), ((path,), {"params": params})):
+        try:
+            sig.bind(*args, **kwargs)
+        except TypeError:
+            continue
+        return runner(*args, **kwargs)
+    return runner(path)
 
 DEFAULT_ENGINES = ("authenticode",)
 

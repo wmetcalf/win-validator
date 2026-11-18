@@ -116,7 +116,7 @@ def test_every_warning_code_the_engine_emits_is_named_by_the_contract():
     # the codes come from the engine's source, so a new BbWarning(code=...) fails here until the contract names it
     import re
     src = (Path(eng.__file__)).read_text()
-    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src))
+    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z0-9_]+)"', src))
     assert {"graveyard_hit", "status_unrecognized", "param_unknown_value", "param_not_forwarded", "precheck_rejected"} <= emitted
-    declared = set(re.findall(r'warnings\[\]\.code == \'([a-z_]+)\'', CONTRACT_PATH.read_text()))
+    declared = set(re.findall(r'warnings\[\]\.code == \'([a-z0-9_]+)\'', CONTRACT_PATH.read_text()))
     assert emitted <= declared, emitted - declared

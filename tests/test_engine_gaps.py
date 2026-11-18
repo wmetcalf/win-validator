@@ -105,12 +105,15 @@ def test_rdp_findings_are_indexed_and_the_file_is_hashed(tmp_path, pool):
     assert json.loads(f["rdp_unsigned_dangerous"]) == ["full address", "alternate shell"]
 
 
-def test_myatg_hash_is_kept_when_present(tmp_path, pool):
+def test_a_matching_myatg_hash_raises_no_warning(tmp_path, pool):
+    data = b"MZ" + b"\0" * 62
     v = _load("untrusted_root.json")
+    v["file_sha256"] = hashlib.sha256(data).hexdigest().upper()   # myatg's case is not significant
     pool(v)
-    f = _detonate(tmp_path).payload.fields
-    assert f["file_sha256"] == v["file_sha256"]
-    assert f["rdp_unsigned_dangerous"] is None and f["rdp_file_name"] is None
+    r = _detonate(tmp_path, "sample.exe", data)
+    assert r.payload.fields["file_sha256"] == hashlib.sha256(data).hexdigest()
+    assert "file_sha256_mismatch" not in [w.code for w in r.warnings]
+    assert r.payload.fields["rdp_unsigned_dangerous"] is None and r.payload.fields["rdp_file_name"] is None
 
 
 # --- detection by content ------------------------------------------------------------------
@@ -539,9 +542,9 @@ def test_every_warning_code_the_engine_emits_is_named_by_the_contract_without_th
     # runs on a released blastbox too (the contract module test is skipped there): pure text over the source and the toml
     import re
     src = Path(eng.__file__).read_text()
-    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src))
+    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z0-9_]+)"', src))
     toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
-    declared = set(re.findall(r"warnings\[\]\.code == '([a-z_]+)'", toml))
+    declared = set(re.findall(r"warnings\[\]\.code == '([a-z0-9_]+)'", toml))
     assert emitted and emitted <= declared, emitted - declared
 
 
@@ -639,7 +642,7 @@ def test_an_engine_error_message_is_not_published_by_a_door(tmp_path, monkeypatc
 def test_the_published_warning_codes_are_every_code_the_engine_writes():
     import re
     src = Path(eng.__file__).read_text()
-    assert set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src)) == eng.ENGINE_WARNING_CODES
+    assert set(re.findall(r'BbWarning\(\s*code="([a-z0-9_]+)"', src)) == eng.ENGINE_WARNING_CODES
 
 
 @pytest.mark.parametrize("value", [1, True, "abc", {"a": 1}])
@@ -649,3 +652,21 @@ def test_a_non_list_chain_chain_does_not_drop_the_verdict(tmp_path, pool, value)
     pool(v)
     env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
     assert env["status"] == "ok"
+
+
+def test_the_host_hash_is_authoritative_over_the_guests(tmp_path, pool):
+    # the guest is untrusted (the sample may own the VM): a wrong file_sha256 from it must not attribute the verdict to other
+    # bytes; the engine's own hash wins and the disagreement is a warning
+    v = _load("untrusted_root.json")
+    v["file_sha256"] = "0" * 64
+    pool(v)
+    data = b"MZ" + b"\0" * 62
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "s.exe", data), tmp_path / "out")
+    assert env["payload"]["fields"]["file_sha256"] == hashlib.sha256(data).hexdigest()
+    assert "file_sha256_mismatch" in [w["code"] for w in env["warnings"]]
+
+
+def test_a_keyword_only_params_runner_gets_the_params():
+    import winval_blastbox.orchestrator as orch
+    got = orch._call_runner(lambda path, *, params=None: {"params": params}, "x.exe", {"AUTHENTICODE_REV": "none"})
+    assert got == {"params": {"AUTHENTICODE_REV": "none"}}

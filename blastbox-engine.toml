@@ -32,7 +32,7 @@ node_types = ["record"]
 schema_version = "authenticode-record/2"
 # Every key _summary() writes, plus the embedded verbatim verdict. Values may be null: myatg's
 # error skeleton and RDP verdicts leave most of them empty. file_sha256 is never null on an ok
-# result: when myatg names no hash (RDP, error skeleton) the engine hashes the input itself.
+# result: it is always the engine's own hash of the input (the guest's is only compared: file_sha256_mismatch).
 required_root_fields = [
     "schema_version", "file_sha256", "status", "myatg_status", "revocation", "signature_type", "content_verified", "is_os_binary",
     "timestamped", "sign_time", "sign_time_verified",
@@ -151,6 +151,12 @@ code = "param_unknown_value"
 severity = "low"
 source = "warnings[].code == 'param_unknown_value'"
 description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS names a value the agent does not know; the engine sent the agent's reading of it instead (rev online, scripts native), recorded in param_rev / param_scripts. (A per-job value like that is refused: status rejected.)"
+
+[[detections]]
+code = "file_sha256_mismatch"
+severity = "medium"
+source = "warnings[].code == 'file_sha256_mismatch'"
+description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with."
 
 [[detections]]
 code = "precheck_rejected"

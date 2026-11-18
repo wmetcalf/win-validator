@@ -60,7 +60,8 @@ sha1/sha256/tbs_sha256 fingerprints, eku_codesigning, self_signed, validity wind
 `authenticode_json` and written to the `authenticode.json` artifact; `param_rev, param_scripts` (the knobs
 the verdict was computed under, null = agent default); and on RDP verdicts `rdp_file_name,
 rdp_signscope_count, rdp_total_settings, rdp_unsigned_settings, rdp_unsigned_dangerous` (a JSON list).
-`file_sha256` is the engine's own hash of the input when myatg names none (RDP, error skeleton).
+`file_sha256` is always the engine's own hash of the input; when myatg reports a different one the
+verdict carries a `file_sha256_mismatch` warning (the guest is untrusted).
 A graveyard hit emits a `graveyard_hit` warning; a myatg status outside the known set
 (`engine.MYATG_STATUSES`) is passed through with a `status_unrecognized` warning. The envelope's
 `detected` type comes from the content's signature (PE, CAB, PKCS#7 catalog, RDP text; an OLE compound

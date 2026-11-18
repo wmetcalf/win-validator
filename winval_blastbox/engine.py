@@ -288,7 +288,7 @@ def _sniff(head: bytes) -> str | None:
 
 # Every warning code detonate()/knob_warnings() write (the doors publish only these messages).
 ENGINE_WARNING_CODES = frozenset({"graveyard_hit", "status_unrecognized", "param_unknown_value", "param_not_forwarded",
-                                  "precheck_rejected"})
+                                  "precheck_rejected", "file_sha256_mismatch"})
 
 _SCALAR = (str, int, float, bool)
 
@@ -512,12 +512,18 @@ class AuthenticodeEngine:
         (outdir / "authenticode.json").write_text(raw, encoding="utf-8")
 
         summary = _summary(verdict, req_params)
-        if summary.fields.get("file_sha256") is None:   # RDP verdicts name the file, and myatg's error skeleton carries null:
-            h = hashlib.sha256()                         # the engine hashes the input it was handed
-            with open(input, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-            summary.fields["file_sha256"] = h.hexdigest()
+        # The engine hashes the input it was handed, always: the guest is untrusted (the sample may own the VM), so its
+        # file_sha256 never decides which bytes a verdict is attributed to. RDP verdicts and myatg's error skeleton name none.
+        h = hashlib.sha256()
+        with open(input, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        guest_sha = summary.fields.get("file_sha256")
+        summary.fields["file_sha256"] = h.hexdigest()
+        if guest_sha is not None and str(guest_sha).lower() != h.hexdigest():
+            warnings.append(BbWarning(code="file_sha256_mismatch",
+                                      message=f"the agent reported file_sha256 {str(guest_sha)[:80]!r}; the engine hashed the input as "
+                                              f"{h.hexdigest()} (recorded)"[:2000]))
 
         if summary.fields.get("rdp_file_name") is not None:   # the --serve-http agent names its upload temp file (myatg_<guid>.rdp)
             summary.fields["rdp_file_name"] = input.name
