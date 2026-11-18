@@ -670,3 +670,28 @@ def test_a_keyword_only_params_runner_gets_the_params():
     import winval_blastbox.orchestrator as orch
     got = orch._call_runner(lambda path, *, params=None: {"params": params}, "x.exe", {"AUTHENTICODE_REV": "none"})
     assert got == {"params": {"AUTHENTICODE_REV": "none"}}
+
+
+@pytest.mark.parametrize("verdict", [
+    {"file": "myatg_0123.rdp", "status": "NotSigned"},
+    {"file": "myatg_0123.rdp", "status": "UnknownError", "signature_type": "RDP", "error": "rdp file too large",
+     "signer": None, "chain": None},
+])
+def test_rdp_early_return_shapes_are_rdp_verdicts(tmp_path, pool, verdict):
+    # rdp_validate.cs's unsigned and oversize returns carry no signscope_count; they are still RDP verdicts
+    pool(verdict)
+    f = _detonate(tmp_path, "invite.rdp", b"full address:s:h\r\n").payload.fields
+    assert f["rdp_file_name"] == "invite.rdp"
+
+
+def test_the_door_summary_carries_the_record(tmp_path, pool):
+    # the doors publish summarize_envelope only: the Record's engine-side fields (rdp_*, the engine's file_sha256,
+    # signer_self_signed, ...) must reach an HTTP client, minus the verbatim verdict already under `verdict`
+    v = _load("rdp_expired.json")
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "invite.rdp", b"full address:s:h\r\n"), tmp_path / "out")
+    s = eng.summarize_envelope(env)
+    assert s["record"]["rdp_file_name"] == "invite.rdp"
+    assert s["record"]["content_verified"] is True
+    assert len(s["record"]["file_sha256"]) == 64
+    assert "authenticode_json" not in s["record"]

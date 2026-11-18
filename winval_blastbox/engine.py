@@ -320,7 +320,8 @@ def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
 
     revocation = verdict_revocation(verdict)
     params = params or {}
-    rdp = "file" in verdict and "signscope_count" in verdict   # rdp_validate.cs's shape
+    # rdp_validate.cs's shape: only it names the file (its unsigned / oversize early returns carry no signscope_count)
+    rdp = "file" in verdict or verdict.get("signature_type") == "RDP"
     fields: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "file_sha256": verdict.get("file_sha256"),
@@ -410,6 +411,9 @@ def summarize_envelope(env: dict) -> dict:
         "warning_details": [{"code": w.get("code"), "message": w.get("message") if w.get("code") in ENGINE_WARNING_CODES else None}
                             for w in warns],
         "envelope_status": env.get("status"),
+        # the engine's Record (its own file_sha256, rdp_*, signer_* / chain_* flags) minus the verbatim verdict, which is
+        # already under `verdict`: the doors publish only this summary, so a Record-only field must ride here
+        "record": {k: v for k, v in fields.items() if k != "authenticode_json"},
     }
 
 

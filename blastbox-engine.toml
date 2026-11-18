@@ -201,7 +201,11 @@ description = "The output carries no severity for any finding; the severities ab
 
 [[gaps]]
 id = "myatg-rdp-side"
-description = "Two myatg behaviours the engine cannot change: its RDP validator consults no graveyard and no timestamp (graveyard_* / timestamp* are null on RDP verdicts), and it routes a file to that validator by the .rdp extension alone (a PE named x.rdp is answered by the RDP path; envelope.detected says pe). Fix belongs in myatg (rdp_validate.cs / http_serve.cs)."
+description = "Two myatg behaviours the engine cannot change: its RDP validator consults no graveyard and no timestamp (graveyard_* / timestamp* are null on RDP verdicts), it routes a file to that validator by the .rdp extension alone (a PE named x.rdp is answered by the RDP path; envelope.detected says pe), and its unsigned / oversize early returns carry no settings at all, so rdp_unsigned_dangerous cannot fire for an UNSIGNED .rdp (every setting unsigned): such a verdict is status NotSigned with rdp_* counts null. Fix belongs in myatg (rdp_validate.cs / http_serve.cs)."
+
+[[gaps]]
+id = "smoke-gate-ignores-revocation"
+description = "The warm-pool smoke test (vm_pool.py, AUTHENTICODE_SMOKE_EXPECT, default Valid) and the golden rotation gate (golden_rotate.py) compare myatg's RAW status, so a golden with dead egress or a cold CRL cache passes both and then answers every production Valid as ValidRevocationUnchecked. Comparing the engine's revocation-aware status instead would refuse every golden on an AUTHENTICODE_EXIT=none deployment, where revocation can never be checked: an owner decision (per-exit expectation, or an explicit SMOKE_EXPECT=ValidRevocationUnchecked)."
 
 [[gaps]]
 id = "loadout-status-map"
