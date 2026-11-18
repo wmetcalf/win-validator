@@ -87,3 +87,19 @@ def test_vm_failure_seals_a_conforming_engine_error(tmp_path, replay):
     env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
     assert env["status"] == "engine_error"
     ec.assert_conforms(CONTRACT, env)
+
+
+@pytest.mark.parametrize("rc", ["unknown", "none"])
+def test_valid_with_unchecked_revocation_conforms_and_is_named(tmp_path, replay, rc):
+    """myatg's Valid with revocation never checked reaches consumers as a contract-named status of its own."""
+    verdict = json.loads((Path(__file__).parent / "fixtures" / "myatg" / "valid_script_graveyard_hit.json").read_text())
+    verdict["chain"]["revocation_checked"] = rc
+    replay(_ReplayPool(verdict))
+    out = tmp_path / "out"
+    out.mkdir()
+    result = eng.AuthenticodeEngine().detonate(_sample(tmp_path), out, Limits())
+    ec.assert_conforms(CONTRACT, result, out)
+    assert result.payload.fields["status"] == "ValidRevocationUnchecked"
+    assert "authenticode.status.ValidRevocationUnchecked" in CODES
+    assert "authenticode.revocation.unchecked" in CODES
+    assert "revocation-unknown-is-valid" not in {g.id for g in CONTRACT.gaps}

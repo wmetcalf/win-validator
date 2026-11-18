@@ -52,13 +52,21 @@ file (the orchestrator's own in-memory store) whose signer or chain carries that
 
 ## Output (payload `Record` fields)
 
-`file_sha256, status, signature_type, content_verified, is_os_binary, timestamped,
+`file_sha256, status, myatg_status, revocation, signature_type, content_verified, is_os_binary, timestamped,
 sign_time, sign_time_verified`, `signer_*` (subject/issuer CN, serial, thumbprint,
 sha1/sha256/tbs_sha256 fingerprints, eku_codesigning, self_signed, validity window),
 `chain_len, chain_explicit_distrust, chain_valid_at_sign_time`, `timestamper_*`,
 `graveyard_{hit,matched_on,malware,malware_type}`, plus the verbatim verdict embedded as
 `authenticode_json` and written to the `authenticode.json` artifact. A graveyard hit emits
 a `graveyard_hit` warning.
+
+`revocation` is the revocation half of the verdict, explicit: `checked_good` (responders or CRL cache
+answered, not revoked), `revoked`, `unchecked` (`chain_revocation_checked` is `unknown` = responders
+unreachable, or `none` = `AUTHENTICODE_REV=none`), `error` (a chain whose answer is missing or outside
+myatg's vocabulary; treated as not checked), or null (no chain evaluated: NotSigned, error skeleton).
+myatg answers `Valid` in the unchecked case, so `status` never repeats a bare `Valid` there: it is
+`ValidRevocationUnchecked` unless `revocation == "checked_good"` (`Revoked` if the chain is revoked).
+Every other status passes through; myatg's own string is always `myatg_status`.
 
 ## Config (env)
 

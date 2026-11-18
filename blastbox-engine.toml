@@ -30,7 +30,7 @@ node_types = ["record"]
 # Every key _summary() writes, plus the embedded verbatim verdict. Values may be null: myatg's
 # error skeleton and RDP verdicts leave most of them empty.
 required_root_fields = [
-    "file_sha256", "status", "signature_type", "content_verified", "is_os_binary",
+    "file_sha256", "status", "myatg_status", "revocation", "signature_type", "content_verified", "is_os_binary",
     "timestamped", "sign_time", "sign_time_verified",
     "signer_subject_cn", "signer_issuer_cn", "signer_serial_number", "signer_thumbprint",
     "signer_sha1_fingerprint", "signer_sha256_fingerprint", "signer_tbs_sha256",
@@ -42,7 +42,10 @@ required_root_fields = [
     "authenticode_json",
 ]
 
-# --- verdict status (payload.fields.status, myatg's string passed through verbatim) ----------
+# --- verdict status (payload.fields.status) ---------------------------------------------------
+# myatg's string passed through, with ONE engine rewrite: myatg's Valid becomes ValidRevocationUnchecked
+# unless payload.fields.revocation == 'checked_good' (Revoked if the chain is revoked). myatg's own string
+# is always payload.fields.myatg_status.
 [[detections]]
 code = "authenticode.status.HashMismatch"
 severity = "high"
@@ -52,7 +55,7 @@ description = "The file's hash does not match the signed hash: modified after si
 [[detections]]
 code = "authenticode.status.Revoked"
 severity = "high"
-source = "payload.fields.status == 'Revoked' (payload.fields.chain_revoked is true)"
+source = "payload.fields.status == 'Revoked' (payload.fields.revocation == 'revoked')"
 description = "A certificate in the chain is revoked."
 
 [[detections]]
@@ -88,8 +91,14 @@ description = "No Authenticode signature."
 [[detections]]
 code = "authenticode.status.Valid"
 severity = "info"
-source = "payload.fields.status == 'Valid'"
-description = "Signature verifies and the chain is trusted (see gap revocation-unknown-is-valid)."
+source = "payload.fields.status == 'Valid' (payload.fields.revocation == 'checked_good')"
+description = "Signature verifies, the chain is trusted, and revocation was checked (online or CRL cache) and found good."
+
+[[detections]]
+code = "authenticode.status.ValidRevocationUnchecked"
+severity = "low"
+source = "payload.fields.status == 'ValidRevocationUnchecked' (payload.fields.myatg_status == 'Valid', payload.fields.revocation in ['unchecked', 'error'])"
+description = "myatg said Valid but revocation was not checked: responders unreachable (chain_revocation_checked == 'unknown'), checking switched off ('none'), or an unrecognised answer (revocation == 'error'). Signature and chain verify; whether a cert is revoked is unknown."
 
 [[detections]]
 code = "authenticode.status.UnknownError"
@@ -98,6 +107,20 @@ source = "payload.fields.status == 'UnknownError' (payload.fields.error says why
 description = "myatg could not decide: oversize input, device path, parser exception, chain that fails for an unclassified reason."
 
 # --- independent findings --------------------------------------------------------------------
+# payload.fields.revocation: checked_good | revoked | unchecked | error | null (no chain evaluated:
+# NotSigned, myatg's error skeleton). Set for every status, not only Valid.
+[[detections]]
+code = "authenticode.revocation.unchecked"
+severity = "low"
+source = "payload.fields.revocation == 'unchecked' (payload.fields.chain_revocation_checked: 'unknown' = responders unreachable, 'none' = AUTHENTICODE_REV=none)"
+description = "Revocation was not checked for this verdict, whatever its status."
+
+[[detections]]
+code = "authenticode.revocation.error"
+severity = "low"
+source = "payload.fields.revocation == 'error'"
+description = "A chain was evaluated but its revocation_checked answer is missing or outside myatg's vocabulary (online|offline|unknown|none); treated as not checked."
+
 [[detections]]
 code = "graveyard_hit"
 severity = "high"
@@ -142,10 +165,6 @@ id = "no-schema-version"
 description = "The payload Record has no schema/version field, so a consumer cannot tell which _summary() field set (or myatg verdict shape) it is reading."
 
 [[gaps]]
-id = "revocation-unknown-is-valid"
-description = "myatg answers status=Valid when revocation responders were unreachable; only payload.fields.chain_revocation_checked == 'unknown' says the revocation half was never checked."
-
-[[gaps]]
 id = "rdp-verdict-shape"
 description = "RDP verdicts use `file` (a name), not `file_sha256`, and carry no graveyard/timestamp fields, so those summary fields are null; RDP-only findings (signscope_count, unsigned_settings, unsigned_dangerous) exist only inside authenticode_json, not as indexed fields."
 
@@ -162,12 +181,16 @@ id = "ingress-warnings-codes-only"
 description = "The ingress (GET /scan/{id}) republishes the verdict as result_summary {verdict, warnings, envelope_status}; warnings there are codes only, so a graveyard_hit's matched_on/malware text and a knob warning's message are dropped on that door."
 
 [[gaps]]
+id = "ingress-verdict-raw-status"
+description = "The ingress door (GET /scan/{id}, /scans) republishes myatg's raw verdict (re-parsed from authenticode_json), so its status there is myatg's Valid even when payload.fields.status is ValidRevocationUnchecked; only verdict.chain.revocation_checked says so on that door."
+
+[[gaps]]
 id = "loadout-status-map"
 description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no Distrusted or NotYetValid entry (they fall to the generic 'authenticode:<status>' suspicious/30 detection) and lists NotTrusted and Incompatible, which myatg never emits."
 
 [[gaps]]
 id = "loadout-ignores-revocation"
-description = "Loadout's mapper reads neither chain_revoked nor chain_revocation_checked, so a Valid verdict whose revocation was never checked becomes authenticode:valid with nothing saying so."
+description = "Loadout's mapper reads neither revocation nor chain_revocation_checked and has no ValidRevocationUnchecked entry, so such a verdict falls to the generic 'authenticode:<status>' detection rather than one that names unchecked revocation."
 
 [[gaps]]
 id = "loadout-config-not-forwarded"

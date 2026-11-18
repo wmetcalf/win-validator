@@ -130,6 +130,41 @@ def _scalar(v: object) -> str | int | float | bool | None:
     return json.dumps(v, separators=(",", ":"), default=str)
 
 
+# myatg's chain.revocation_checked vocabulary (myatg.cs / rdp_validate.cs): "online" / "offline" = the responders (or the
+# CRL cache) answered; "unknown" = they were unreachable; "none" = checking switched off (AUTHENTICODE_REV=none).
+_REV_CHECKED = frozenset({"online", "offline"})
+_REV_UNCHECKED = frozenset({"unknown", "none"})
+
+# The status the engine reports for myatg's Valid when revocation was not checked good.
+VALID_REVOCATION_UNCHECKED = "ValidRevocationUnchecked"
+
+
+def _revocation(chain: dict | None) -> str | None:
+    """The revocation half of the verdict, explicit: checked_good | revoked | unchecked | error, or None (no chain evaluated).
+
+    Fail-closed: a revocation_checked value outside myatg's known vocabulary (or a chain without one) is "error", never good."""
+    if not chain:
+        return None
+    if chain.get("revoked") is True:
+        return "revoked"
+    rc = chain.get("revocation_checked")
+    if isinstance(rc, str) and rc in _REV_CHECKED:
+        return "checked_good"
+    if isinstance(rc, str) and rc in _REV_UNCHECKED:
+        return "unchecked"
+    return "error"
+
+
+def _status(myatg_status: object, revocation: str | None) -> object:
+    """myatg's status, except that Valid is never claimed unless revocation was checked good.
+
+    myatg answers Valid when the responders were unreachable or checking was off; reported verbatim that made such a Record
+    indistinguishable from a fully checked one. A revoked chain under Valid is reported Revoked."""
+    if myatg_status != "Valid" or revocation == "checked_good":
+        return myatg_status
+    return "Revoked" if revocation == "revoked" else VALID_REVOCATION_UNCHECKED
+
+
 def _summary(verdict: dict) -> Record:
     """Flatten the myatg verdict into the indexed Record summary fields.
 
@@ -141,9 +176,14 @@ def _summary(verdict: dict) -> Record:
     grave = verdict.get("graveyard") or {}
     tsa = verdict.get("timestamper") or {}
 
+    revocation = _revocation(chain)
     fields: dict[str, object] = {
         "file_sha256": verdict.get("file_sha256"),
-        "status": verdict.get("status"),
+        # the engine's status: myatg's, with an unchecked-revocation Valid rewritten (see _status); myatg's own string is
+        # myatg_status (and verbatim in authenticode_json)
+        "status": _status(verdict.get("status"), revocation),
+        "myatg_status": verdict.get("status"),
+        "revocation": revocation,
         "signature_type": verdict.get("signature_type"),
         "content_verified": verdict.get("content_verified"),
         "is_os_binary": verdict.get("is_os_binary"),
@@ -170,7 +210,8 @@ def _summary(verdict: dict) -> Record:
         "chain_builds": chain.get("chain_builds"),
         "chain_revoked": chain.get("revoked"),
         # myatg reports 'unknown' here WITHOUT downgrading status when the responders were unreachable: an hour of
-        # dead egress made Records byte-identical to fully checked Valid ones until this was indexed
+        # dead egress made Records byte-identical to fully checked Valid ones. `revocation` and `status` above now say so;
+        # this raw value keeps the why (unknown = unreachable, none = switched off)
         "chain_revocation_checked": chain.get("revocation_checked"),
         "error": verdict.get("error"),
         # timestamper
