@@ -17,7 +17,6 @@ Run on the libvirt host:  python -m winval_blastbox.pool_manager
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import errno
@@ -36,6 +35,7 @@ from pathlib import Path
 from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
+from .engine import params_locked, summarize_envelope
 from .host_runner import HostRunner
 from .knobs import ENGINE, agent_port, env_float, upload_mb
 from .vm_pool import pool_size
@@ -214,6 +214,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     it); sysctl="loadable" is for a caller whose RESTART will apply it: it passes when the sysctl exists (the unit sets it)
     or br_netfilter would be inserted (a verbose modprobe dry run, see _bridge_nf_loadable), and refuses on the host the unit's own comment
     names — one that cannot load the module, where ExecStartPre's `-` lets the start reach the manager and refuse."""
+    params_locked()   # a malformed AUTHENTICODE_LOCK_PARAMS (strict boolean) refuses the start here, before the orphan recovery
     raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
     if not raw:
         raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
@@ -368,21 +369,9 @@ POLL_S = env_float("WINVAL_CLAIM_POLL_S", 0.5, floor=0.05)   # the last bare flo
 
 
 def _extract_verdict(env: dict) -> dict:
-    """Pull the myatg verdict (components, not opinion) out of the sealed envelope, plus the
-    warnings + envelope status. Same shape the old single-process orchestrator surfaced."""
-    fields = (env.get("payload") or {}).get("fields") or {}
-    raw = fields.get("authenticode_json")
-    verdict = None
-    if isinstance(raw, str):
-        try:
-            verdict = json.loads(raw)
-        except ValueError:
-            verdict = None
-    return {
-        "verdict": verdict,
-        "warnings": [w.get("code") for w in env.get("warnings") or []],
-        "envelope_status": env.get("status"),
-    }
+    """The job's result_summary: myatg's raw verdict plus the engine's revocation-aware status and full warnings
+    (see engine.summarize_envelope)."""
+    return summarize_envelope(env)
 
 
 class PoolManager:
@@ -433,12 +422,14 @@ class PoolManager:
             (work / "input").mkdir(0o700)
             (work / "output").mkdir(0o700)
             with open(in_fd, "rb", closefd=False) as src, open(work / "input" / filename, "wb") as dst:
-                copied = 0; digest = hashlib.sha256()
+                copied = 0
+                digest = hashlib.sha256()
                 while True:   # bounded by BYTES, not by the size fstat saw: the ingress can still be appending
                     chunk = src.read(1 << 20)
                     if not chunk:
                         break
-                    copied += len(chunk); digest.update(chunk)
+                    copied += len(chunk)
+                    digest.update(chunk)
                     if copied > MAX_INPUT_BYTES:
                         raise PublicError(f"input grew past the pool-manager's {MAX_INPUT_BYTES}-byte bound while being copied (AUTHENTICODE_MAX_UPLOAD_MB)")
                     dst.write(chunk)
@@ -446,14 +437,18 @@ class PoolManager:
                 keep_input = True   # the evidence stays where it is: a consumed-and-unlinked spool would delete the answer to the question below
                 logger.warning("job %s: spooled input sha256 %s differs from the ingress's %s; the spool is kept for inspection", job.job_id, digest.hexdigest(), job.input_sha256)
                 raise PublicError("the spooled input does not match the sha256 the ingress recorded for it (changed after it was spooled?); the spool is kept for inspection")
-            env = self._runner.validate_to_dir(work / "input" / filename, work / "output")
+            env = self._runner.validate_to_dir(work / "input" / filename, work / "output", params=dict(job.params or {}))
             summary = _extract_verdict(env)
-            status = (JobStatus.FAILED if summary.get("envelope_status") == "engine_error"
+            # engine_error (VM/transport) and rejected (a per-job parameter the agent does not know) carry no verdict
+            status = (JobStatus.FAILED if summary.get("envelope_status") in ("engine_error", "rejected")
                       else JobStatus.DONE)
+            extra = {}
+            if summary.get("envelope_status") == "rejected":
+                extra["error"] = "; ".join(w["message"] or w["code"] for w in summary["warning_details"]) or "rejected"
             recorded = bool(self._store.update_if_status(
                 job.job_id, JobStatus.RUNNING, expect_claim_id=job.claim_id,
                 status=status, finished_at=time.time(), result_summary=summary,
-                worker_runtime="vm"))
+                worker_runtime="vm", **extra))
             if not recorded:
                 # the CAS lost: the row is no longer RUNNING under this claim (a restart's orphan recovery
                 # marked it FAILED, or another claimant took it). Nothing is published and the spooled
@@ -612,9 +607,12 @@ class PoolManager:
         try:   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings — BEFORE the orphan recovery (a refusal that fires on the first start after an upgrade must not first fail every RUNNING job and unlink its spool), the pool shut on the way out like every other start failure
             _refuse_open_egress(self._concurrency)
         except (ValueError, RuntimeError) as exc:   # a posture typo, or a golden base outside printable ASCII: the warm-up's own one-line path
-            logger.error("the pool cannot start: %s", exc); self._runner.shutdown(); return 1
+            logger.error("the pool cannot start: %s", exc)
+            self._runner.shutdown()
+            return 1
         except SystemExit:
-            self._runner.shutdown(); raise
+            self._runner.shutdown()
+            raise
         self._recover_orphans()
         threading.Thread(target=self._sweep_loop, name="retention", daemon=True).start()
         _clear_ready()   # a marker from a previous life says nothing about THIS start

@@ -1,0 +1,132 @@
+{
+  "file": "f01392.rdp",
+  "status": "Expired",
+  "signature_type": "RDP",
+  "signer": {
+    "subject": "CN=ukrtelecom.eu",
+    "subject_cn": "ukrtelecom.eu",
+    "issuer": "CN=R10, O=Let's Encrypt, C=US",
+    "issuer_cn": "R10",
+    "serial_number": "03D51E1A3713698BB3F471068072916E8F2D",
+    "thumbprint": "37575F848570005D12C59135225784C1AE2DC295",
+    "md5_fingerprint": "8562ec2edca46141a5bd1d7bd89912f0",
+    "sha1_fingerprint": "37575f848570005d12c59135225784c1ae2dc295",
+    "sha256_fingerprint": "1f1218b9bc005cbb67fe856b8400241703b64080018ad989998275bd9c7f86d0",
+    "tbs_sha1": "68eca3eb30a472d14c22cb0a7121429e0f79b968",
+    "tbs_sha256": "b5c13e69271d3e7fc2b95bf098c70fa9bff3311735329cad7f9dac14df919cf7",
+    "not_before": "2025-01-22T06:49:47.0000000Z",
+    "not_after": "2025-04-22T06:49:46.0000000Z",
+    "eku": [
+      "1.3.6.1.5.5.7.3.1",
+      "1.3.6.1.5.5.7.3.2"
+    ],
+    "eku_codesigning": false,
+    "self_signed": false,
+    "crl_urls": [],
+    "ca_issuer_urls": [
+      "http://r10.i.lencr.org/"
+    ],
+    "ocsp_urls": [
+      "http://r10.o.lencr.org"
+    ]
+  },
+  "chain": {
+    "signature_valid": true,
+    "chains_to_trusted_root": true,
+    "revoked": false,
+    "explicit_distrust": false,
+    "revocation_checked": "unknown",
+    "not_before": "2025-01-22T06:49:47.0000000Z",
+    "not_after": "2025-04-22T06:49:46.0000000Z",
+    "expired_now": true,
+    "not_yet_valid": false,
+    "valid_now": false,
+    "sign_time": null,
+    "sign_time_verified": false,
+    "valid_at_sign_time": false,
+    "chain_length": 3,
+    "chain": [
+      {
+        "subject": "CN=ukrtelecom.eu",
+        "subject_cn": "ukrtelecom.eu",
+        "issuer": "CN=R10, O=Let's Encrypt, C=US",
+        "issuer_cn": "R10",
+        "serial_number": "03D51E1A3713698BB3F471068072916E8F2D",
+        "thumbprint": "37575F848570005D12C59135225784C1AE2DC295",
+        "md5_fingerprint": "8562ec2edca46141a5bd1d7bd89912f0",
+        "sha1_fingerprint": "37575f848570005d12c59135225784c1ae2dc295",
+        "sha256_fingerprint": "1f1218b9bc005cbb67fe856b8400241703b64080018ad989998275bd9c7f86d0",
+        "tbs_sha1": "68eca3eb30a472d14c22cb0a7121429e0f79b968",
+        "tbs_sha256": "b5c13e69271d3e7fc2b95bf098c70fa9bff3311735329cad7f9dac14df919cf7",
+        "not_before": "2025-01-22T06:49:47.0000000Z",
+        "not_after": "2025-04-22T06:49:46.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.1",
+          "1.3.6.1.5.5.7.3.2"
+        ],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [],
+        "ca_issuer_urls": [
+          "http://r10.i.lencr.org/"
+        ],
+        "ocsp_urls": [
+          "http://r10.o.lencr.org"
+        ]
+      },
+      {
+        "subject": "CN=R10, O=Let's Encrypt, C=US",
+        "subject_cn": "R10",
+        "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+        "issuer_cn": "ISRG Root X1",
+        "serial_number": "4BA85293F79A2FA273064BA8048D75D0",
+        "thumbprint": "00ABEFD055F9A9C784FFDEABD1DCDD8FED741436",
+        "md5_fingerprint": "af1c77aecc8d77e9aacb0c475840c392",
+        "sha1_fingerprint": "00abefd055f9a9c784ffdeabd1dcdd8fed741436",
+        "sha256_fingerprint": "9d7c3f1aa6ad2b2ec0d5cf1e246f8d9ae6cbc9fd0755ad37bb974b1f2fb603f3",
+        "tbs_sha1": "fbd00d8384012755bc869b5d96aadc2182176a9f",
+        "tbs_sha256": "e644ba6963e335fe765cb9976b12b10eb54294b42477764ccb3a3acca3acb2fc",
+        "not_before": "2024-03-13T00:00:00.0000000Z",
+        "not_after": "2027-03-12T23:59:59.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.2",
+          "1.3.6.1.5.5.7.3.1"
+        ],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [
+          "http://x1.c.lencr.org/"
+        ],
+        "ca_issuer_urls": [
+          "http://x1.i.lencr.org/"
+        ],
+        "ocsp_urls": []
+      },
+      {
+        "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+        "subject_cn": "ISRG Root X1",
+        "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+        "issuer_cn": "ISRG Root X1",
+        "serial_number": "008210CFB0D240E3594463E0BB63828B00",
+        "thumbprint": "CABD2A79A1076A31F21D253635CB039D4329A5E8",
+        "md5_fingerprint": "0cd2f9e0da1773e9ed864da5e370e74e",
+        "sha1_fingerprint": "cabd2a79a1076a31f21d253635cb039d4329a5e8",
+        "sha256_fingerprint": "96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
+        "tbs_sha1": "8d5fb83aa3e5c68fa6cfcdc6489a5735ba7ad4f0",
+        "tbs_sha256": "3f0411ede9c4477057d57e57883b1f205b20cdc0f3263129b1ee0269a2678f63",
+        "not_before": "2015-06-04T11:04:38.0000000Z",
+        "not_after": "2035-06-04T11:04:38.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [],
+        "ca_issuer_urls": [],
+        "ocsp_urls": []
+      }
+    ]
+  },
+  "signscope_count": 26,
+  "total_settings": 51,
+  "unsigned_settings": 25,
+  "unsigned_dangerous": []
+}

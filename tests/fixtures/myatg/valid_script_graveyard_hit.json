@@ -1,0 +1,165 @@
+{
+  "file_sha256": "fad25892e5179a346cdbdbba1e40f53bd6366806d32b57fa4d7946ebe9ae8621",
+  "status": "Valid",
+  "signature_type": "Script",
+  "content_verified": true,
+  "is_os_binary": false,
+  "signer": {
+    "subject": "CN=TAIM LLC, O=TAIM LLC, STREET=\"Vavilov street, 4 pom 13N\", L=Moscow, S=Moscow, C=RU, OID.1.3.6.1.4.1.311.60.2.1.2=Moscow, OID.1.3.6.1.4.1.311.60.2.1.3=RU, SERIALNUMBER=1237700338303, OID.2.5.4.15=Private Organization",
+    "subject_cn": "TAIM LLC",
+    "issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE",
+    "issuer_cn": "GlobalSign GCC R45 EV CodeSigning CA 2020",
+    "serial_number": "4484F1C5B6A72DFEC0E1CA55",
+    "thumbprint": "4CB87577FA5B91346CCE30FB9FF3139D46DE3361",
+    "md5_fingerprint": "0cd8a255094ca744923d91a67caec729",
+    "sha1_fingerprint": "4cb87577fa5b91346cce30fb9ff3139d46de3361",
+    "sha256_fingerprint": "f418f16e61222714a46cff8ec9cdd3a5dec716808dadc876581ee353ed2b339c",
+    "tbs_sha1": "ef5e878e3c896f63da1cb24c2bb91e53b441a52f",
+    "tbs_sha256": "88d9a5a1a91ddc74da85e8279008b1b118a5fc246f7059cd1cf6f3052b573b6d",
+    "not_before": "2023-06-13T07:18:04.0000000Z",
+    "not_after": "2024-06-13T07:18:04.0000000Z",
+    "eku": [
+      "1.3.6.1.5.5.7.3.3"
+    ],
+    "eku_codesigning": true,
+    "self_signed": false,
+    "crl_urls": [
+      "http://crl.globalsign.com/gsgccr45evcodesignca2020.crl"
+    ],
+    "ca_issuer_urls": [
+      "http://secure.globalsign.com/cacert/gsgccr45evcodesignca2020.crt"
+    ],
+    "ocsp_urls": [
+      "http://ocsp.globalsign.com/gsgccr45evcodesignca2020"
+    ]
+  },
+  "chain": {
+    "chain_builds": true,
+    "chains_to_trusted_root": true,
+    "revoked": false,
+    "explicit_distrust": false,
+    "revocation_checked": "online",
+    "valid_at_sign_time": true,
+    "chain_length": 3,
+    "chain": [
+      {
+        "subject": "CN=TAIM LLC, O=TAIM LLC, STREET=\"Vavilov street, 4 pom 13N\", L=Moscow, S=Moscow, C=RU, OID.1.3.6.1.4.1.311.60.2.1.2=Moscow, OID.1.3.6.1.4.1.311.60.2.1.3=RU, SERIALNUMBER=1237700338303, OID.2.5.4.15=Private Organization",
+        "subject_cn": "TAIM LLC",
+        "issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE",
+        "issuer_cn": "GlobalSign GCC R45 EV CodeSigning CA 2020",
+        "serial_number": "4484F1C5B6A72DFEC0E1CA55",
+        "thumbprint": "4CB87577FA5B91346CCE30FB9FF3139D46DE3361",
+        "md5_fingerprint": "0cd8a255094ca744923d91a67caec729",
+        "sha1_fingerprint": "4cb87577fa5b91346cce30fb9ff3139d46de3361",
+        "sha256_fingerprint": "f418f16e61222714a46cff8ec9cdd3a5dec716808dadc876581ee353ed2b339c",
+        "tbs_sha1": "ef5e878e3c896f63da1cb24c2bb91e53b441a52f",
+        "tbs_sha256": "88d9a5a1a91ddc74da85e8279008b1b118a5fc246f7059cd1cf6f3052b573b6d",
+        "not_before": "2023-06-13T07:18:04.0000000Z",
+        "not_after": "2024-06-13T07:18:04.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.3"
+        ],
+        "eku_codesigning": true,
+        "self_signed": false,
+        "crl_urls": [
+          "http://crl.globalsign.com/gsgccr45evcodesignca2020.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://secure.globalsign.com/cacert/gsgccr45evcodesignca2020.crt"
+        ],
+        "ocsp_urls": [
+          "http://ocsp.globalsign.com/gsgccr45evcodesignca2020"
+        ]
+      },
+      {
+        "subject": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE",
+        "subject_cn": "GlobalSign GCC R45 EV CodeSigning CA 2020",
+        "issuer": "CN=GlobalSign Code Signing Root R45, O=GlobalSign nv-sa, C=BE",
+        "issuer_cn": "GlobalSign Code Signing Root R45",
+        "serial_number": "77BD0E05B7590BB61D4761531E3F75ED",
+        "thumbprint": "C10BB76AD4EE815242406A1E3E1117FFEC743D4F",
+        "md5_fingerprint": "e6eb41ad6404317af8a18b64f98c2bcf",
+        "sha1_fingerprint": "c10bb76ad4ee815242406a1e3e1117ffec743d4f",
+        "sha256_fingerprint": "cd0e144dd10bac221fe2fb901058d16450a0578b3c47c770908f2e9ada28ef12",
+        "tbs_sha1": "c7cf5607e19b22fe60c055e71d9b555d70f71f66",
+        "tbs_sha256": "d9c7db0b704f07089440c56e69a0f31d730edf77cfbf7514630e8b5390a270fe",
+        "not_before": "2020-07-28T00:00:00.0000000Z",
+        "not_after": "2030-07-28T00:00:00.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.3"
+        ],
+        "eku_codesigning": true,
+        "self_signed": false,
+        "crl_urls": [
+          "http://crl.globalsign.com/codesigningrootr45.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://secure.globalsign.com/cacert/codesigningrootr45.crt"
+        ],
+        "ocsp_urls": [
+          "http://ocsp.globalsign.com/codesigningrootr45"
+        ]
+      },
+      {
+        "subject": "CN=GlobalSign Code Signing Root R45, O=GlobalSign nv-sa, C=BE",
+        "subject_cn": "GlobalSign Code Signing Root R45",
+        "issuer": "CN=GlobalSign Code Signing Root R45, O=GlobalSign nv-sa, C=BE",
+        "issuer_cn": "GlobalSign Code Signing Root R45",
+        "serial_number": "7653FEAC75464893F5E5D74A483A4EF8",
+        "thumbprint": "4EFC31460C619ECAE59C1BCE2C008036D94C84B8",
+        "md5_fingerprint": "e94fb54871208c00df70f708ac47085b",
+        "sha1_fingerprint": "4efc31460c619ecae59c1bce2c008036d94c84b8",
+        "sha256_fingerprint": "7b9d553e1c92cb6e8803e137f4f287d4363757f5d44b37d52f9fca22fb97df86",
+        "tbs_sha1": "bf5b5b0d5e2d7da7f29d1c6f506bf58a8228b6fb",
+        "tbs_sha256": "b5a2853291077af152474fc478d13c166c4d4f60b6aeb869ff24275310cf1c67",
+        "not_before": "2020-03-18T00:00:00.0000000Z",
+        "not_after": "2045-03-18T00:00:00.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [],
+        "ca_issuer_urls": [],
+        "ocsp_urls": []
+      }
+    ]
+  },
+  "graveyard": {
+    "hit": true,
+    "matched_on": "cert_tbs_sha256",
+    "malware": "FlawedAmmyy",
+    "malware_type": ""
+  },
+  "timestamped": true,
+  "sign_time": "2024-04-04T14:42:51.0000000Z",
+  "sign_time_verified": true,
+  "timestamper": {
+    "subject": "CN=DigiCert Timestamp 2023, O=\"DigiCert, Inc.\", C=US",
+    "subject_cn": "DigiCert Timestamp 2023",
+    "issuer": "CN=DigiCert Trusted G4 RSA4096 SHA256 TimeStamping CA, O=\"DigiCert, Inc.\", C=US",
+    "issuer_cn": "DigiCert Trusted G4 RSA4096 SHA256 TimeStamping CA",
+    "serial_number": "0544AFF3949D0839A6BFDB3F5FE56116",
+    "thumbprint": "66F02B32C2C2C90F825DCEAA8AC9C64F199CCF40",
+    "md5_fingerprint": "a6ba5fdf34f4060a647083be314f6f24",
+    "sha1_fingerprint": "66f02b32c2c2c90f825dceaa8ac9c64f199ccf40",
+    "sha256_fingerprint": "d2f6e46ded7422ccd1d440576841366f828ada559aae3316af4d1a9ad40c7828",
+    "tbs_sha1": "bc1890d694f9d392c4cbae6a174e35d70e7ec8b1",
+    "tbs_sha256": "594a02de632b3a08ed6644c36994025e57f35bc8e7bd16cec5d347883390d1d8",
+    "not_before": "2023-07-14T00:00:00.0000000Z",
+    "not_after": "2034-10-13T23:59:59.0000000Z",
+    "eku": [
+      "1.3.6.1.5.5.7.3.8"
+    ],
+    "eku_codesigning": false,
+    "self_signed": false,
+    "crl_urls": [
+      "http://crl3.digicert.com/DigiCertTrustedG4RSA4096SHA256TimeStampingCA.crl"
+    ],
+    "ca_issuer_urls": [
+      "http://cacerts.digicert.com/DigiCertTrustedG4RSA4096SHA256TimeStampingCA.crt"
+    ],
+    "ocsp_urls": [
+      "http://ocsp.digicert.com"
+    ]
+  },
+  "ms": 2520
+}

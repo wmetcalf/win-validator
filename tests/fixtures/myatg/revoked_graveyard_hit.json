@@ -1,0 +1,192 @@
+{
+  "file_sha256": "03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552",
+  "status": "Revoked",
+  "signature_type": "Embedded",
+  "content_verified": true,
+  "is_os_binary": false,
+  "signer": {
+    "subject": "CN=NEW VISION MARKETING LLC, O=NEW VISION MARKETING LLC, L=Mesa, S=Arizona, C=US",
+    "subject_cn": "NEW VISION MARKETING LLC",
+    "issuer": "CN=Microsoft ID Verified CS AOC CA 01, O=Microsoft Corporation, C=US",
+    "issuer_cn": "Microsoft ID Verified CS AOC CA 01",
+    "serial_number": "3300043B67E4F8C74D2C120775000000043B67",
+    "thumbprint": "51BB5BAEB3D293332FAB7E9A4CC23F406AFB0D94",
+    "md5_fingerprint": "018955ffdd962cb5dea1412e1e47aaeb",
+    "sha1_fingerprint": "51bb5baeb3d293332fab7e9a4cc23f406afb0d94",
+    "sha256_fingerprint": "ea939fe29ce11aa1586669e98228c420042a45dd770fe7cf3b6704a0cde6312e",
+    "tbs_sha1": "8570e34cd1908e63f2c5e98ca2358c2bf6d1fcd4",
+    "tbs_sha256": "da3b081a9b9b43f3d966e3f72175d7f2fa4f29ef8257f471d03d47afc226e176",
+    "not_before": "2025-06-25T06:35:01.0000000Z",
+    "not_after": "2025-06-28T06:35:01.0000000Z",
+    "eku": [
+      "1.3.6.1.4.1.311.97.1.0",
+      "1.3.6.1.5.5.7.3.3",
+      "1.3.6.1.4.1.311.97.551301807.760330144.701107510.452797528"
+    ],
+    "eku_codesigning": true,
+    "self_signed": false,
+    "crl_urls": [
+      "http://www.microsoft.com/pkiops/crl/Microsoft%20ID%20Verified%20CS%20AOC%20CA%2001.crl"
+    ],
+    "ca_issuer_urls": [
+      "http://www.microsoft.com/pkiops/certs/Microsoft%20ID%20Verified%20CS%20AOC%20CA%2001.crt"
+    ],
+    "ocsp_urls": [
+      "http://oneocsp.microsoft.com/ocsp"
+    ]
+  },
+  "chain": {
+    "chain_builds": false,
+    "chains_to_trusted_root": true,
+    "revoked": true,
+    "explicit_distrust": false,
+    "revocation_checked": "online",
+    "valid_at_sign_time": false,
+    "chain_length": 4,
+    "chain": [
+      {
+        "subject": "CN=NEW VISION MARKETING LLC, O=NEW VISION MARKETING LLC, L=Mesa, S=Arizona, C=US",
+        "subject_cn": "NEW VISION MARKETING LLC",
+        "issuer": "CN=Microsoft ID Verified CS AOC CA 01, O=Microsoft Corporation, C=US",
+        "issuer_cn": "Microsoft ID Verified CS AOC CA 01",
+        "serial_number": "3300043B67E4F8C74D2C120775000000043B67",
+        "thumbprint": "51BB5BAEB3D293332FAB7E9A4CC23F406AFB0D94",
+        "md5_fingerprint": "018955ffdd962cb5dea1412e1e47aaeb",
+        "sha1_fingerprint": "51bb5baeb3d293332fab7e9a4cc23f406afb0d94",
+        "sha256_fingerprint": "ea939fe29ce11aa1586669e98228c420042a45dd770fe7cf3b6704a0cde6312e",
+        "tbs_sha1": "8570e34cd1908e63f2c5e98ca2358c2bf6d1fcd4",
+        "tbs_sha256": "da3b081a9b9b43f3d966e3f72175d7f2fa4f29ef8257f471d03d47afc226e176",
+        "not_before": "2025-06-25T06:35:01.0000000Z",
+        "not_after": "2025-06-28T06:35:01.0000000Z",
+        "eku": [
+          "1.3.6.1.4.1.311.97.1.0",
+          "1.3.6.1.5.5.7.3.3",
+          "1.3.6.1.4.1.311.97.551301807.760330144.701107510.452797528"
+        ],
+        "eku_codesigning": true,
+        "self_signed": false,
+        "crl_urls": [
+          "http://www.microsoft.com/pkiops/crl/Microsoft%20ID%20Verified%20CS%20AOC%20CA%2001.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://www.microsoft.com/pkiops/certs/Microsoft%20ID%20Verified%20CS%20AOC%20CA%2001.crt"
+        ],
+        "ocsp_urls": [
+          "http://oneocsp.microsoft.com/ocsp"
+        ]
+      },
+      {
+        "subject": "CN=Microsoft ID Verified CS AOC CA 01, O=Microsoft Corporation, C=US",
+        "subject_cn": "Microsoft ID Verified CS AOC CA 01",
+        "issuer": "CN=Microsoft ID Verified Code Signing PCA 2021, O=Microsoft Corporation, C=US",
+        "issuer_cn": "Microsoft ID Verified Code Signing PCA 2021",
+        "serial_number": "3300000007378C5BA1D95B8CD4000000000007",
+        "thumbprint": "D7B1118AFBB879D9F2F8E98B9AC12F9367FACE88",
+        "md5_fingerprint": "f475601456a47ea6e4bae773db9364df",
+        "sha1_fingerprint": "d7b1118afbb879d9f2f8e98b9ac12f9367face88",
+        "sha256_fingerprint": "7ee1f718cae6b4d25d10115a367d84b7704e06bd6f8b498825fd42c852574be9",
+        "tbs_sha1": "13fafeb733117f82f06b2b303f4b2c102205a561",
+        "tbs_sha256": "ff2ff1f9fbc9d9793af4ae35ea053257aa433ff7fcce71f26ed1cad2e30b0fe8",
+        "not_before": "2021-04-13T17:31:54.0000000Z",
+        "not_after": "2026-04-13T17:31:54.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [
+          "http://www.microsoft.com/pkiops/crl/Microsoft%20ID%20Verified%20Code%20Signing%20PCA%202021.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://www.microsoft.com/pkiops/certs/Microsoft%20ID%20Verified%20Code%20Signing%20PCA%202021.crt"
+        ],
+        "ocsp_urls": [
+          "http://oneocsp.microsoft.com/ocsp"
+        ]
+      },
+      {
+        "subject": "CN=Microsoft ID Verified Code Signing PCA 2021, O=Microsoft Corporation, C=US",
+        "subject_cn": "Microsoft ID Verified Code Signing PCA 2021",
+        "issuer": "CN=Microsoft Identity Verification Root Certificate Authority 2020, O=Microsoft Corporation, C=US",
+        "issuer_cn": "Microsoft Identity Verification Root Certificate Authority 2020",
+        "serial_number": "330000000787A334A37BA58E1C000000000007",
+        "thumbprint": "8E750F459DAF9A79D6370DB747AD2226866AD818",
+        "md5_fingerprint": "01f8f619255cb2090ece811ab65d88ce",
+        "sha1_fingerprint": "8e750f459daf9a79d6370db747ad2226866ad818",
+        "sha256_fingerprint": "3d29798cc5d3f0644a7e0dc9cb1cade523ea5ec83b335109b605bfeaa7d5f5c1",
+        "tbs_sha1": "4f59e4d45f218b6495b4472b6b629b8ea1e4eaee",
+        "tbs_sha256": "33100df4cadaab7a1d369e1fef6c97d865bfb5039387c6bc886e7245bafc5bb8",
+        "not_before": "2021-04-01T20:05:20.0000000Z",
+        "not_after": "2036-04-01T20:15:20.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [
+          "http://www.microsoft.com/pkiops/crl/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt"
+        ],
+        "ocsp_urls": [
+          "http://oneocsp.microsoft.com/ocsp"
+        ]
+      },
+      {
+        "subject": "CN=Microsoft Identity Verification Root Certificate Authority 2020, O=Microsoft Corporation, C=US",
+        "subject_cn": "Microsoft Identity Verification Root Certificate Authority 2020",
+        "issuer": "CN=Microsoft Identity Verification Root Certificate Authority 2020, O=Microsoft Corporation, C=US",
+        "issuer_cn": "Microsoft Identity Verification Root Certificate Authority 2020",
+        "serial_number": "5498D2D1D45B1995481379C811C08799",
+        "thumbprint": "F40042E2E5F7E8EF8189FED15519AECE42C3BFA2",
+        "md5_fingerprint": "be954f16012122448ca8bc279602acf5",
+        "sha1_fingerprint": "f40042e2e5f7e8ef8189fed15519aece42c3bfa2",
+        "sha256_fingerprint": "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270",
+        "tbs_sha1": "a6a068b26a0feb4f95675d1a95b4c92eba9cd265",
+        "tbs_sha256": "a9062454a2789bf77b7734c53721644a21ed4a34d44777406612db4987461222",
+        "not_before": "2020-04-16T18:36:16.0000000Z",
+        "not_after": "2045-04-16T18:44:40.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [],
+        "ca_issuer_urls": [],
+        "ocsp_urls": []
+      }
+    ]
+  },
+  "graveyard": {
+    "hit": true,
+    "matched_on": "cert_tbs_sha256",
+    "malware": "OysterLoader",
+    "malware_type": ""
+  },
+  "timestamped": true,
+  "sign_time": "2025-06-25T06:48:10.6100000Z",
+  "sign_time_verified": true,
+  "timestamper": {
+    "subject": "CN=Microsoft Public RSA Time Stamping Authority, OU=nShield TSS ESN:491A-05E0-D947, OU=Microsoft Ireland Operations Limited, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+    "subject_cn": "Microsoft Public RSA Time Stamping Authority",
+    "issuer": "CN=Microsoft Public RSA Timestamping CA 2020, O=Microsoft Corporation, C=US",
+    "issuer_cn": "Microsoft Public RSA Timestamping CA 2020",
+    "serial_number": "330000004EA3C60E3E31C3742700000000004E",
+    "thumbprint": "932991FBEFC8C69DBF2D1E24AAB94D4292EA0619",
+    "md5_fingerprint": "1a2599856cd0276ffbd76145af3b50c3",
+    "sha1_fingerprint": "932991fbefc8c69dbf2d1e24aab94d4292ea0619",
+    "sha256_fingerprint": "6fb2a7d3ef28051db0defd38f74029f6e491c3b94860cad34f45bebbff964a17",
+    "tbs_sha1": "3489f51e3ea0cacaffd0db7e5564b2c816760c7a",
+    "tbs_sha256": "3d9b5ef99482fa2bb4e7be2627e8cbc467bca91568d6f3c5e74a74006c9300cf",
+    "not_before": "2025-02-27T19:40:17.0000000Z",
+    "not_after": "2026-02-26T19:40:17.0000000Z",
+    "eku": [
+      "1.3.6.1.5.5.7.3.8"
+    ],
+    "eku_codesigning": false,
+    "self_signed": false,
+    "crl_urls": [
+      "http://www.microsoft.com/pkiops/crl/Microsoft%20Public%20RSA%20Timestamping%20CA%202020.crl"
+    ],
+    "ca_issuer_urls": [
+      "http://www.microsoft.com/pkiops/certs/Microsoft%20Public%20RSA%20Timestamping%20CA%202020.crt"
+    ],
+    "ocsp_urls": []
+  },
+  "ms": 2054
+}

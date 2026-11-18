@@ -20,10 +20,11 @@ from pathlib import Path
 
 from blastbox.host.jobs.base import Job, JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
+from .revocation import verdict_cert_tbs, verdict_revocation, verdict_status
 from .knobs import ENGINE, upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
@@ -43,6 +44,43 @@ def _warnings(job: Job) -> list[str]:
     return (job.result_summary or {}).get("warnings") or []
 
 
+def _summary(job: Job) -> dict:
+    """The job's result_summary with the engine's revocation-aware fields present. A row written before the pool-manager
+    recorded them (status / myatg_status / revocation) gets the engine's rule applied to its stored raw verdict, so no door
+    shows myatg's bare Valid for a verdict whose revocation went unchecked."""
+    rs = dict(job.result_summary or {})
+    v = rs.get("verdict") or {}
+    if v and not rs.get("status"):
+        rs["status"] = verdict_status(v)
+        rs["myatg_status"] = v.get("status")
+        rs["revocation"] = verdict_revocation(v)
+    return rs
+
+
+def _status(job: Job) -> str | None:
+    """The engine's revocation-aware status (ValidRevocationUnchecked where myatg said Valid without checking revocation)."""
+    return _summary(job).get("status")
+
+
+# The per-job knobs this door accepts, as form fields, and their vocabulary (engine.KNOB_VALUES; the ingress does not
+# import the engine, whose module pulls in the VM pool). The pool-manager's engine re-validates them (precheck).
+_PARAM_FIELDS = {"rev": ("AUTHENTICODE_REV", ("online", "offline", "none")),
+                 "scripts": ("AUTHENTICODE_SCRIPTS", ("ps", "native"))}
+
+
+def _job_params(**given: str) -> dict[str, str]:
+    out = {}
+    for name, value in given.items():
+        key, allowed = _PARAM_FIELDS[name]
+        v = (value or "").strip()
+        if not v:
+            continue
+        if v not in allowed:
+            raise HTTPException(status_code=400, detail=f"{name}={v[:200]!r} is not one of {'|'.join(allowed)}")
+        out[key] = v
+    return out
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok", "store": type(_store).__name__,
@@ -50,13 +88,17 @@ def healthz() -> dict:
 
 
 @app.post("/scan", status_code=202)
-async def scan(file: UploadFile = File(...)) -> dict:
+async def scan(file: UploadFile = File(...), rev: str = Form(""), scripts: str = Form("")) -> dict:
+    """``rev`` (online|offline|none) and ``scripts`` (ps|native) set this job's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS;
+    blank = the pool-manager's environment. An unknown value is a 400 before anything is spooled."""
+    params = _job_params(rev=rev, scripts=scripts)
     name = Path(file.filename or "input").name
     if not name or name in (".", "..") or "\x00" in name:   # '.', '..' and '/' have an empty basename (the spool path would be the input DIRECTORY); a NUL made open() raise ValueError as a 500 with a rowless dir left behind
         raise HTTPException(status_code=400, detail="filename has no usable name")
     if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX: the open() would fail with ENAMETOOLONG as a 500, leaving a rowless job dir per request
         raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
     job = Job.new(engine=ENGINE, filename=name)
+    job.params = params
     job.result_dir = str(JOB_ROOT / job.job_id)
     indir = Path(job.result_dir) / "input"
     indir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +149,10 @@ def scan_status(job_id: str) -> dict:
     job = _store.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    return job.to_public_dict()
+    d = job.to_public_dict()
+    if job.result_summary:
+        d["result_summary"] = _summary(job)
+    return d
 
 
 @app.get("/jobs")
@@ -115,8 +160,10 @@ def jobs(limit: int = 80) -> dict:
     out = []
     for j in _store.list(limit=min(max(limit, 1), 500), newest_first=True):
         v = _verdict(j)
+        rs = _summary(j)
         out.append({"job_id": j.job_id, "filename": j.filename, "status": j.status.value,
-                    "verdict": v.get("status"), "signature_type": v.get("signature_type"),
+                    "verdict": rs.get("status"), "myatg_status": rs.get("myatg_status"),
+                    "revocation": rs.get("revocation"), "signature_type": v.get("signature_type"),
                     "graveyard_hit": "graveyard_hit" in _warnings(j)})
     return {"jobs": out}
 
@@ -133,15 +180,10 @@ def cert(tbs_sha256: str) -> dict:
             break
         scanned += 1
         v = _verdict(j)
-        certs = []
-        s = v.get("signer") or {}
-        if s.get("tbs_sha256"):
-            certs.append(s["tbs_sha256"].lower())
-        for c in (v.get("chain") or {}).get("chain") or []:
-            if c.get("tbs_sha256"):
-                certs.append(c["tbs_sha256"].lower())
-        if tbs in certs:
-            hits.append({"job_id": j.job_id, "filename": j.filename, "status": v.get("status")})
+        if "file_sha256_mismatch" in _warnings(j):   # the engine refused this verdict: it is about other bytes
+            continue
+        if tbs in verdict_cert_tbs(v):
+            hits.append({"job_id": j.job_id, "filename": j.filename, "status": _status(j)})
     # the bound is part of the answer: an older sighting past the window must not read as "never seen"
     return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": truncated}
 
@@ -172,7 +214,7 @@ INDEX_HTML = r"""<!doctype html>
   .job:hover{border-color:var(--acc)} .job .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
   .Valid{background:#1c3a25;color:#5ee08a} .Revoked,.Distrusted,.failed{background:#3a1c1f;color:#ff7b7b}
-  .UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
+  .ValidRevocationUnchecked,.UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
   .NotSigned,.queued,.running,.unknown,.done{background:#2b3543;color:#9fb0c3}
   table{width:100%;border-collapse:collapse} td{padding:4px 8px;vertical-align:top;border-top:1px solid var(--line)}
   td.k{color:var(--mut);width:160px;white-space:nowrap} .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
@@ -231,17 +273,19 @@ function certRow(c){const cn=c.subject_cn||c.subject||'—';
 function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[];
   if(j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)} <span class="muted">validating…</span>`;return;}
+  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
+    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)}
     <div class="muted" style="margin-top:8px">${esc(j.error||'no verdict')}</div>`;return;}
-  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
-  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(v.status)}
+  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=rs.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
+  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
-    ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
+    ${('content_verified' in rec?rec.content_verified:v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
   if(gv&&(gv.hit||gv.malware)) h+=`<div class="gv"><b>cert-graveyard hit</b> ${gv.matched_on?'· matched on '+esc(gv.matched_on):''}
     <div>${esc(gv.malware||gv.malware_type||'')} ${gv.malware_notes?'— '+esc(gv.malware_notes):''}</div></div>`;
   h+='<table>'; const row=(k,val)=>{if(val==null||val==='')return;h+=`<tr><td class="k">${k}</td><td>${val}</td></tr>`;};
-  row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
+  row('file sha256',`<span class="mono">${esc(rec.file_sha256||j.input_sha256||'')}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
   if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);

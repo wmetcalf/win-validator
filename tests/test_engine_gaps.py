@@ -1,0 +1,930 @@
+"""The engine closes the gaps its contract used to record.
+
+* schema_version: the Record names the field set it carries.
+* status vocabulary: a status myatg prints that the engine does not know is SAID (a warning).
+* RDP verdicts: the RDP-only findings are indexed fields, and file_sha256 is the input's hash.
+* detection: the envelope's file type comes from the content, not the name alone.
+* per-job parameters: AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS are taken per job (HostRunner
+  params), validated, forwarded to the agent, recorded in the Record, and refused when bad.
+* the door summaries (pool_manager / orchestrator) carry the revocation-aware status and the
+  full warnings next to myatg's raw verdict.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import hashlib
+import io
+import json
+import threading
+import time
+from pathlib import Path
+
+import pytest
+from blastbox.limits import Limits
+
+from winval_blastbox import engine as eng
+from winval_blastbox.host_runner import HostRunner
+
+FIX = Path(__file__).parent / "fixtures" / "myatg"
+
+
+def _load(name: str) -> dict:
+    return json.loads((FIX / name).read_text())
+
+
+class _Pool:
+    """A faithful agent by default: a verdict that names a file_sha256 names the bytes it was sent (the fixtures carry the
+    real sample's hash; the tests send synthetic bytes). faithful=False replays the fixture's hash verbatim."""
+
+    def __init__(self, verdict: dict) -> None:
+        self.verdict, self.calls, self.faithful = verdict, [], True
+
+    def validate(self, path: str, params=None) -> dict:
+        self.calls.append(params)
+        v = copy.deepcopy(self.verdict)
+        if self.faithful and v.get("file_sha256") is not None:
+            v["file_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return v
+
+
+@pytest.fixture
+def pool(monkeypatch):
+    def use(verdict: dict) -> _Pool:
+        p = _Pool(verdict)
+        monkeypatch.setattr(eng, "get_pool", lambda stop_event=None: p)
+        return p
+    return use
+
+
+def _sample(tmp_path: Path, name: str = "sample.exe", data: bytes = b"MZ" + b"\0" * 62) -> Path:
+    p = tmp_path / name
+    p.write_bytes(data)
+    return p
+
+
+def _detonate(tmp_path, name="sample.exe", data=b"MZ" + b"\0" * 62):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    return eng.AuthenticodeEngine().detonate(_sample(tmp_path, name, data), out, Limits())
+
+
+# --- schema version ------------------------------------------------------------------------
+def test_record_names_its_schema_version(tmp_path, pool):
+    pool(_load("valid_script_graveyard_hit.json"))
+    assert _detonate(tmp_path).payload.fields["schema_version"] == eng.SCHEMA_VERSION == "authenticode-record/2"
+
+
+# --- status vocabulary ---------------------------------------------------------------------
+def test_known_status_carries_no_unrecognised_warning(tmp_path, pool):
+    pool(_load("untrusted_root.json"))
+    assert "status_unrecognized" not in {w.code for w in _detonate(tmp_path).warnings}
+
+
+def test_unknown_status_is_said(tmp_path, pool):
+    v = _load("untrusted_root.json")
+    v["status"] = "Incompatible"   # MapPs passes an unmapped PowerShell status through verbatim
+    pool(v)
+    r = _detonate(tmp_path)
+    assert r.payload.fields["status"] == "Incompatible"
+    w = [w for w in r.warnings if w.code == "status_unrecognized"]
+    assert len(w) == 1 and "Incompatible" in w[0].message
+
+
+@pytest.mark.parametrize("status", sorted(eng.MYATG_STATUSES))
+def test_every_known_status_is_a_contract_detection(status):
+    toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
+    assert f'code = "authenticode.status.{status}"' in toml
+
+
+# --- RDP shape -----------------------------------------------------------------------------
+def test_rdp_findings_are_indexed_and_the_file_is_hashed(tmp_path, pool):
+    v = _load("rdp_expired.json")
+    v["unsigned_dangerous"] = ["full address", "alternate shell"]
+    pool(v)
+    data = b"full address:s:10.0.0.1\r\nsignscope:s:Full Address\r\n"
+    v["file"] = "myatg_0123456789abcdef0123456789abcdef.rdp"   # the --serve-http agent names its upload temp file
+    f = _detonate(tmp_path, "invite.rdp", data).payload.fields
+    assert f["file_sha256"] == hashlib.sha256(data).hexdigest()
+    assert f["rdp_file_name"] == "invite.rdp"   # the submitted name, not the agent's temp name
+    assert (f["rdp_signscope_count"], f["rdp_total_settings"], f["rdp_unsigned_settings"]) == (26, 51, 25)
+    assert json.loads(f["rdp_unsigned_dangerous"]) == ["full address", "alternate shell"]
+
+
+def test_a_matching_myatg_hash_raises_no_warning(tmp_path, pool):
+    data = b"MZ" + b"\0" * 62
+    v = _load("untrusted_root.json")
+    v["file_sha256"] = hashlib.sha256(data).hexdigest().upper()   # myatg's case is not significant
+    pool(v)
+    r = _detonate(tmp_path, "sample.exe", data)
+    assert r.payload.fields["file_sha256"] == hashlib.sha256(data).hexdigest()
+    assert "file_sha256_mismatch" not in [w.code for w in r.warnings]
+    assert r.payload.fields["rdp_unsigned_dangerous"] is None and r.payload.fields["rdp_file_name"] is None
+
+
+# --- detection by content ------------------------------------------------------------------
+def _ole(root_clsid: bytes, dir_sect: int = 0) -> bytes:
+    """A minimal OLE compound file (512-byte sectors, first directory sector 0) whose root entry carries `root_clsid`.
+    An MSI's root CLSID is {000C1084-...}; a Word .doc's is {00020906-...}: the OLE magic alone cannot tell them apart."""
+    hdr = bytearray(512)
+    hdr[:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    hdr[0x1E:0x20] = (9).to_bytes(2, "little")     # sector shift: 512
+    hdr[0x30:0x34] = dir_sect.to_bytes(4, "little")   # first directory sector
+    root = bytearray(128)
+    root[0x50:0x60] = root_clsid
+    return bytes(hdr) + b"\0" * (512 * dir_sect) + bytes(root) + b"\0" * 384
+
+
+@pytest.mark.parametrize("name,data,label", [
+    ("innocent.txt", b"MZ\x90\x00" + b"\0" * 60, "pe"),
+    ("x.exe", _ole(b"\x84\x10\x0c\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"), "msi"),
+    ("x.doc", _ole(b"\x06\x09\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"), "ole"),
+    ("x.bin", _ole(b"\x84\x10\x0c\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46", dir_sect=20), "msi"),
+    ("x.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "msi"),
+    ("a.ps1", b"Set-Content x.rdp -Value 'full address:s:evil'\r\n", "script"),
+    ("b.rdp", b"\xff\xfe" + "screen mode id:i:2\r\nfull address:s:host\r\n".encode("utf-16-le"), "rdp"),
+    ("c.bin", b"\xef\xbb\xbffull address:s:host\r\nscreen mode id:i:2\r\n", "rdp"),
+    ("d.bin", b"\xfe\xff" + "screen mode id:i:2\r\nfull address:s:host\r\n".encode("utf-16-be"), "rdp"),
+    ("x.bin", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "ole"),
+    ("x.cab", b"MSCF\0\0\0\0" + b"\0" * 56, "cab"),
+    ("x.bin", b"\x30\x82\x01\x00\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02", "catalog"),
+    ("a.rdp", b"screen mode id:i:2\r\nfull address:s:host\r\n", "rdp"),
+    ("a.ps1", b"Write-Host hi\r\n", "script"),
+    ("noext", b"\x01\x02\x03\x04", "binary"),
+])
+def test_detected_from_content(tmp_path, name, data, label):
+    d = eng.AuthenticodeEngine().detect(_sample(tmp_path, name, data))
+    assert d.label == label
+
+
+def test_a_pe_named_rdp_is_a_pe(tmp_path):
+    d = eng.AuthenticodeEngine().detect(_sample(tmp_path, "evil.rdp", b"MZ" + b"\0" * 62))
+    assert d.label == "pe" and d.source == "authenticode:magic"
+
+
+def test_extension_only_guess_is_low_confidence(tmp_path):
+    d = eng.AuthenticodeEngine().detect(_sample(tmp_path, "a.vbs", b"MsgBox 1\r\n"))
+    assert d.source == "authenticode:extension" and d.confidence < 1.0
+
+
+# --- per-job parameters --------------------------------------------------------------------
+def test_job_params_are_forwarded_and_recorded(tmp_path, pool):
+    p = pool(_load("valid_script_graveyard_hit.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(
+        _sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "offline", "AUTHENTICODE_SCRIPTS": "ps"})
+    assert env["status"] == "ok"
+    assert p.calls == [{"rev": "offline", "scripts": "ps"}]
+    f = env["payload"]["fields"]
+    assert (f["param_rev"], f["param_scripts"]) == ("offline", "ps")
+
+
+def test_job_params_override_the_environment(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_REV", "online")
+    p = pool(_load("valid_script_graveyard_hit.json"))
+    HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "none"})
+    assert p.calls == [{"rev": "none"}]
+
+
+def test_environment_still_applies_without_job_params(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_SCRIPTS", "native")
+    p = pool(_load("valid_script_graveyard_hit.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert p.calls == [{"scripts": "native"}]
+    assert (env["payload"]["fields"]["param_rev"], env["payload"]["fields"]["param_scripts"]) == (None, "native")
+
+
+@pytest.mark.parametrize("params", [
+    {"AUTHENTICODE_REV": "cached"},
+    {"AUTHENTICODE_SCRIPTS": "true"},
+    {"AUTHENTICODE_GV": "x"},
+    {"AUTHENTICODE_REV": 1},
+])
+def test_bad_job_params_are_refused_before_the_vm(tmp_path, pool, params):
+    p = pool(_load("valid_script_graveyard_hit.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params=params)
+    assert env["status"] == "rejected"
+    assert p.calls == []
+
+
+def test_validate_job_params_normalises():
+    assert eng.validate_job_params({"AUTHENTICODE_REV": " offline ", "AUTHENTICODE_SCRIPTS": ""}) == {"AUTHENTICODE_REV": "offline"}
+    assert eng.validate_job_params(None) == {}
+    with pytest.raises(ValueError):
+        eng.validate_job_params({"AUTHENTICODE_REV": "cached"})
+
+
+def test_job_params_do_not_leak_between_threads(tmp_path, pool, monkeypatch):
+    monkeypatch.delenv("AUTHENTICODE_REV", raising=False)   # the env is the fallback the last assert reads
+    pool(_load("valid_script_graveyard_hit.json"))
+    seen = {}
+    barrier = threading.Barrier(2)
+
+    def run(tag, rev):
+        with eng.job_params({"AUTHENTICODE_REV": rev}):
+            barrier.wait()
+            seen[tag] = eng.effective_knobs()["AUTHENTICODE_REV"]
+
+    ts = [threading.Thread(target=run, args=("a", "online")), threading.Thread(target=run, args=("b", "none"))]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert seen == {"a": "online", "b": "none"}
+    assert eng.effective_knobs()["AUTHENTICODE_REV"] == ""
+
+
+# --- door summaries ------------------------------------------------------------------------
+def _envelope(tmp_path, pool, verdict, monkeypatch=None):
+    pool(verdict)
+    return HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+
+
+def _unchecked_valid():
+    v = _load("valid_script_graveyard_hit.json")
+    v["chain"]["revocation_checked"] = "unknown"
+    return v
+
+
+@pytest.mark.parametrize("door", ["pool_manager", "orchestrator"])
+def test_door_summary_is_revocation_aware(tmp_path, pool, door):
+    env = _envelope(tmp_path, pool, _unchecked_valid())
+    if door == "pool_manager":
+        from winval_blastbox.pool_manager import _extract_verdict as summarize
+    else:
+        from winval_blastbox.orchestrator import _authenticode_verdict as summarize
+    s = summarize(env)
+    assert s["status" if door == "pool_manager" else "verdict_status"] == "ValidRevocationUnchecked"
+    assert s["myatg_status"] == "Valid" and s["verdict"]["status"] == "Valid"   # myatg's raw verdict alongside
+    assert s["revocation"] == "unchecked"
+    assert "graveyard_hit" in s["warnings"]   # codes, as before
+    gv = [w for w in s["warning_details"] if w["code"] == "graveyard_hit"]
+    assert gv and "matched_on=" in gv[0]["message"]
+
+
+@pytest.mark.parametrize("envelope_status,pane_status", [("ok", "done"), ("engine_error", "error"), ("rejected", "error")])
+def test_orchestrator_pane_keeps_its_lifecycle_status(tmp_path, pool, monkeypatch, envelope_status, pane_status):
+    # the pane's `status` is its lifecycle (queued/running/done/error); the engine's revocation-aware status rides beside it
+    # and must not overwrite it (an engine_error pane read status=None, a Valid one read 'Valid' instead of 'done')
+    import winval_blastbox.orchestrator as orch
+    env = _envelope(tmp_path, pool, _unchecked_valid())
+    if envelope_status != "ok":
+        env = {"status": envelope_status, "payload": {"fields": {}}, "warnings": [], "artifacts": []}
+    monkeypatch.setitem(orch.ENGINES, "authenticode", lambda p, params=None: orch._authenticode_verdict(env))
+    store = orch.JobStore(max_workers=1)
+    jid = store.create("a.exe", ["authenticode"])
+    f = tmp_path / "a.exe"
+    f.write_bytes(b"MZ")
+    store._run_inner(jid, str(f), ["authenticode"])
+    pane = store.get(jid)["engines"]["authenticode"]
+    assert pane["status"] == pane_status
+    row = store.list_jobs()[0]
+    if envelope_status == "ok":
+        assert pane["verdict_status"] == "ValidRevocationUnchecked"
+        assert row["verdict"] == "ValidRevocationUnchecked" and row["myatg_status"] == "Valid"
+    else:
+        assert row["verdict"] is None
+
+
+def _ingress(monkeypatch, tmp_path):
+    from blastbox.host.jobs.memory import InMemoryJobStore
+    import winval_blastbox.ingress as ingress
+    monkeypatch.setattr(ingress, "_store", InMemoryJobStore())
+    monkeypatch.setattr(ingress, "JOB_ROOT", tmp_path / "jobs")
+    return ingress
+
+
+def _done_job(ingress, env):
+    from blastbox.host.jobs.base import Job, JobStatus
+    from winval_blastbox.pool_manager import _extract_verdict
+    j = Job.new(engine="authenticode", filename="s.exe")
+    ingress._store.create(j)
+    ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary=_extract_verdict(env))
+    return j
+
+
+def test_ingress_lists_the_revocation_aware_status(tmp_path, pool, monkeypatch):
+    ingress = _ingress(monkeypatch, tmp_path)
+    env = _envelope(tmp_path, pool, _unchecked_valid())
+    j = _done_job(ingress, env)
+    row = ingress.jobs()["jobs"][0]
+    assert row["verdict"] == "ValidRevocationUnchecked" and row["myatg_status"] == "Valid"
+    assert row["revocation"] == "unchecked" and row["graveyard_hit"] is True
+    rs = ingress.scan_status(j.job_id)["result_summary"]
+    assert rs["status"] == "ValidRevocationUnchecked" and rs["verdict"]["status"] == "Valid"
+    tbs = env["payload"]["fields"]["signer_tbs_sha256"]
+    assert ingress.cert(tbs)["seen_in"][0]["status"] == "ValidRevocationUnchecked"
+
+
+class _Upload:
+    def __init__(self, name, data):
+        self.filename, self._f = name, io.BytesIO(data)
+
+    async def read(self, n=-1):
+        return self._f.read(n)
+
+
+def test_ingress_takes_per_job_params(tmp_path, monkeypatch):
+    ingress = _ingress(monkeypatch, tmp_path)
+    r = asyncio.run(ingress.scan(file=_Upload("a.exe", b"MZ"), rev="offline", scripts="ps"))
+    assert ingress._store.get(r["job_id"]).params == {"AUTHENTICODE_REV": "offline", "AUTHENTICODE_SCRIPTS": "ps"}
+    r = asyncio.run(ingress.scan(file=_Upload("a.exe", b"MZ"), rev="", scripts=""))
+    assert ingress._store.get(r["job_id"]).params == {}
+
+
+@pytest.mark.parametrize("rev,scripts", [("cached", ""), ("", "true")])
+def test_ingress_refuses_bad_params_before_spooling(tmp_path, monkeypatch, rev, scripts):
+    from fastapi import HTTPException
+    ingress = _ingress(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(ingress.scan(file=_Upload("a.exe", b"MZ"), rev=rev, scripts=scripts))
+    assert e.value.status_code == 400
+    assert not (tmp_path / "jobs").exists() or not any((tmp_path / "jobs").iterdir())
+
+
+def test_pool_manager_forwards_job_params(tmp_path, monkeypatch):
+    import winval_blastbox.pool_manager as pm
+    seen = {}
+
+    class _Runner:
+        def validate_to_dir(self, inp, out, params=None):
+            seen["params"] = params
+            raise RuntimeError("stop here")
+
+    from blastbox.host.jobs.base import Job, JobStatus
+    from blastbox.host.jobs.memory import InMemoryJobStore
+    root, work = tmp_path / "jobs", tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(pm, "JOB_ROOT", root)
+    monkeypatch.setattr(pm, "WORK_ROOT", work)
+    monkeypatch.setattr(pm._rel_parts, "__defaults__", (root,))
+    mgr = pm.PoolManager.__new__(pm.PoolManager)
+    mgr._store, mgr._runner = InMemoryJobStore(), _Runner()
+    j = Job.new(engine="authenticode", filename="a.exe")
+    j.params = {"AUTHENTICODE_REV": "none"}
+    j.result_dir = str(root / j.job_id)
+    (root / j.job_id / "input").mkdir(parents=True)
+    (root / j.job_id / "input" / "a.exe").write_bytes(b"MZ")
+    mgr._store.create(j)
+    mgr._store.update(j.job_id, status=JobStatus.RUNNING)
+    mgr._process(mgr._store.get(j.job_id))
+    assert seen["params"] == {"AUTHENTICODE_REV": "none"}
+
+
+def test_orchestrator_forwards_job_params(tmp_path, monkeypatch):
+    import winval_blastbox.orchestrator as orch
+    seen = {}
+    monkeypatch.setitem(orch.ENGINES, "authenticode", lambda p, params=None: seen.setdefault("params", params) and {} or {})
+    store = orch.JobStore(max_workers=1)
+    jid = store.create("a.exe", ["authenticode"])
+    f = tmp_path / "a.exe"
+    f.write_bytes(b"MZ")
+    store._run_inner(jid, str(f), ["authenticode"], {"AUTHENTICODE_SCRIPTS": "ps"})
+    assert seen["params"] == {"AUTHENTICODE_SCRIPTS": "ps"}
+
+
+def _manager_job(tmp_path, monkeypatch, runner, params):
+    import winval_blastbox.pool_manager as pm
+    from blastbox.host.jobs.base import Job, JobStatus
+    from blastbox.host.jobs.memory import InMemoryJobStore
+    root, work = tmp_path / "jobs", tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(pm, "JOB_ROOT", root)
+    monkeypatch.setattr(pm, "WORK_ROOT", work)
+    monkeypatch.setattr(pm._rel_parts, "__defaults__", (root,))
+    mgr = pm.PoolManager.__new__(pm.PoolManager)
+    mgr._store, mgr._runner = InMemoryJobStore(), runner
+    j = Job.new(engine="authenticode", filename="a.exe")
+    j.params = params
+    j.result_dir = str(root / j.job_id)
+    (root / j.job_id / "input").mkdir(parents=True)
+    (root / j.job_id / "input" / "a.exe").write_bytes(b"MZ" + b"\0" * 62)
+    mgr._store.create(j)
+    mgr._store.update(j.job_id, status=JobStatus.RUNNING)
+    mgr._process(mgr._store.get(j.job_id))
+    return mgr._store.get(j.job_id)
+
+
+def test_pool_manager_records_a_rejected_param_as_failed(tmp_path, monkeypatch, pool):
+    p = pool(_load("valid_script_graveyard_hit.json"))
+    j = _manager_job(tmp_path, monkeypatch, HostRunner(limits=Limits()), {"AUTHENTICODE_REV": "cached"})
+    assert j.status.value == "failed" and "AUTHENTICODE_REV" in (j.error or "")
+    assert j.result_summary["envelope_status"] == "rejected" and p.calls == []
+
+
+def test_pool_manager_records_the_revocation_aware_status(tmp_path, monkeypatch, pool):
+    pool(_unchecked_valid())
+    j = _manager_job(tmp_path, monkeypatch, HostRunner(limits=Limits()), {"AUTHENTICODE_REV": "online"})
+    assert j.status.value == "done"
+    assert j.result_summary["status"] == "ValidRevocationUnchecked" and j.result_summary["verdict"]["status"] == "Valid"
+
+
+@pytest.mark.parametrize("rev,scripts", [("cached", ""), ("", "1")])
+def test_orchestrator_refuses_bad_params(monkeypatch, rev, scripts):
+    from fastapi import HTTPException
+    import winval_blastbox.orchestrator as orch
+    monkeypatch.setattr(orch, "_store", object())
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(orch.scan(file=_Upload("a.exe", b"MZ"), engines="", rev=rev, scripts=scripts))
+    assert e.value.status_code == 400
+
+
+def test_ingress_param_vocabulary_is_the_engines():
+    import winval_blastbox.ingress as ingress
+    assert {k: "|".join(v) for k, v in ingress._PARAM_FIELDS.values()} == eng.KNOB_VALUES
+
+
+def test_valid_without_a_chain_reports_revocation_unchecked():
+    # myatg's scripts=ps branch can answer Valid with chain:null (PowerShell's verdict, no embedded PKCS#7 parsed): no
+    # revocation was evaluated, so the Record says `unchecked` (the contract's source for ValidRevocationUnchecked), not
+    # null (which means "no chain evaluated: NotSigned / error skeleton")
+    v = _load("valid_script_graveyard_hit.json")
+    v["chain"] = None
+    f = eng._summary(v).fields
+    assert f["status"] == "ValidRevocationUnchecked"
+    assert f["revocation"] == "unchecked"
+    n = _load("valid_script_graveyard_hit.json")
+    n["status"], n["chain"] = "NotSigned", None
+    assert eng._summary(n).fields["revocation"] is None
+
+
+def test_ingress_derives_the_revocation_aware_status_for_pre_upgrade_rows(monkeypatch, tmp_path):
+    # a row the previous pool-manager wrote has myatg's raw verdict but no engine `status`: the door applies the engine's
+    # rule to that verdict rather than showing myatg's bare Valid
+    from blastbox.host.jobs.base import Job, JobStatus
+    ingress = _ingress(monkeypatch, tmp_path)
+    v = _unchecked_valid()
+    j = Job.new(engine="authenticode", filename="old.exe")
+    ingress._store.create(j)
+    ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary={"verdict": v, "warnings": [], "envelope_status": "ok"})
+    row = ingress.jobs()["jobs"][0]
+    assert row["verdict"] == "ValidRevocationUnchecked" and row["revocation"] == "unchecked"
+    assert ingress.cert(v["signer"]["tbs_sha256"])["seen_in"][0]["status"] == "ValidRevocationUnchecked"
+    rs = ingress.scan_status(j.job_id)["result_summary"]   # the detail view the UI renders from
+    assert rs["status"] == "ValidRevocationUnchecked" and rs["revocation"] == "unchecked"
+    assert rs["myatg_status"] == "Valid"
+
+
+def test_door_summary_records_the_knobs_the_verdict_was_computed_under(tmp_path, pool):
+    # the door shows which rev/scripts applied (Job.params is stripped from the public job), so a client that misnamed a
+    # form field can see its value did not apply
+    pool(_unchecked_valid())
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "none"})
+    s = eng.summarize_envelope(env)
+    assert s["param_rev"] == "none"
+    assert "param_scripts" in s
+
+
+def test_an_unknown_env_knob_never_leaves_the_engine_raw(tmp_path, pool, monkeypatch):
+    # an unclosed quote in the env file hands systemd the REST of the file as the value: it must reach neither the guest VM
+    # (the agent query), nor the Record / door summary, nor a warning beyond a short first-line prefix
+    secret = "S3CRET"
+    monkeypatch.setenv("AUTHENTICODE_REV", f'"online\nBLASTBOX_DATABASE_URL=postgresql://winval:{secret}@127.0.0.1/winval')
+    monkeypatch.setenv("AUTHENTICODE_SCRIPTS", "powershell")
+    p = pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert p.calls[-1] == {"rev": "online", "scripts": "native"}   # what the agent would have read them as, sent explicitly
+    s = eng.summarize_envelope(env)
+    assert (s["param_rev"], s["param_scripts"]) == ("online", "native")
+    assert secret not in json.dumps(env)
+    assert "param_unknown_value" in s["warnings"]
+
+
+@pytest.mark.parametrize("where", ["status", "graveyard"])
+def test_hostile_strings_in_the_verdict_cannot_overflow_a_warning(tmp_path, pool, where):
+    # repr() of an astral code point is ten characters: a 200-char cap on the VALUE does not keep the MESSAGE under the
+    # contract's 2000, and an over-long message made BbWarning raise -> engine_error and the verdict dropped
+    v = _load("valid_script_graveyard_hit.json")
+    if where == "status":
+        v["status"] = chr(0xE0001) * 200
+    else:
+        v["graveyard"] = {"hit": True, "matched_on": "x" * 3000, "malware": "y" * 3000}
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+    assert all(len(w["message"]) <= 2000 for w in env["warnings"])
+
+
+def test_orchestrator_hands_the_engine_the_submitted_filename_and_cleans_up(monkeypatch):
+    # rdp_file_name (and myatg's own routing on the extension) see the path's basename: it must be the client's name, not
+    # scan-<random>-name; the private spool dir goes with the file
+    import os
+    import winval_blastbox.orchestrator as orch
+    seen = {}
+
+    def runner(p, params=None):
+        seen["name"], seen["dir"] = os.path.basename(p), os.path.dirname(p)
+        return {}
+    monkeypatch.setitem(orch.ENGINES, "authenticode", runner)
+    store = orch.JobStore(max_workers=1)
+    monkeypatch.setattr(orch, "_store", store)
+    r = asyncio.run(orch.scan(file=_Upload("invite.rdp", b"full address:s:h\r\n"), engines="", rev="", scripts=""))
+    deadline = time.time() + 10
+    while store.get(r["job_id"])["status"] != "done" and time.time() < deadline:
+        time.sleep(0.05)
+    assert seen["name"] == "invite.rdp"
+    assert not os.path.exists(seen["dir"])
+
+
+def test_a_knob_value_spanning_lines_is_not_shown(monkeypatch):
+    # AUTHENTICODE_REV=" at the end of its line: systemd's value is '\n<the next lines>'; strip() made the NEXT assignment the
+    # "first line" shown in every verdict's warning
+    monkeypatch.setenv("AUTHENTICODE_REV", "\nPGPASSWORD=S3CRET-hunter2\nOTHER=1")
+    msgs = [w.message for w in eng.knob_warnings()]
+    assert msgs and not any("S3CRET" in m or "PGPASSWORD" in m for m in msgs)
+
+
+@pytest.mark.parametrize("where", ["signer", "graveyard"])
+def test_a_lone_surrogate_in_the_verdict_does_not_drop_it(tmp_path, pool, where):
+    v = _load("valid_script_graveyard_hit.json")
+    if where == "signer":
+        v["signer"]["subject_cn"] = "Contoso\ud800"
+    else:
+        v["graveyard"] = {"hit": True, "matched_on": "E\ud800", "malware": "M"}
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+
+
+def test_every_warning_code_the_engine_emits_is_named_by_the_contract_without_the_checker():
+    # runs on a released blastbox too (the contract module test is skipped there): pure text over the source and the toml
+    import re
+    src = Path(eng.__file__).read_text()
+    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z0-9_]+)"', src))
+    toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
+    declared = set(re.findall(r"warnings\[\]\.code == '([a-z0-9_]+)'", toml))
+    assert emitted and emitted <= declared, emitted - declared
+
+
+@pytest.mark.parametrize("value", ["onlinePGPASSWORD=S3CRET-hunter2", "online\\", "\"online", "x" * 17])
+def test_only_a_short_plain_knob_token_is_echoed(monkeypatch, value):
+    # a backslash-newline continuation joins the NEXT env-file line onto the value with no newline left in it
+    monkeypatch.setenv("AUTHENTICODE_REV", value)
+    msgs = [w.message for w in eng.knob_warnings()]
+    assert msgs and not any(value in m or "S3CRET" in m for m in msgs)
+    monkeypatch.setenv("AUTHENTICODE_REV", "onlin")
+    assert "'onlin'" in eng.knob_warnings()[0].message   # a plain typo is still named
+
+
+@pytest.mark.parametrize("status", [["Valid"], {"x": 1}])
+def test_an_unhashable_status_is_passed_through_not_engine_error(tmp_path, pool, status):
+    v = _load("untrusted_root.json")
+    v["status"] = status
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+    assert "status_unrecognized" in [w["code"] for w in env["warnings"]]
+
+
+def test_a_non_string_tbs_in_one_row_does_not_break_cert_lookups(monkeypatch, tmp_path):
+    import winval_blastbox.orchestrator as orch
+    from blastbox.host.jobs.base import Job, JobStatus
+    good = "ab" * 32
+    s = orch.JobStore(1)
+    for verdict in ({"signer": {"tbs_sha256": 1}, "chain": {"chain": [1, {"tbs_sha256": None}]}},
+                    {"signer": {"tbs_sha256": good.upper()}}):
+        j = s.create("p.exe", ["authenticode"])
+        s._update_engine(j, "authenticode", {"verdict": verdict})
+    assert len(s.cert_lookup(good)) == 1
+    ingress = _ingress(monkeypatch, tmp_path)
+    for verdict in ({"signer": "x", "chain": {"chain": [{"tbs_sha256": ["a"]}]}}, {"signer": {"tbs_sha256": good}}):
+        jj = Job.new(engine="authenticode", filename="p.exe")
+        ingress._store.create(jj)
+        ingress._store.update(jj.job_id, status=JobStatus.DONE, result_summary={"verdict": verdict})
+    assert len(ingress.cert(good)["seen_in"]) == 1
+
+
+@pytest.mark.parametrize("params", [{"X" * 3000: "online"}, {"AUTHENTICODE_REV": chr(0xE0001) * 200}])
+def test_a_precheck_reason_fits_a_warning(params):
+    # a harness that calls precheck() seals the reason as Warning(message=...), capped at 2000
+    from blastbox.contract import Warning as W
+    token = eng._JOB_PARAMS.set(params)
+    try:
+        r = eng.AuthenticodeEngine().precheck(Limits())
+    finally:
+        eng._JOB_PARAMS.reset(token)
+    assert r and len(r) <= 2000
+    W(code="precheck_rejected", message=r)
+
+
+def test_a_one_argument_engine_runner_still_runs(tmp_path, monkeypatch):
+    import winval_blastbox.orchestrator as orch
+    monkeypatch.setitem(orch.ENGINES, "ember", lambda p: {"verdict": {"status": "x"}})
+    store = orch.JobStore(max_workers=1)
+    jid = store.create("a.exe", ["ember"])
+    f = tmp_path / "a.exe"
+    f.write_bytes(b"MZ")
+    store._run_inner(jid, str(f), ["ember"], {"AUTHENTICODE_REV": "none"})
+    assert store.get(jid)["engines"]["ember"]["status"] == "done"
+
+
+@pytest.mark.parametrize("field,value", [("graveyard", True), ("chain", "x"), ("signer", ["a"]), ("timestamper", 1)])
+def test_a_non_dict_sub_object_does_not_drop_the_verdict(tmp_path, pool, field, value):
+    v = _load("untrusted_root.json")
+    v[field] = value
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+
+
+def test_rdp_signature_answers_are_indexed():
+    # rdp_validate.cs answers under chain (signature_valid / sign_time_verified / sign_time), not at the top level
+    v = _load("rdp_expired.json")
+    f = eng._summary(v).fields
+    assert f["content_verified"] is True and f["sign_time_verified"] is False
+
+
+def test_an_engine_error_message_is_not_published_by_a_door(tmp_path, monkeypatch):
+    # the harness's engine_error message is str(exception) from the VM/transport layer (internal IPs, domain names); the
+    # doors' summaries carry messages only for the warnings the engine itself writes
+    def boom(stop_event=None):
+        raise RuntimeError("agent 192.168.122.57:8765 on winval-w2 refused")
+    monkeypatch.setattr(eng, "get_pool", boom)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "engine_error"
+    s = eng.summarize_envelope(env)
+    assert "192.168" not in json.dumps(s["warning_details"])
+    assert s["warnings"]   # the code still says what happened
+
+
+def test_the_published_warning_codes_are_every_code_the_engine_writes():
+    import re
+    src = Path(eng.__file__).read_text()
+    assert set(re.findall(r'BbWarning\(\s*code="([a-z0-9_]+)"', src)) == eng.ENGINE_WARNING_CODES
+
+
+@pytest.mark.parametrize("value", [1, True, "abc", {"a": 1}])
+def test_a_non_list_chain_chain_does_not_drop_the_verdict(tmp_path, pool, value):
+    v = _load("untrusted_root.json")
+    v["chain"]["chain"] = value
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+
+
+def test_the_host_hash_is_authoritative_over_the_guests(tmp_path, pool):
+    # the guest is untrusted (the sample may own the VM): a wrong file_sha256 from it must not attribute the verdict to other
+    # bytes; the engine's own hash wins and the disagreement is a warning
+    v = _load("untrusted_root.json")
+    v["file_sha256"] = "0" * 64
+    pool(v).faithful = False
+    data = b"MZ" + b"\0" * 62
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "s.exe", data), tmp_path / "out")
+    assert env["payload"]["fields"]["file_sha256"] == hashlib.sha256(data).hexdigest()
+    assert "file_sha256_mismatch" in [w["code"] for w in env["warnings"]]
+
+
+def test_a_keyword_only_params_runner_gets_the_params():
+    import winval_blastbox.orchestrator as orch
+    got = orch._call_runner(lambda path, *, params=None: {"params": params}, "x.exe", {"AUTHENTICODE_REV": "none"})
+    assert got == {"params": {"AUTHENTICODE_REV": "none"}}
+
+
+@pytest.mark.parametrize("verdict", [
+    {"file": "myatg_0123.rdp", "status": "NotSigned"},
+    {"file": "myatg_0123.rdp", "status": "UnknownError", "signature_type": "RDP", "error": "rdp file too large",
+     "signer": None, "chain": None},
+])
+def test_rdp_early_return_shapes_are_rdp_verdicts(tmp_path, pool, verdict):
+    # rdp_validate.cs's unsigned and oversize returns carry no signscope_count; they are still RDP verdicts
+    pool(verdict)
+    f = _detonate(tmp_path, "invite.rdp", b"full address:s:h\r\n").payload.fields
+    assert f["rdp_file_name"] == "invite.rdp"
+
+
+def test_the_door_summary_carries_the_record(tmp_path, pool):
+    # the doors publish summarize_envelope only: the Record's engine-side fields (rdp_*, the engine's file_sha256,
+    # signer_self_signed, ...) must reach an HTTP client, minus the verbatim verdict already under `verdict`
+    v = _load("rdp_expired.json")
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "invite.rdp", b"full address:s:h\r\n"), tmp_path / "out")
+    s = eng.summarize_envelope(env)
+    assert s["record"]["rdp_file_name"] == "invite.rdp"
+    assert s["record"]["content_verified"] is True
+    assert len(s["record"]["file_sha256"]) == 64
+    assert "authenticode_json" not in s["record"]
+
+
+def test_a_hash_mismatch_does_not_publish_the_guests_status(tmp_path, pool):
+    # the guest validated OTHER bytes (or lied): its Valid must not be attributed to the submitted file
+    v = _load("valid_script_graveyard_hit.json")
+    v["chain"]["revocation_checked"] = "online"
+    v["file_sha256"] = "ab" * 32
+    pool(v).faithful = False
+    f = _detonate(tmp_path).payload.fields
+    assert f["status"] == "UnknownError" and f["myatg_status"] == "Valid"
+    assert "file_sha256" in (f["error"] or "")
+
+
+@pytest.mark.parametrize("revoked", [1, "true", "yes", [True]])
+def test_a_non_boolean_revoked_flag_is_not_checked_good(revoked):
+    from winval_blastbox.revocation import verdict_status
+    v = {"status": "Valid", "chain": {"revoked": revoked, "revocation_checked": "online"}}
+    assert verdict_status(v) != "Valid"
+
+
+def test_a_runner_whose_second_argument_is_not_params_keeps_its_default():
+    import winval_blastbox.orchestrator as orch
+    assert orch._call_runner(lambda path, timeout=60: {"timeout": timeout}, "x", {"AUTHENTICODE_REV": "none"}) == {"timeout": 60}
+    assert orch._call_runner(lambda path, **kw: kw, "x", {"AUTHENTICODE_REV": "none"}) == {"params": {"AUTHENTICODE_REV": "none"}}
+
+
+def test_a_non_hex_guest_hash_is_not_echoed(tmp_path, pool):
+    v = _load("untrusted_root.json")
+    v["file_sha256"] = "<script>alert(1)</script>"
+    pool(v).faithful = False
+    r = _detonate(tmp_path)
+    msgs = [w.message for w in r.warnings if w.code == "file_sha256_mismatch"]
+    assert msgs and "<script>" not in msgs[0]
+
+
+def test_an_engine_error_record_is_not_published(tmp_path, monkeypatch):
+    # the harness seals engine_error with payload.fields {error: str(exception)}: the same infrastructure text warning_details
+    # hides must not ride in `record`
+    def boom(stop_event=None):
+        raise RuntimeError("agent 192.168.122.57:8765 on winval-w2 refused")
+    monkeypatch.setattr(eng, "get_pool", boom)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert "192.168" not in json.dumps(eng.summarize_envelope(env))
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_detail_view_shows_the_engines_hash_and_content_flag(door):
+    # the guest's file_sha256 is untrusted; the detail view renders the Record's
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "v.file_sha256" not in html and "record" in html
+    assert "v.content_verified===false" not in html
+
+
+def test_an_operator_can_lock_the_knobs_against_per_job_values(tmp_path, pool, monkeypatch):
+    # AUTHENTICODE_LOCK_PARAMS=1: the operator's rev/scripts are not overridable per job (a client could otherwise turn the
+    # guest's CRL/OCSP fetches back on); a per-job value is refused, not silently replaced
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "1")
+    monkeypatch.setenv("AUTHENTICODE_REV", "offline")
+    p = pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "online"})
+    assert env["status"] == "rejected" and not p.calls
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out2")
+    assert env["status"] == "ok" and p.calls[-1] == {"rev": "offline"}
+
+
+@pytest.mark.parametrize("revoked", [0, 0.0])
+def test_a_numeric_zero_revoked_is_not_an_explicit_false(revoked):
+    from winval_blastbox.revocation import verdict_status
+    assert verdict_status({"status": "Valid", "chain": {"revoked": revoked, "revocation_checked": "online"}}) != "Valid"
+
+
+def test_a_hash_mismatch_publishes_nothing_else_from_the_guests_verdict(tmp_path, pool):
+    v = _load("valid_script_graveyard_hit.json")
+    v["file_sha256"] = "ab" * 32
+    pool(v).faithful = False
+    r = _detonate(tmp_path)
+    f = r.payload.fields
+    assert f["graveyard_hit"] in (None, False) and f["signer_subject_cn"] is None
+    assert "graveyard_hit" not in [w.code for w in r.warnings]
+    assert f["myatg_status"] == v["status"]
+
+
+def test_a_non_finite_float_from_the_guest_is_not_published():
+    import math
+    v = json.loads('{"status":"Valid","signer":{"subject_cn":NaN},"chain":{"revoked":false,"revocation_checked":"online"}}')
+    f = eng._summary(v).fields
+    json.dumps(f, allow_nan=False)
+    assert not any(isinstance(x, float) and not math.isfinite(x) for x in f.values())
+
+
+def test_a_malformed_lock_setting_is_refused_on_every_job(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "rejected"
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_content_flag_falls_back_to_the_stored_verdict(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "('content_verified' in rec?rec.content_verified:v.content_verified)===false" in html
+
+
+def test_a_malformed_lock_value_is_never_echoed(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", '"1\nBLASTBOX_DATABASE_URL=postgresql://winval:S3CRET@127.0.0.1/winval')
+    pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "online"})
+    assert env["status"] == "rejected" and "S3CRET" not in json.dumps(env)
+    with pytest.raises(ValueError) as e:
+        eng.params_locked()
+    assert "S3CRET" not in str(e.value)
+
+
+def test_a_malformed_lock_value_fails_the_warmup(monkeypatch):
+    # refused at pool start, like the other strict booleans, not first on a client's job
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    monkeypatch.setattr(eng, "get_pool", lambda stop_event=None: None)
+    with pytest.raises(ValueError):
+        eng.AuthenticodeEngine().warmup()
+
+
+def test_a_revoked_chain_is_a_detection_whatever_the_status():
+    toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
+    assert 'code = "authenticode.revocation.revoked"' in toml
+    assert "payload.fields.revocation == 'revoked'" in toml
+
+
+def test_cert_lookup_skips_a_verdict_the_engine_refused(monkeypatch, tmp_path):
+    # a file_sha256 mismatch means the guest's verdict (and its signer) is about other bytes
+    import winval_blastbox.orchestrator as orch
+    from blastbox.host.jobs.base import Job, JobStatus
+    tbs = "cd" * 32
+    verdict = {"signer": {"tbs_sha256": tbs}}
+    s = orch.JobStore(1)
+    j = s.create("p.exe", ["authenticode"])
+    s._update_engine(j, "authenticode", {"verdict": verdict, "warnings": ["file_sha256_mismatch"]})
+    assert s.cert_lookup(tbs) == []
+    ingress = _ingress(monkeypatch, tmp_path)
+    jj = Job.new(engine="authenticode", filename="p.exe")
+    ingress._store.create(jj)
+    ingress._store.update(jj.job_id, status=JobStatus.DONE,
+                          result_summary={"verdict": verdict, "warnings": ["file_sha256_mismatch"]})
+    assert ingress.cert(tbs)["seen_in"] == []
+
+
+def test_the_start_guard_refuses_a_malformed_lock_params(monkeypatch):
+    # in _refuse_open_egress (the manager's pre-orphan-recovery guard, mirrored by the rotation preflight)
+    from winval_blastbox.pool_manager import _refuse_open_egress
+    monkeypatch.setenv("AUTHENTICODE_EXIT", "none")
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "ture")
+    with pytest.raises(ValueError, match="AUTHENTICODE_LOCK_PARAMS"):
+        _refuse_open_egress(1)
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_detail_view_hides_a_refused_verdict(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "'content_verified' in rec" in html and "file_sha256_mismatch" in html
+
+
+def test_the_cli_exits_nonzero_on_a_rejected_job(tmp_path, pool, monkeypatch):
+    from winval_blastbox import host_runner
+    monkeypatch.setattr(eng.AuthenticodeEngine, "precheck", lambda self, limits: "refused")   # sealed rejected, no verdict
+    pool(_load("untrusted_root.json"))
+    monkeypatch.setattr(host_runner.HostRunner, "shutdown", lambda self: None)
+    assert host_runner.main([str(_sample(tmp_path))]) == 1
+
+
+def test_a_refused_verdict_is_not_published_by_the_doors(tmp_path, pool):
+    # file_sha256_mismatch: the door summary's `verdict` (what Loadout maps) must not carry the guest's signer / graveyard
+    v = _load("valid_script_graveyard_hit.json")
+    pool(v).faithful = False
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "benign.exe"), tmp_path / "out")
+    s = eng.summarize_envelope(env)
+    assert s["verdict"] is None and s["status"] == "UnknownError"
+    assert "file_sha256_mismatch" in s["warnings"]
+
+
+def test_the_egress_gate_names_the_lock_first(tmp_path):
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from conftest import run_upgrade_gate
+    p = tmp_path / "winval.env"
+    p.write_text("AUTHENTICODE_LOCK_PARAMS=ture\n")   # EXIT unset too: the manager names the lock first
+    assert "AUTHENTICODE_LOCK_PARAMS" in run_upgrade_gate("egress", p)
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_refusal_view_renders_before_the_no_verdict_view(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert html.index("w.includes('file_sha256_mismatch')") < html.index("if(!v){$('#detail')")
+
+
+def test_a_refused_verdicts_row_keeps_the_guests_status(tmp_path, pool, monkeypatch):
+    import winval_blastbox.orchestrator as orch
+    v = _load("valid_script_graveyard_hit.json")
+    pool(v).faithful = False
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "benign.exe"), tmp_path / "out")
+    monkeypatch.setitem(orch.ENGINES, "authenticode", lambda p, params=None: orch._authenticode_verdict(env))
+    s = orch.JobStore(1)
+    jid = s.create("benign.exe", ["authenticode"])
+    f = tmp_path / "benign.exe"
+    s._run_inner(jid, str(f), ["authenticode"])
+    row = s.list_jobs()[0]
+    assert row["verdict"] == "UnknownError" and row["myatg_status"] == v["status"]
+    from blastbox.host.jobs.base import Job, JobStatus
+    ingress = _ingress(monkeypatch, tmp_path)
+    j = Job.new(engine="authenticode", filename="benign.exe")
+    ingress._store.create(j)
+    ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary=eng.summarize_envelope(env))
+    assert ingress.jobs()["jobs"][0]["myatg_status"] == v["status"]
+
+
+def test_the_cli_refuses_a_malformed_lock_as_a_configuration_error(tmp_path, monkeypatch, capsys):
+    from winval_blastbox import host_runner
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    assert host_runner.main([str(_sample(tmp_path))]) == 2
+    assert "AUTHENTICODE_LOCK_PARAMS" in capsys.readouterr().err

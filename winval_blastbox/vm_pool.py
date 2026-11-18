@@ -128,7 +128,7 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     as the body, returning the verdict JSON. The filename is passed for extension-based routing
     (.rdp / script SIP type) only — myatg verdicts are content-hashed, so the base name is irrelevant.
     ``params`` carries per-request myatg overrides (``rev`` / ``scripts``); myatg validates the values
-    itself and falls back to its startup defaults on an unknown one."""
+    itself, reading an unknown rev as online and an unknown scripts as native (the engine sends those explicitly)."""
     host, port = endpoint
     size = os.stat(path).st_size
     q = {"name": os.path.basename(path)}

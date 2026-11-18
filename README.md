@@ -63,8 +63,8 @@ flowchart TB
 3. The worker is a **libvirt qcow2 overlay clone** off the golden base with an internal `clean`
    snapshot. A baked-in guest agent (`myatg.exe`, running as **NETWORK SERVICE, unprivileged**)
    validates the file over an HTTP `POST /validate` call and returns myatg's JSON verdict
-   (the operator-wide `AUTHENTICODE_REV`/`AUTHENTICODE_SCRIPTS` from the engine's environment ride along
-   as `?rev=`/`?scripts=`; nothing on a scan request can change them).
+   (`AUTHENTICODE_REV`/`AUTHENTICODE_SCRIPTS` ride along as `?rev=`/`?scripts=`: the scan request's own
+   `rev`/`scripts` form fields when it sets them, else the engine's environment).
 4. blastbox **re-seals** that output from disk (recomputing every hash/size, confining paths)
    before a byte of it is trusted, and writes it back as the job result. The client polls
    `GET /scan/{id}`.
@@ -153,6 +153,20 @@ golden-packer/     Packer (QEMU) builder for the WS2025-Core golden qcow2 (provi
 golden_build.py    reproducible in-guest bake pipeline (ngen · qemu-ga · compile myatg · refresh trust)
 golden_rotate.py   rolling freshness re-bake + gate + rollback backups
 deploy/            the privilege split — ingress container + host pool-manager + Postgres + systemd units
+```
+
+## Engine contract
+
+[`blastbox-engine.toml`](blastbox-engine.toml) states what the `authenticode` engine emits: the
+one `authenticode.json` artifact, the flat `record` payload and its fields, the verdict statuses
+and other findings a consumer turns into detections, Loadout's mapper, and a `[[gaps]]` list of
+what the output cannot express today. `tests/test_engine_contract.py` runs the real engine and host
+runner (the VM pool replays recorded myatg verdicts) and checks every result against it; it skips
+on a blastbox release that predates the checker.
+
+```sh
+python -m blastbox.contract.engine_contract validate blastbox-engine.toml
+python -m blastbox.contract.engine_contract check blastbox-engine.toml <output>/metadata.json
 ```
 
 ## Quickstart

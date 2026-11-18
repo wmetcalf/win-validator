@@ -8,7 +8,8 @@ TCP), so the orchestrator calls its `HostRunner` in-process rather than the blas
 container dispatcher. EMBER engines (P4) slot into `ENGINES` later with the same shape.
 
 Endpoints:
-  POST /scan        multipart file [+ engines=authenticode,...]   -> {job_id, status}
+  POST /scan        multipart file [+ engines=authenticode,...] [+ rev=online|offline|none] [+ scripts=ps|native]
+                                                                   -> {job_id, status}
   GET  /scan/{id}                                                  -> {status, engines:{...}}
   GET  /cert/{tbs_sha256}                                          -> verdicts seen for a cert
   GET  /healthz                                                    -> pool readiness
@@ -18,6 +19,8 @@ Run on the libvirt host (toolz3):
 """
 from __future__ import annotations
 
+import concurrent.futures.thread as _futures_thread
+import inspect
 import json
 import logging
 import os
@@ -27,53 +30,67 @@ import time
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-
-from blastbox.host.netwire import parse_strict_bool
-import concurrent.futures.thread as _futures_thread
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+from blastbox.host.netwire import parse_strict_bool
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
+from .engine import summarize_envelope, validate_job_params
+from .host_runner import HostRunner
+from .revocation import verdict_cert_tbs
 from .knobs import upload_mb
-
-_log = logging.getLogger("winval.orchestrator")
 from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
-from .host_runner import HostRunner
+_log = logging.getLogger("winval.orchestrator")
 
-# Engine registry. Each entry: name -> callable(path) -> verdict dict. authenticode is the
+# Engine registry. Each entry: name -> callable(path, params) -> verdict dict (params: the job's per-job knobs). authenticode is the
 # only built engine; ember-legacy / ember-2024 (P4) register here later with the same shape.
 # Populated at startup (lifespan) so the VM pool warms once.
-ENGINES: dict[str, Callable[[str], dict]] = {}
+ENGINES: dict[str, Callable[..., dict]] = {}
+
+
+def _call_runner(runner: Callable[..., dict], path: str, params: dict | None) -> dict:
+    """Call an engine runner: callable(path, params) for one that takes per-job params, callable(path) for one registered with
+    the original one-argument shape (it gets no params, so a scan's rev/scripts mean nothing to it)."""
+    try:
+        sig = inspect.signature(runner)
+    except ValueError:   # no signature available (a builtin): assume the current shape
+        return runner(path, params)
+    # by NAME: a runner's second positional parameter may mean something else (a timeout, say)
+    if "params" in sig.parameters or any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
+        return runner(path, params=params)
+    return runner(path)
 
 DEFAULT_ENGINES = ("authenticode",)
 
 
 def _authenticode_verdict(env: dict) -> dict:
-    """Extract the myatg verdict (components, not opinion) from a sealed envelope.
+    """The engine pane for one job: myatg's raw verdict, the engine's revocation-aware status and full warnings
+    (engine.summarize_envelope), plus the sealed artifact reference."""
+    out = summarize_envelope(env)
+    # the pane's own `status` is its lifecycle (queued/running/done/error, set by JobStore._run_inner); the engine's
+    # revocation-aware status is carried as `verdict_status` so neither overwrites the other
+    out["verdict_status"] = out.pop("status")
+    out["artifact"] = next((a for a in env.get("artifacts") or [] if a.get("id") == "authenticode"), None)
+    return out
 
-    The engine embeds the verbatim myatg JSON as the ``authenticode_json`` payload field
-    and writes it to the ``authenticode.json`` artifact; surface the parsed verdict plus the
-    sealed artifact reference.
-    """
-    fields = (env.get("payload") or {}).get("fields") or {}
-    raw = fields.get("authenticode_json")
-    verdict = None
-    if isinstance(raw, str):
+
+def _discard(path: str) -> None:
+    """Remove an upload and its private spool dir (scan()'s mkdtemp); missing either is fine."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith("scan-"):
         try:
-            verdict = json.loads(raw)
-        except ValueError:
-            verdict = None
-    return {
-        "verdict": verdict,
-        "warnings": [w.get("code") for w in env.get("warnings") or []],
-        "artifact": next((a for a in env.get("artifacts") or [] if a.get("id") == "authenticode"), None),
-        "envelope_status": env.get("status"),
-    }
+            os.rmdir(parent)
+        except OSError:
+            pass
 
 
 class NotQueued(RuntimeError):
@@ -125,13 +142,13 @@ class JobStore:
                 raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid]["engines"][engine] = value
 
-    def submit(self, jid: str, path: str, engines: list[str]) -> None:
+    def submit(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         # the executor refuses BEFORE the put in three ways, all under its own lock (a broken pool, its shutdown, the interpreter's
         # shutdown), and raises AFTER the put in one (a worker thread that cannot start): the first three are NotQueued, the last
         # means the job is queued — classified by the executor's own exceptions, so no check of ours can race its shutdown
         from concurrent.futures.thread import BrokenThreadPool
         try:
-            self._pool.submit(self._run, jid, path, engines)
+            self._pool.submit(self._run, jid, path, engines, params)
         except BrokenThreadPool as exc:
             raise NotQueued(f"the worker pool is broken ({exc})") from exc
         except RuntimeError as exc:
@@ -139,13 +156,13 @@ class JobStore:
                 raise NotQueued("the orchestrator is shutting down") from exc
             raise   # "can't start new thread": the item is queued
 
-    def _run(self, jid: str, path: str, engines: list[str]) -> None:
+    def _run(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         try:
-            self._run_inner(jid, path, engines)
+            self._run_inner(jid, path, engines, params)
         except KeyError as exc:   # the executor never reads the future: an eviction must be SAID here, or it leaves no trace anywhere
             _log.warning("job %s: %s; its upload was removed", jid, exc)
 
-    def _run_inner(self, jid: str, path: str, engines: list[str]) -> None:
+    def _run_inner(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         try:   # the finally owns the upload temp file whatever happens — a job evicted by the max_jobs cap while queued raised KeyError before the old try, leaking the file
             self._update(jid, status="running")
             for e in engines:
@@ -155,19 +172,17 @@ class JobStore:
                     continue
                 try:
                     self._update_engine(jid, e, {"status": "running"})
-                    result = runner(path)
-                    # a sealed engine_error envelope (VM/transport failure) must surface as 'error',
-                    # not a 'done' job with a silently-null verdict indistinguishable from success.
-                    e_status = "error" if result.get("envelope_status") == "engine_error" else "done"
+                    result = _call_runner(runner, path, params)
+                    # a sealed engine_error (VM/transport failure) or rejected (a per-job parameter the agent does not
+                    # know) envelope must surface as 'error', not a 'done' job with a silently-null verdict.
+                    e_status = "error" if result.get("envelope_status") in ("engine_error", "rejected") else "done"
                     self._update_engine(jid, e, {"status": e_status, **result})
                 except Exception as exc:  # noqa: BLE001 — one engine failing must not sink the job
                     self._update_engine(jid, e, {"status": "error", "error": type(exc).__name__})
+            _discard(path)   # before 'done': a client that sees done may rely on the upload being gone
             self._update(jid, status="done")
         finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            _discard(path)
 
     def list_jobs(self, limit: int = 100) -> list[dict]:
         """Recent scans (newest first) with just the headline status — for the UI list."""
@@ -179,7 +194,8 @@ class JobStore:
             v = ac.get("verdict") or {}
             out.append({
                 "job_id": j["job_id"], "filename": j["filename"], "status": j["status"],
-                "verdict": v.get("status"), "signature_type": v.get("signature_type"),
+                "verdict": ac.get("verdict_status") or v.get("status"), "myatg_status": ac.get("myatg_status") or v.get("status"),
+                "revocation": ac.get("revocation"), "signature_type": v.get("signature_type"),
                 "graveyard_hit": "graveyard_hit" in (ac.get("warnings") or []),
             })
         return out
@@ -192,15 +208,10 @@ class JobStore:
             for j in self._jobs.values():
                 ac = (j.get("engines") or {}).get("authenticode") or {}
                 v = ac.get("verdict") or {}
-                certs = []
-                s = v.get("signer") or {}
-                if s.get("tbs_sha256"):
-                    certs.append(s["tbs_sha256"].lower())
-                for c in (v.get("chain") or {}).get("chain") or []:
-                    if c.get("tbs_sha256"):
-                        certs.append(c["tbs_sha256"].lower())
-                if tbs in certs:
-                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": v.get("status")})
+                if "file_sha256_mismatch" in (ac.get("warnings") or []):   # refused: the verdict is about other bytes
+                    continue
+                if tbs in verdict_cert_tbs(v):
+                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": ac.get("verdict_status") or v.get("status")})
         return hits
 
 
@@ -215,7 +226,7 @@ async def lifespan(app: FastAPI):
     if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM"), default=True):   # blastbox's strict boolean: unset or blank is the default (on), a typo raises at startup, never reads as OFF
         runner = HostRunner()
         runner.warmup()  # boot the VM pool once
-        ENGINES["authenticode"] = lambda p: _authenticode_verdict(runner.validate(p))
+        ENGINES["authenticode"] = lambda p, params=None: _authenticode_verdict(runner.validate(p, params=params))
     yield
     # shutdown: tear the VM pool down cleanly
     from .engine import shutdown_pool
@@ -232,9 +243,15 @@ def healthz() -> dict:
 
 
 @app.post("/scan", status_code=202)
-async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
+async def scan(file: UploadFile = File(...), engines: str = Form(""), rev: str = Form(""), scripts: str = Form("")) -> dict:
+    """``rev`` (online|offline|none) and ``scripts`` (ps|native) are this job's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS;
+    blank = the engine process's environment. An unknown value is a 400 before anything is spooled."""
     if _store is None:
         raise HTTPException(503, "orchestrator not ready")
+    try:
+        params = validate_job_params({"AUTHENTICODE_REV": rev, "AUTHENTICODE_SCRIPTS": scripts})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     sel = [e.strip() for e in engines.split(",") if e.strip()] or list(DEFAULT_ENGINES)
     # Stream the upload to a private temp file in chunks with a hard size cap, so a huge (or
     # slow-loris many-concurrent) upload can't be buffered whole into RAM and OOM the service.
@@ -245,11 +262,15 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
         raise HTTPException(status_code=400, detail="filename has no usable name")
     if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX, as the ingress twin bounds it: the row stored and served a 4 KB name verbatim
         raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
-    # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
-    # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
-    stem, ext = os.path.splitext(name)
-    hint = stem.encode("utf-8", "surrogateescape")[:100].decode("utf-8", "ignore") + ext.encode("utf-8", "surrogateescape")[:20].decode("utf-8", "ignore")
-    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + hint)
+    # a private 0700 spool dir per upload, the file inside it under the client's (sanitised, NAME_MAX-bounded) basename: the
+    # engine routes on its extension and records it (rdp_file_name), so it must be the submitted name, not scan-<random>-name
+    spool = tempfile.mkdtemp(prefix="scan-")
+    path = os.path.join(spool, name)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except BaseException:
+        _discard(path)
+        raise
     try:
         written = 0
         with os.fdopen(fd, "wb") as f:
@@ -259,29 +280,20 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
                     raise HTTPException(413, f"upload exceeds {max_bytes} bytes")
                 f.write(chunk)
     except BaseException:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         raise
     try:
         jid = _store.create(name, sel)   # the sanitised basename, as the ingress records it — not ../../evil.exe verbatim
     except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         raise
     try:
-        _store.submit(jid, path, sel)
+        _store.submit(jid, path, sel, params)
     except NotQueued as exc:   # refused BEFORE the item is queued — nothing will ever run it
         _store._update(jid, status="error", error=f"could not queue the job: {exc}")
         for e in sel:   # the UI reads the ENGINE pane first: a pane still 'queued' under an error row spun forever
             _store._update_engine(jid, e, {"status": "error", "error": f"not queued: {exc}"})
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         # a 503, not the bare re-raise's generic 500: the service could not take the job (shutting down, the executor broken) and a
         # retry is the answer; the row it recorded is named so the operator can find it, and the client's next submission is a new job
         _log.error("job %s: could not queue it (%s); recorded as error, the upload removed, the client told to retry (503)", jid, exc)   # a handled
@@ -396,7 +408,7 @@ INDEX_HTML = r"""<!doctype html>
   .job .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
   .Valid{background:#1c3a25;color:#5ee08a} .Revoked,.Distrusted{background:#3a1c1f;color:#ff7b7b}
-  .UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
+  .ValidRevocationUnchecked,.UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
   .NotSigned,.queued,.running,.unknown{background:#2b3543;color:#9fb0c3}
   table{width:100%;border-collapse:collapse} td{padding:4px 8px;vertical-align:top;border-top:1px solid var(--line)}
   td.k{color:var(--mut);width:160px;white-space:nowrap} .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
@@ -462,18 +474,20 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   if(j.status==='error'&&!v){$('#detail').innerHTML=`<h3>${esc(j.filename||'')}</h3><div class="flag bad">${esc(j.error||ac.error||'failed')}</div>`;return;}
   if(ac.status==='queued'||ac.status==='running'||j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||j.status)} <span class="muted">validating…</span>`;return;}
+  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
+    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}
     <div class="muted" style="margin-top:8px">${esc((ac.error)||ac.reason||'no verdict')}</div>`;return;}
-  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
-  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(v.status)}
+  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=ac.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
+  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(ac.verdict_status||v.status)}${ac.verdict_status&&ac.verdict_status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
-    ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
+    ${('content_verified' in rec?rec.content_verified:v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
   if(gv&&(gv.hit||gv.malware)) h+=`<div class="gv"><b>cert-graveyard hit</b> ${gv.matched_on?'· matched on '+esc(gv.matched_on):''}
     <div>${esc(gv.malware||gv.malware_type||'')} ${gv.malware_notes?'— '+esc(gv.malware_notes):''}</div></div>`;
   h+='<table>';
   const row=(k,val)=>{if(val==null||val==='')return;h+=`<tr><td class="k">${k}</td><td>${val}</td></tr>`;};
-  row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
+  row('file sha256',`<span class="mono">${esc(rec.file_sha256||'')}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
   if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);
