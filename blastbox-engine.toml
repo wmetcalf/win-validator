@@ -12,7 +12,8 @@ formats = ["*"]
 # real deployment needs egress; `none` is the explicit opt-out.
 network = ["none", "drop", "direct", "openvpn", "wireguard", "tor", "inetsim"]
 # detonate() always returns "ok"; a pool/VM/transport failure raises and the harness seals
-# engine_error; precheck() refuses a per-job parameter the agent does not know (rejected, no VM).
+# engine_error; precheck() refuses a per-job parameter the agent does not know, or any per-job value
+# while the operator has set AUTHENTICODE_LOCK_PARAMS (rejected, no VM).
 # An input over the agent's size cap (myatg --serve-http, 500 MiB) is answered HTTP 413: engine_error.
 # RDP's own 8 MiB cap answers status=UnknownError inside an ok result.
 statuses = ["ok", "engine_error", "rejected"]
@@ -117,6 +118,12 @@ description = "myatg could not decide (or the engine refused its answer: file_sh
 # payload.fields.revocation: checked_good | revoked | unchecked | error | null (no chain evaluated:
 # NotSigned, myatg's error skeleton). Set for every status, not only Valid.
 [[detections]]
+code = "authenticode.revocation.revoked"
+severity = "high"
+source = "payload.fields.revocation == 'revoked' (payload.fields.chain_revoked is true)"
+description = "The signing chain is revoked, whatever the status: myatg can answer UntrustedRoot / Expired / NotYetValid for a revoked chain (only a Valid becomes Revoked)."
+
+[[detections]]
 code = "authenticode.revocation.unchecked"
 severity = "low"
 source = "payload.fields.revocation == 'unchecked' (payload.fields.chain_revocation_checked: 'unknown' = responders unreachable, 'none' = AUTHENTICODE_REV=none)"
@@ -162,7 +169,7 @@ description = "The agent's file_sha256 differs from the engine's own hash of the
 code = "precheck_rejected"
 severity = "low"
 source = "warnings[].code == 'precheck_rejected' (status rejected; payload.fields empty, or {error} from a harness that calls precheck)"
-description = "A per-job parameter names a key or value the agent does not know; the job was refused before the VM saw the input (detonate()'s own refusal, for a harness that does not call precheck)."
+description = "A per-job parameter names a key or value the agent does not know, or the operator has locked the knobs (AUTHENTICODE_LOCK_PARAMS) and the job set one; the job was refused before the VM saw the input (detonate()'s own refusal, for a harness that does not call precheck)."
 
 [[detections]]
 code = "param_not_forwarded"
@@ -217,7 +224,7 @@ description = "Loadout's mapper reads neither revocation nor chain_revocation_ch
 
 [[gaps]]
 id = "loadout-config-not-forwarded"
-description = "Loadout's manifest exposes AUTHENTICODE_REV and AUTHENTICODE_SCRIPTS as job config, but WinValidatorClient.submit posts the file only; both doors' POST /scan now take them as multipart form fields rev=online|offline|none and scripts=ps|native (400 on anything else). Loadout's SCRIPTS is a bool where the engine expects ps|native, and its REV help lists 'cached', which the engine refuses."
+description = "Loadout's manifest exposes AUTHENTICODE_REV and AUTHENTICODE_SCRIPTS as job config, but WinValidatorClient.submit posts the file only; both doors' POST /scan now take them as multipart form fields rev=online|offline|none and scripts=ps|native (400 on anything else; with AUTHENTICODE_LOCK_PARAMS=1 the pool-manager refuses any per-job value as rejected). Loadout's SCRIPTS is a bool where the engine expects ps|native, and its REV help lists 'cached', which the engine refuses."
 
 [[gaps]]
 id = "loadout-warnings-unmapped"

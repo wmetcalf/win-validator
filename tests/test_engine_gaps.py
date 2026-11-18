@@ -807,3 +807,27 @@ def test_the_content_flag_falls_back_to_the_stored_verdict(door):
     import winval_blastbox.orchestrator as orch
     html = (ingress if door == "ingress" else orch).INDEX_HTML
     assert "(rec.content_verified??v.content_verified)===false" in html
+
+
+def test_a_malformed_lock_value_is_never_echoed(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", '"1\nBLASTBOX_DATABASE_URL=postgresql://winval:S3CRET@127.0.0.1/winval')
+    pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "online"})
+    assert env["status"] == "rejected" and "S3CRET" not in json.dumps(env)
+    with pytest.raises(ValueError) as e:
+        eng.params_locked()
+    assert "S3CRET" not in str(e.value)
+
+
+def test_a_malformed_lock_value_fails_the_warmup(monkeypatch):
+    # refused at pool start, like the other strict booleans, not first on a client's job
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    monkeypatch.setattr(eng, "get_pool", lambda stop_event=None: None)
+    with pytest.raises(ValueError):
+        eng.AuthenticodeEngine().warmup()
+
+
+def test_a_revoked_chain_is_a_detection_whatever_the_status():
+    toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
+    assert 'code = "authenticode.revocation.revoked"' in toml
+    assert "payload.fields.revocation == 'revoked'" in toml

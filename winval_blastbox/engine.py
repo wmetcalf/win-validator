@@ -70,7 +70,12 @@ _JOB_PARAMS: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.Cont
 def params_locked() -> bool:
     """AUTHENTICODE_LOCK_PARAMS: the operator's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS are not overridable per job (a client
     could otherwise turn the guest's CRL/OCSP/AIA fetches back on). blastbox's strict boolean: a typo raises, never reads OFF."""
-    return parse_strict_bool(os.environ.get("AUTHENTICODE_LOCK_PARAMS"), default=False)
+    try:
+        return parse_strict_bool(os.environ.get("AUTHENTICODE_LOCK_PARAMS"), default=False)
+    except ValueError:
+        # parse_strict_bool echoes the whole value, and an unclosed quote hands systemd the REST of the env file (secrets
+        # included); this message reaches the doors (precheck_rejected, the orchestrator's 400)
+        raise ValueError("AUTHENTICODE_LOCK_PARAMS is not a boolean (use true/false or 1/0); its value is not shown") from None
 
 
 def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
@@ -486,7 +491,9 @@ class AuthenticodeEngine:
         return None
 
     def warmup(self, stop_event=None) -> None:
-        """Pre-pay the VM-pool boot for the host runner (optional); `stop_event` ends the wait early."""
+        """Pre-pay the VM-pool boot for the host runner (optional); `stop_event` ends the wait early. A malformed
+        AUTHENTICODE_LOCK_PARAMS refuses the start here, not first on a client's job."""
+        params_locked()
         get_pool(stop_event=stop_event)
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
