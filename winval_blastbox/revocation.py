@@ -17,8 +17,11 @@ def _revocation(chain: dict | None) -> str | None:
     Fail-closed: a revocation_checked value outside myatg's known vocabulary (or a chain without one) is "error", never good."""
     if not chain:
         return None
-    if chain.get("revoked") is True:
+    revoked = chain.get("revoked")
+    if revoked is True:
         return "revoked"
+    if revoked not in (False, None):   # fail closed: anything but an explicit false/absent is not "not revoked"
+        return "error"
     rc = chain.get("revocation_checked")
     if isinstance(rc, str) and rc in _REV_CHECKED:
         return "checked_good"

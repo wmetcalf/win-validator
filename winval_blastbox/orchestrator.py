@@ -60,12 +60,9 @@ def _call_runner(runner: Callable[..., dict], path: str, params: dict | None) ->
         sig = inspect.signature(runner)
     except ValueError:   # no signature available (a builtin): assume the current shape
         return runner(path, params)
-    for args, kwargs in (((path, params), {}), ((path,), {"params": params})):
-        try:
-            sig.bind(*args, **kwargs)
-        except TypeError:
-            continue
-        return runner(*args, **kwargs)
+    # by NAME: a runner's second positional parameter may mean something else (a timeout, say)
+    if "params" in sig.parameters or any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
+        return runner(path, params=params)
     return runner(path)
 
 DEFAULT_ENGINES = ("authenticode",)

@@ -525,9 +525,14 @@ class AuthenticodeEngine:
         guest_sha = summary.fields.get("file_sha256")
         summary.fields["file_sha256"] = h.hexdigest()
         if guest_sha is not None and str(guest_sha).lower() != h.hexdigest():
+            shown = repr(str(guest_sha)) if re.fullmatch(r"[0-9A-Fa-f]{64}", str(guest_sha)) else "a non-SHA-256 value"
             warnings.append(BbWarning(code="file_sha256_mismatch",
-                                      message=f"the agent reported file_sha256 {str(guest_sha)[:80]!r}; the engine hashed the input as "
+                                      message=f"the agent reported file_sha256 {shown}; the engine hashed the input as "
                                               f"{h.hexdigest()} (recorded)"[:2000]))
+            # the verdict is about OTHER bytes (or the guest lied): never attribute its status to the submitted file
+            summary.fields["status"] = "UnknownError"
+            summary.fields["revocation"] = None
+            summary.fields["error"] = "the agent's verdict names other bytes (file_sha256 mismatch); its status is not used"
 
         if summary.fields.get("rdp_file_name") is not None:   # the --serve-http agent names its upload temp file (myatg_<guid>.rdp)
             summary.fields["rdp_file_name"] = input.name

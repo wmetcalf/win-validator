@@ -9,6 +9,7 @@ The checker ships on an unreleased blastbox branch, so this module skips on a re
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -36,7 +37,10 @@ class _ReplayPool:
     def validate(self, path: str, params=None) -> dict:
         if self.error is not None:
             raise self.error
-        return json.loads(json.dumps(self.verdict))
+        v = json.loads(json.dumps(self.verdict))
+        if v.get("file_sha256") is not None:   # a faithful agent names the bytes it was sent
+            v["file_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return v
 
 
 @pytest.fixture

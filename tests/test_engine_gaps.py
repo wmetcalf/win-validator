@@ -34,12 +34,18 @@ def _load(name: str) -> dict:
 
 
 class _Pool:
+    """A faithful agent by default: a verdict that names a file_sha256 names the bytes it was sent (the fixtures carry the
+    real sample's hash; the tests send synthetic bytes). faithful=False replays the fixture's hash verbatim."""
+
     def __init__(self, verdict: dict) -> None:
-        self.verdict, self.calls = verdict, []
+        self.verdict, self.calls, self.faithful = verdict, [], True
 
     def validate(self, path: str, params=None) -> dict:
         self.calls.append(params)
-        return copy.deepcopy(self.verdict)
+        v = copy.deepcopy(self.verdict)
+        if self.faithful and v.get("file_sha256") is not None:
+            v["file_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return v
 
 
 @pytest.fixture
@@ -207,7 +213,8 @@ def test_validate_job_params_normalises():
         eng.validate_job_params({"AUTHENTICODE_REV": "cached"})
 
 
-def test_job_params_do_not_leak_between_threads(tmp_path, pool):
+def test_job_params_do_not_leak_between_threads(tmp_path, pool, monkeypatch):
+    monkeypatch.delenv("AUTHENTICODE_REV", raising=False)   # the env is the fallback the last assert reads
     pool(_load("valid_script_graveyard_hit.json"))
     seen = {}
     barrier = threading.Barrier(2)
@@ -659,7 +666,7 @@ def test_the_host_hash_is_authoritative_over_the_guests(tmp_path, pool):
     # bytes; the engine's own hash wins and the disagreement is a warning
     v = _load("untrusted_root.json")
     v["file_sha256"] = "0" * 64
-    pool(v)
+    pool(v).faithful = False
     data = b"MZ" + b"\0" * 62
     env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "s.exe", data), tmp_path / "out")
     assert env["payload"]["fields"]["file_sha256"] == hashlib.sha256(data).hexdigest()
@@ -695,3 +702,36 @@ def test_the_door_summary_carries_the_record(tmp_path, pool):
     assert s["record"]["content_verified"] is True
     assert len(s["record"]["file_sha256"]) == 64
     assert "authenticode_json" not in s["record"]
+
+
+def test_a_hash_mismatch_does_not_publish_the_guests_status(tmp_path, pool):
+    # the guest validated OTHER bytes (or lied): its Valid must not be attributed to the submitted file
+    v = _load("valid_script_graveyard_hit.json")
+    v["chain"]["revocation_checked"] = "online"
+    v["file_sha256"] = "ab" * 32
+    pool(v).faithful = False
+    f = _detonate(tmp_path).payload.fields
+    assert f["status"] == "UnknownError" and f["myatg_status"] == "Valid"
+    assert "file_sha256" in (f["error"] or "")
+
+
+@pytest.mark.parametrize("revoked", [1, "true", "yes", [True]])
+def test_a_non_boolean_revoked_flag_is_not_checked_good(revoked):
+    from winval_blastbox.revocation import verdict_status
+    v = {"status": "Valid", "chain": {"revoked": revoked, "revocation_checked": "online"}}
+    assert verdict_status(v) != "Valid"
+
+
+def test_a_runner_whose_second_argument_is_not_params_keeps_its_default():
+    import winval_blastbox.orchestrator as orch
+    assert orch._call_runner(lambda path, timeout=60: {"timeout": timeout}, "x", {"AUTHENTICODE_REV": "none"}) == {"timeout": 60}
+    assert orch._call_runner(lambda path, **kw: kw, "x", {"AUTHENTICODE_REV": "none"}) == {"params": {"AUTHENTICODE_REV": "none"}}
+
+
+def test_a_non_hex_guest_hash_is_not_echoed(tmp_path, pool):
+    v = _load("untrusted_root.json")
+    v["file_sha256"] = "<script>alert(1)</script>"
+    pool(v).faithful = False
+    r = _detonate(tmp_path)
+    msgs = [w.message for w in r.warnings if w.code == "file_sha256_mismatch"]
+    assert msgs and "<script>" not in msgs[0]

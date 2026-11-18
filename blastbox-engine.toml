@@ -111,7 +111,7 @@ description = "myatg said Valid but revocation was not checked: responders unrea
 code = "authenticode.status.UnknownError"
 severity = "info"
 source = "payload.fields.status == 'UnknownError' (payload.fields.error says why when set)"
-description = "myatg could not decide: an RDP file over its 8 MiB cap, device path, parser exception, chain that fails for an unclassified reason. (A non-RDP input over the agent's 500 MiB cap is engine_error, not this.)"
+description = "myatg could not decide (or the engine refused its answer: file_sha256_mismatch): an RDP file over its 8 MiB cap, device path, parser exception, chain that fails for an unclassified reason. (A non-RDP input over the agent's 500 MiB cap is engine_error, not this.)"
 
 # --- independent findings --------------------------------------------------------------------
 # payload.fields.revocation: checked_good | revoked | unchecked | error | null (no chain evaluated:
@@ -156,7 +156,7 @@ description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS name
 code = "file_sha256_mismatch"
 severity = "medium"
 source = "warnings[].code == 'file_sha256_mismatch'"
-description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with."
+description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with: status is then UnknownError (myatg_status keeps the guest's), revocation null, and error says why."
 
 [[detections]]
 code = "precheck_rejected"
