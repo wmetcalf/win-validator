@@ -1,0 +1,18 @@
+{
+  "file_sha256": null,
+  "status": "UnknownError",
+  "error": "file too large",
+  "signature_type": "None",
+  "content_verified": false,
+  "is_os_binary": false,
+  "signer": null,
+  "chain": null,
+  "graveyard": {
+    "hit": false
+  },
+  "timestamped": false,
+  "sign_time": null,
+  "sign_time_verified": false,
+  "timestamper": null,
+  "ms": 0
+}

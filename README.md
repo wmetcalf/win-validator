@@ -155,6 +155,20 @@ golden_rotate.py   rolling freshness re-bake + gate + rollback backups
 deploy/            the privilege split — ingress container + host pool-manager + Postgres + systemd units
 ```
 
+## Engine contract
+
+[`blastbox-engine.toml`](blastbox-engine.toml) states what the `authenticode` engine emits: the
+one `authenticode.json` artifact, the flat `record` payload and its fields, the verdict statuses
+and other findings a consumer turns into detections, Loadout's mapper, and a `[[gaps]]` list of
+what the output cannot express today. `tests/test_engine_contract.py` runs the real engine and host
+runner (the VM pool replays recorded myatg verdicts) and checks every result against it; it skips
+on a blastbox release that predates the checker.
+
+```sh
+python -m blastbox.contract.engine_contract validate blastbox-engine.toml
+python -m blastbox.contract.engine_contract check blastbox-engine.toml <output>/metadata.json
+```
+
 ## Quickstart
 
 Full bring-up (the ingress/pool-manager privilege split, the rolling-golden timer) is in

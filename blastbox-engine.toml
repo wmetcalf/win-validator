@@ -1,0 +1,184 @@
+schema = "blastbox-engine-contract/1"
+
+# The `authenticode` engine (winval_blastbox/engine.py:AuthenticodeEngine). It runs host-side
+# (winval_blastbox/host_runner.py drives blastbox.worker.harness.run_detonation in-process); the
+# disposable sandbox is a Windows VM from the WarmVmPool, where myatg parses the signature.
+
+[engine]
+name = "authenticode"
+formats = ["*"]
+# The VM's exit driver (AUTHENTICODE_EXIT, checked in vm_pool.py against blastbox's
+# libvirt_egress._SUPPORTED_EXITS). WinVerifyTrust/X509Chain fetch AIA/CRL/OCSP/TSA URLs, so a
+# real deployment needs egress; `none` is the explicit opt-out.
+network = ["none", "drop", "direct", "openvpn", "wireguard", "tor", "inetsim"]
+# detonate() always returns "ok"; a pool/VM/transport failure raises and the harness seals
+# engine_error. myatg's own size cap answers status=UnknownError inside an ok result.
+statuses = ["ok", "engine_error"]
+
+[[artifacts]]
+id = "authenticode"
+path = "authenticode.json"
+kind = "json"
+required = true
+max_count = 1
+role = "verdict"
+description = "The verbatim myatg verdict JSON (also embedded as payload.fields.authenticode_json). Not size-capped by the engine."
+
+[payload]
+root = "record"
+node_types = ["record"]
+# Every key _summary() writes, plus the embedded verbatim verdict. Values may be null: myatg's
+# error skeleton and RDP verdicts leave most of them empty.
+required_root_fields = [
+    "file_sha256", "status", "signature_type", "content_verified", "is_os_binary",
+    "timestamped", "sign_time", "sign_time_verified",
+    "signer_subject_cn", "signer_issuer_cn", "signer_serial_number", "signer_thumbprint",
+    "signer_sha1_fingerprint", "signer_sha256_fingerprint", "signer_tbs_sha256",
+    "signer_eku_codesigning", "signer_self_signed", "signer_not_before", "signer_not_after",
+    "chain_len", "chain_explicit_distrust", "chain_valid_at_sign_time",
+    "chain_chains_to_trusted_root", "chain_builds", "chain_revoked", "chain_revocation_checked",
+    "error", "timestamper_subject_cn", "timestamper_tbs_sha256",
+    "graveyard_hit", "graveyard_matched_on", "graveyard_malware", "graveyard_malware_type",
+    "authenticode_json",
+]
+
+# --- verdict status (payload.fields.status, myatg's string passed through verbatim) ----------
+[[detections]]
+code = "authenticode.status.HashMismatch"
+severity = "high"
+source = "payload.fields.status == 'HashMismatch'"
+description = "The file's hash does not match the signed hash: modified after signing."
+
+[[detections]]
+code = "authenticode.status.Revoked"
+severity = "high"
+source = "payload.fields.status == 'Revoked' (payload.fields.chain_revoked is true)"
+description = "A certificate in the chain is revoked."
+
+[[detections]]
+code = "authenticode.status.Distrusted"
+severity = "high"
+source = "payload.fields.status == 'Distrusted' (payload.fields.chain_explicit_distrust is true)"
+description = "A certificate in the chain is explicitly distrusted by the platform."
+
+[[detections]]
+code = "authenticode.status.UntrustedRoot"
+severity = "medium"
+source = "payload.fields.status == 'UntrustedRoot'"
+description = "The chain ends in a root the VM's store does not trust (also PowerShell's NotTrusted)."
+
+[[detections]]
+code = "authenticode.status.Expired"
+severity = "medium"
+source = "payload.fields.status == 'Expired'"
+description = "The signing certificate is outside its validity and the signature is not timestamped."
+
+[[detections]]
+code = "authenticode.status.NotYetValid"
+severity = "medium"
+source = "payload.fields.status == 'NotYetValid' (RDP verdicts only)"
+description = "The RDP file's signing certificate is not yet valid."
+
+[[detections]]
+code = "authenticode.status.NotSigned"
+severity = "info"
+source = "payload.fields.status == 'NotSigned'"
+description = "No Authenticode signature."
+
+[[detections]]
+code = "authenticode.status.Valid"
+severity = "info"
+source = "payload.fields.status == 'Valid'"
+description = "Signature verifies and the chain is trusted (see gap revocation-unknown-is-valid)."
+
+[[detections]]
+code = "authenticode.status.UnknownError"
+severity = "info"
+source = "payload.fields.status == 'UnknownError' (payload.fields.error says why when set)"
+description = "myatg could not decide: oversize input, device path, parser exception, chain that fails for an unclassified reason."
+
+# --- independent findings --------------------------------------------------------------------
+[[detections]]
+code = "graveyard_hit"
+severity = "high"
+source = "warnings[].code == 'graveyard_hit'; payload.fields.graveyard_hit / graveyard_matched_on / graveyard_malware"
+description = "The signing certificate is in the cert graveyard: already seen signing malware."
+
+[[detections]]
+code = "authenticode.chain_explicit_distrust"
+severity = "high"
+source = "payload.fields.chain_explicit_distrust is true"
+description = "Explicit distrust anywhere in the chain, independent of the status string."
+
+[[detections]]
+code = "authenticode.signer_self_signed"
+severity = "medium"
+source = "payload.fields.signer_self_signed is true"
+description = "The leaf signing certificate is self-signed."
+
+[[detections]]
+code = "authenticode.signer_no_codesigning_eku"
+severity = "medium"
+source = "payload.fields.signer_eku_codesigning is false"
+description = "The signing certificate lacks the code-signing EKU."
+
+[[detections]]
+code = "authenticode.chain_invalid_at_sign_time"
+severity = "medium"
+source = "payload.fields.chain_valid_at_sign_time is false"
+description = "The chain did not verify as of the signing time."
+
+# --- gaps ------------------------------------------------------------------------------------
+[[gaps]]
+id = "status-not-enumerated"
+description = "payload.fields.status is myatg's string passed through with no engine-side enum or schema; a new myatg status (Distrusted and RDP's NotYetValid were added this way) reaches consumers unannounced."
+
+[[gaps]]
+id = "no-severity-in-output"
+description = "The output carries no severity for any finding; the severities above are this contract's reading, not something the engine emits."
+
+[[gaps]]
+id = "no-schema-version"
+description = "The payload Record has no schema/version field, so a consumer cannot tell which _summary() field set (or myatg verdict shape) it is reading."
+
+[[gaps]]
+id = "revocation-unknown-is-valid"
+description = "myatg answers status=Valid when revocation responders were unreachable; only payload.fields.chain_revocation_checked == 'unknown' says the revocation half was never checked."
+
+[[gaps]]
+id = "rdp-verdict-shape"
+description = "RDP verdicts use `file` (a name), not `file_sha256`, and carry no graveyard/timestamp fields, so those summary fields are null; RDP-only findings (signscope_count, unsigned_settings, unsigned_dangerous) exist only inside authenticode_json, not as indexed fields."
+
+[[gaps]]
+id = "detected-by-extension"
+description = "envelope.detected is chosen from the input's file extension alone (_EXT_TYPE), confidence 1.0, not from content."
+
+[[gaps]]
+id = "params-process-wide"
+description = "AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS are read from the engine process environment, one value for every job; no tier forwards a per-job value. Unknown values and AUTHENTICODE_GV/TIER surface only as warnings param_unknown_value / param_not_forwarded."
+
+[[gaps]]
+id = "ingress-warnings-codes-only"
+description = "The ingress (GET /scan/{id}) republishes the verdict as result_summary {verdict, warnings, envelope_status}; warnings there are codes only, so a graveyard_hit's matched_on/malware text and a knob warning's message are dropped on that door."
+
+[[gaps]]
+id = "loadout-status-map"
+description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no Distrusted or NotYetValid entry (they fall to the generic 'authenticode:<status>' suspicious/30 detection) and lists NotTrusted and Incompatible, which myatg never emits."
+
+[[gaps]]
+id = "loadout-ignores-revocation"
+description = "Loadout's mapper reads neither chain_revoked nor chain_revocation_checked, so a Valid verdict whose revocation was never checked becomes authenticode:valid with nothing saying so."
+
+[[gaps]]
+id = "loadout-config-not-forwarded"
+description = "Loadout's manifest exposes AUTHENTICODE_REV and AUTHENTICODE_SCRIPTS as job config, but WinValidatorClient.submit posts the file only and the engine reads both from its own environment; Loadout's SCRIPTS is a bool where the engine expects ps|native, and its REV help lists 'cached' where the engine knows online|offline|none."
+
+[[gaps]]
+id = "loadout-warnings-unmapped"
+description = "Loadout collects result_summary.warnings as validator_warnings but turns none into a detection or note: param_unknown_value / param_not_forwarded (a verdict computed under a different knob than asked) are silent."
+
+[[consumers]]
+name = "loadout"
+engine = "authenticode"
+mapper = "backend/loadout/authenticode.py:authenticode_status_to_detections"
+emits = ["detection", "identifier"]

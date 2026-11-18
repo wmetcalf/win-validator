@@ -1,0 +1,136 @@
+{
+  "file_sha256": "5da041b3f3efceaf8e49aee25177f1a9a1e2c1b869cf0d91de57fed8a8497c6a",
+  "status": "Revoked",
+  "signature_type": "Embedded",
+  "content_verified": true,
+  "is_os_binary": false,
+  "signer": {
+    "subject": "CN=\"ConnectWise, LLC\", O=\"ConnectWise, LLC\", L=Tampa, S=Florida, C=US",
+    "subject_cn": "ConnectWise, LLC",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "issuer_cn": "DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1",
+    "serial_number": "0ABBCA120C79810A182F72F89C04358F",
+    "thumbprint": "109D463C280A1E2AF6E87807C6F3D3E4A80E5DBE",
+    "md5_fingerprint": "dcac21be66c5310ab798222b899c288c",
+    "sha1_fingerprint": "109d463c280a1e2af6e87807c6f3d3e4a80e5dbe",
+    "sha256_fingerprint": "b7902a93876909ba13bc23013f2c4239db57bfe742f500766a1673c5199fd1fb",
+    "tbs_sha1": "e08a86e0feb4198ac05f799f516f16af0723174e",
+    "tbs_sha256": "a9183c38f6658fe9ab270337c8905ca5458a1737abdd0b891aa9216605c307e7",
+    "not_before": "2025-06-23T00:00:00.0000000Z",
+    "not_after": "2028-06-22T23:59:59.0000000Z",
+    "eku": [
+      "1.3.6.1.5.5.7.3.3"
+    ],
+    "eku_codesigning": true,
+    "self_signed": false,
+    "crl_urls": [
+      "http://crl3.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crl",
+      "http://crl4.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crl"
+    ],
+    "ca_issuer_urls": [
+      "http://cacerts.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crt"
+    ],
+    "ocsp_urls": [
+      "http://ocsp.digicert.com"
+    ]
+  },
+  "chain": {
+    "chain_builds": false,
+    "chains_to_trusted_root": true,
+    "revoked": true,
+    "explicit_distrust": false,
+    "revocation_checked": "online",
+    "valid_at_sign_time": false,
+    "chain_length": 3,
+    "chain": [
+      {
+        "subject": "CN=\"ConnectWise, LLC\", O=\"ConnectWise, LLC\", L=Tampa, S=Florida, C=US",
+        "subject_cn": "ConnectWise, LLC",
+        "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+        "issuer_cn": "DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1",
+        "serial_number": "0ABBCA120C79810A182F72F89C04358F",
+        "thumbprint": "109D463C280A1E2AF6E87807C6F3D3E4A80E5DBE",
+        "md5_fingerprint": "dcac21be66c5310ab798222b899c288c",
+        "sha1_fingerprint": "109d463c280a1e2af6e87807c6f3d3e4a80e5dbe",
+        "sha256_fingerprint": "b7902a93876909ba13bc23013f2c4239db57bfe742f500766a1673c5199fd1fb",
+        "tbs_sha1": "e08a86e0feb4198ac05f799f516f16af0723174e",
+        "tbs_sha256": "a9183c38f6658fe9ab270337c8905ca5458a1737abdd0b891aa9216605c307e7",
+        "not_before": "2025-06-23T00:00:00.0000000Z",
+        "not_after": "2028-06-22T23:59:59.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.3"
+        ],
+        "eku_codesigning": true,
+        "self_signed": false,
+        "crl_urls": [
+          "http://crl3.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crl",
+          "http://crl4.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://cacerts.digicert.com/DigiCertTrustedG4CodeSigningRSA4096SHA3842021CA1.crt"
+        ],
+        "ocsp_urls": [
+          "http://ocsp.digicert.com"
+        ]
+      },
+      {
+        "subject": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+        "subject_cn": "DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1",
+        "issuer": "CN=DigiCert Trusted Root G4, OU=www.digicert.com, O=DigiCert Inc, C=US",
+        "issuer_cn": "DigiCert Trusted Root G4",
+        "serial_number": "08AD40B260D29C4C9F5ECDA9BD93AED9",
+        "thumbprint": "7B0F360B775F76C94A12CA48445AA2D2A875701C",
+        "md5_fingerprint": "d91299e84355cd8d5a86795a0118b6e9",
+        "sha1_fingerprint": "7b0f360b775f76c94a12ca48445aa2d2a875701c",
+        "sha256_fingerprint": "46011ede1c147eb2bc731a539b7c047b7ee93e48b9d3c3ba710ce132bbdfac6b",
+        "tbs_sha1": "79465b56bc7ad55a37bdf633943da8bfc84db228",
+        "tbs_sha256": "84bdc82e2f2a7f7aaa782667dac556ffcb2b33240c1f9c0a00a3264526a98332",
+        "not_before": "2021-04-29T00:00:00.0000000Z",
+        "not_after": "2036-04-28T23:59:59.0000000Z",
+        "eku": [
+          "1.3.6.1.5.5.7.3.3"
+        ],
+        "eku_codesigning": true,
+        "self_signed": false,
+        "crl_urls": [
+          "http://crl3.digicert.com/DigiCertTrustedRootG4.crl"
+        ],
+        "ca_issuer_urls": [
+          "http://cacerts.digicert.com/DigiCertTrustedRootG4.crt"
+        ],
+        "ocsp_urls": [
+          "http://ocsp.digicert.com"
+        ]
+      },
+      {
+        "subject": "CN=DigiCert Trusted Root G4, OU=www.digicert.com, O=DigiCert Inc, C=US",
+        "subject_cn": "DigiCert Trusted Root G4",
+        "issuer": "CN=DigiCert Trusted Root G4, OU=www.digicert.com, O=DigiCert Inc, C=US",
+        "issuer_cn": "DigiCert Trusted Root G4",
+        "serial_number": "059B1B579E8E2132E23907BDA777755C",
+        "thumbprint": "DDFB16CD4931C973A2037D3FC83A4D7D775D05E4",
+        "md5_fingerprint": "78f2fcaa601f2fb4ebc937ba532e7549",
+        "sha1_fingerprint": "ddfb16cd4931c973a2037d3fc83a4d7d775d05e4",
+        "sha256_fingerprint": "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988",
+        "tbs_sha1": "420704040c93dfe9d3ad01a26c07f2be1f4888c1",
+        "tbs_sha256": "4816e2e9e37ba61e1def6f7a4c623e981c7af355e51349b5554a3d56c5252e24",
+        "not_before": "2013-08-01T12:00:00.0000000Z",
+        "not_after": "2038-01-15T12:00:00.0000000Z",
+        "eku": [],
+        "eku_codesigning": false,
+        "self_signed": false,
+        "crl_urls": [],
+        "ca_issuer_urls": [],
+        "ocsp_urls": []
+      }
+    ]
+  },
+  "graveyard": {
+    "hit": false
+  },
+  "timestamped": false,
+  "sign_time": null,
+  "sign_time_verified": false,
+  "timestamper": null,
+  "ms": 1236
+}
