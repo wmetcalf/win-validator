@@ -605,3 +605,38 @@ def test_a_one_argument_engine_runner_still_runs(tmp_path, monkeypatch):
     f.write_bytes(b"MZ")
     store._run_inner(jid, str(f), ["ember"], {"AUTHENTICODE_REV": "none"})
     assert store.get(jid)["engines"]["ember"]["status"] == "done"
+
+
+@pytest.mark.parametrize("field,value", [("graveyard", True), ("chain", "x"), ("signer", ["a"]), ("timestamper", 1)])
+def test_a_non_dict_sub_object_does_not_drop_the_verdict(tmp_path, pool, field, value):
+    v = _load("untrusted_root.json")
+    v[field] = value
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+
+
+def test_rdp_signature_answers_are_indexed():
+    # rdp_validate.cs answers under chain (signature_valid / sign_time_verified / sign_time), not at the top level
+    v = _load("rdp_expired.json")
+    f = eng._summary(v).fields
+    assert f["content_verified"] is True and f["sign_time_verified"] is False
+
+
+def test_an_engine_error_message_is_not_published_by_a_door(tmp_path, monkeypatch):
+    # the harness's engine_error message is str(exception) from the VM/transport layer (internal IPs, domain names); the
+    # doors' summaries carry messages only for the warnings the engine itself writes
+    def boom(stop_event=None):
+        raise RuntimeError("agent 192.168.122.57:8765 on winval-w2 refused")
+    monkeypatch.setattr(eng, "get_pool", boom)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "engine_error"
+    s = eng.summarize_envelope(env)
+    assert "192.168" not in json.dumps(s["warning_details"])
+    assert s["warnings"]   # the code still says what happened
+
+
+def test_the_published_warning_codes_are_every_code_the_engine_writes():
+    import re
+    src = Path(eng.__file__).read_text()
+    assert set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src)) == eng.ENGINE_WARNING_CODES

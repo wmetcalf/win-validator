@@ -286,6 +286,10 @@ def _sniff(head: bytes) -> str | None:
     return None
 
 
+# Every warning code detonate()/knob_warnings() write (the doors publish only these messages).
+ENGINE_WARNING_CODES = frozenset({"graveyard_hit", "status_unrecognized", "param_unknown_value", "param_not_forwarded",
+                                  "precheck_rejected"})
+
 _SCALAR = (str, int, float, bool)
 
 
@@ -296,6 +300,11 @@ def _scalar(v: object) -> str | int | float | bool | None:
     return json.dumps(v, separators=(",", ":"), default=str)
 
 
+def _obj(v: object) -> dict:
+    """A sub-object of the guest's verdict, or {} when it is missing or not an object."""
+    return v if isinstance(v, dict) else {}
+
+
 def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
     """Flatten the myatg verdict into the indexed Record summary fields.
 
@@ -304,10 +313,10 @@ def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
     Every lookup is defensive ``.get()`` — myatg's error/oversize skeletons carry
     null/empty values, and the schema may grow.
     """
-    signer = verdict.get("signer") or {}
-    chain = verdict.get("chain") or {}
-    grave = verdict.get("graveyard") or {}
-    tsa = verdict.get("timestamper") or {}
+    signer = _obj(verdict.get("signer"))   # the guest's answer: a truthy non-dict here must not raise (engine_error)
+    chain = _obj(verdict.get("chain"))
+    grave = _obj(verdict.get("graveyard"))
+    tsa = _obj(verdict.get("timestamper"))
 
     revocation = verdict_revocation(verdict)
     params = params or {}
@@ -321,11 +330,12 @@ def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
         "myatg_status": verdict.get("status"),
         "revocation": revocation,
         "signature_type": verdict.get("signature_type"),
-        "content_verified": verdict.get("content_verified"),
+        # rdp_validate.cs answers these under chain (signature_valid / sign_time / sign_time_verified)
+        "content_verified": chain.get("signature_valid") if rdp else verdict.get("content_verified"),
         "is_os_binary": verdict.get("is_os_binary"),
         "timestamped": verdict.get("timestamped"),
-        "sign_time": verdict.get("sign_time"),
-        "sign_time_verified": verdict.get("sign_time_verified"),
+        "sign_time": chain.get("sign_time") if rdp else verdict.get("sign_time"),
+        "sign_time_verified": chain.get("sign_time_verified") if rdp else verdict.get("sign_time_verified"),
         # signer (the leaf code-signing cert)
         "signer_subject_cn": signer.get("subject_cn"),
         "signer_issuer_cn": signer.get("issuer_cn"),
@@ -386,6 +396,8 @@ def summarize_envelope(env: dict) -> dict:
         except ValueError:
             verdict = None
     warns = [w for w in env.get("warnings") or [] if isinstance(w, dict)]
+    # messages only for the warnings this engine writes: an engine_error's message is the harness's str(exception) from the
+    # VM / transport layer (internal addresses, domain names), which a door must not publish
     return {
         "verdict": verdict,
         "status": fields.get("status"),
@@ -394,7 +406,8 @@ def summarize_envelope(env: dict) -> dict:
         "param_rev": fields.get("param_rev"),          # the knobs the verdict was computed under (null = agent default)
         "param_scripts": fields.get("param_scripts"),
         "warnings": [w.get("code") for w in warns],
-        "warning_details": [{"code": w.get("code"), "message": w.get("message")} for w in warns],
+        "warning_details": [{"code": w.get("code"), "message": w.get("message") if w.get("code") in ENGINE_WARNING_CODES else None}
+                            for w in warns],
         "envelope_status": env.get("status"),
     }
 
@@ -519,7 +532,7 @@ class AuthenticodeEngine:
         summary.fields["authenticode_json"] = raw
 
         # A graveyard hit is a strong malicious signal — surface it as a warning.
-        grave = verdict.get("graveyard") or {}
+        grave = _obj(verdict.get("graveyard"))
         if grave.get("hit"):
             warnings.append(
                 BbWarning(

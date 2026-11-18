@@ -70,7 +70,8 @@ scripts.
 Both doors' job summaries (`result_summary` on the ingress, the `authenticode` pane on the orchestrator)
 carry myatg's raw `verdict` plus the engine's `status`, `myatg_status`, `revocation`, the knobs applied
 (`param_rev`, `param_scripts`), the warning codes (`warnings`) and each warning with its message
-(`warning_details`). On the orchestrator pane the engine's status is `verdict_status`, since the pane's
+(`warning_details`; a message only for the engine's own warnings, never an engine_error's
+infrastructure text). On the orchestrator pane the engine's status is `verdict_status`, since the pane's
 own `status` is its lifecycle (`running`/`done`/`error`). `/jobs` lists `verdict` as the engine's status
 with `myatg_status` and `revocation` beside it; an ingress row written before this summary existed gets
 the same rule applied to its stored raw verdict.
