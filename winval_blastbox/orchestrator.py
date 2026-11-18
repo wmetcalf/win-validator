@@ -8,7 +8,8 @@ TCP), so the orchestrator calls its `HostRunner` in-process rather than the blas
 container dispatcher. EMBER engines (P4) slot into `ENGINES` later with the same shape.
 
 Endpoints:
-  POST /scan        multipart file [+ engines=authenticode,...]   -> {job_id, status}
+  POST /scan        multipart file [+ engines=authenticode,...] [+ rev=online|offline|none] [+ scripts=ps|native]
+                                                                   -> {job_id, status}
   GET  /scan/{id}                                                  -> {status, engines:{...}}
   GET  /cert/{tbs_sha256}                                          -> verdicts seen for a cert
   GET  /healthz                                                    -> pool readiness
@@ -18,6 +19,7 @@ Run on the libvirt host (toolz3):
 """
 from __future__ import annotations
 
+import concurrent.futures.thread as _futures_thread
 import json
 import logging
 import os
@@ -27,25 +29,23 @@ import time
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-
-from blastbox.host.netwire import parse_strict_bool
-import concurrent.futures.thread as _futures_thread
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+from blastbox.host.netwire import parse_strict_bool
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
+from .engine import summarize_envelope, validate_job_params
+from .host_runner import HostRunner
 from .knobs import upload_mb
-
-_log = logging.getLogger("winval.orchestrator")
 from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
-from .host_runner import HostRunner
+_log = logging.getLogger("winval.orchestrator")
 
-# Engine registry. Each entry: name -> callable(path) -> verdict dict. authenticode is the
+# Engine registry. Each entry: name -> callable(path, params) -> verdict dict (params: the job's per-job knobs). authenticode is the
 # only built engine; ember-legacy / ember-2024 (P4) register here later with the same shape.
 # Populated at startup (lifespan) so the VM pool warms once.
 ENGINES: dict[str, Callable[[str], dict]] = {}
@@ -54,26 +54,11 @@ DEFAULT_ENGINES = ("authenticode",)
 
 
 def _authenticode_verdict(env: dict) -> dict:
-    """Extract the myatg verdict (components, not opinion) from a sealed envelope.
-
-    The engine embeds the verbatim myatg JSON as the ``authenticode_json`` payload field
-    and writes it to the ``authenticode.json`` artifact; surface the parsed verdict plus the
-    sealed artifact reference.
-    """
-    fields = (env.get("payload") or {}).get("fields") or {}
-    raw = fields.get("authenticode_json")
-    verdict = None
-    if isinstance(raw, str):
-        try:
-            verdict = json.loads(raw)
-        except ValueError:
-            verdict = None
-    return {
-        "verdict": verdict,
-        "warnings": [w.get("code") for w in env.get("warnings") or []],
-        "artifact": next((a for a in env.get("artifacts") or [] if a.get("id") == "authenticode"), None),
-        "envelope_status": env.get("status"),
-    }
+    """The engine pane for one job: myatg's raw verdict, the engine's revocation-aware status and full warnings
+    (engine.summarize_envelope), plus the sealed artifact reference."""
+    out = summarize_envelope(env)
+    out["artifact"] = next((a for a in env.get("artifacts") or [] if a.get("id") == "authenticode"), None)
+    return out
 
 
 class NotQueued(RuntimeError):
@@ -125,13 +110,13 @@ class JobStore:
                 raise KeyError(f"job {jid} was evicted by the max_jobs cap")
             self._jobs[jid]["engines"][engine] = value
 
-    def submit(self, jid: str, path: str, engines: list[str]) -> None:
+    def submit(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         # the executor refuses BEFORE the put in three ways, all under its own lock (a broken pool, its shutdown, the interpreter's
         # shutdown), and raises AFTER the put in one (a worker thread that cannot start): the first three are NotQueued, the last
         # means the job is queued — classified by the executor's own exceptions, so no check of ours can race its shutdown
         from concurrent.futures.thread import BrokenThreadPool
         try:
-            self._pool.submit(self._run, jid, path, engines)
+            self._pool.submit(self._run, jid, path, engines, params)
         except BrokenThreadPool as exc:
             raise NotQueued(f"the worker pool is broken ({exc})") from exc
         except RuntimeError as exc:
@@ -139,13 +124,13 @@ class JobStore:
                 raise NotQueued("the orchestrator is shutting down") from exc
             raise   # "can't start new thread": the item is queued
 
-    def _run(self, jid: str, path: str, engines: list[str]) -> None:
+    def _run(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         try:
-            self._run_inner(jid, path, engines)
+            self._run_inner(jid, path, engines, params)
         except KeyError as exc:   # the executor never reads the future: an eviction must be SAID here, or it leaves no trace anywhere
             _log.warning("job %s: %s; its upload was removed", jid, exc)
 
-    def _run_inner(self, jid: str, path: str, engines: list[str]) -> None:
+    def _run_inner(self, jid: str, path: str, engines: list[str], params: dict | None = None) -> None:
         try:   # the finally owns the upload temp file whatever happens — a job evicted by the max_jobs cap while queued raised KeyError before the old try, leaking the file
             self._update(jid, status="running")
             for e in engines:
@@ -155,7 +140,7 @@ class JobStore:
                     continue
                 try:
                     self._update_engine(jid, e, {"status": "running"})
-                    result = runner(path)
+                    result = runner(path, params)
                     # a sealed engine_error envelope (VM/transport failure) must surface as 'error',
                     # not a 'done' job with a silently-null verdict indistinguishable from success.
                     e_status = "error" if result.get("envelope_status") == "engine_error" else "done"
@@ -179,7 +164,8 @@ class JobStore:
             v = ac.get("verdict") or {}
             out.append({
                 "job_id": j["job_id"], "filename": j["filename"], "status": j["status"],
-                "verdict": v.get("status"), "signature_type": v.get("signature_type"),
+                "verdict": ac.get("status") or v.get("status"), "myatg_status": v.get("status"),
+                "revocation": ac.get("revocation"), "signature_type": v.get("signature_type"),
                 "graveyard_hit": "graveyard_hit" in (ac.get("warnings") or []),
             })
         return out
@@ -200,7 +186,7 @@ class JobStore:
                     if c.get("tbs_sha256"):
                         certs.append(c["tbs_sha256"].lower())
                 if tbs in certs:
-                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": v.get("status")})
+                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": ac.get("status") or v.get("status")})
         return hits
 
 
@@ -215,7 +201,7 @@ async def lifespan(app: FastAPI):
     if parse_strict_bool(os.environ.get("ORCHESTRATOR_WARM"), default=True):   # blastbox's strict boolean: unset or blank is the default (on), a typo raises at startup, never reads as OFF
         runner = HostRunner()
         runner.warmup()  # boot the VM pool once
-        ENGINES["authenticode"] = lambda p: _authenticode_verdict(runner.validate(p))
+        ENGINES["authenticode"] = lambda p, params=None: _authenticode_verdict(runner.validate(p, params=params))
     yield
     # shutdown: tear the VM pool down cleanly
     from .engine import shutdown_pool
@@ -232,9 +218,15 @@ def healthz() -> dict:
 
 
 @app.post("/scan", status_code=202)
-async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
+async def scan(file: UploadFile = File(...), engines: str = Form(""), rev: str = Form(""), scripts: str = Form("")) -> dict:
+    """``rev`` (online|offline|none) and ``scripts`` (ps|native) are this job's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS;
+    blank = the engine process's environment. An unknown value is a 400 before anything is spooled."""
     if _store is None:
         raise HTTPException(503, "orchestrator not ready")
+    try:
+        params = validate_job_params({"AUTHENTICODE_REV": rev, "AUTHENTICODE_SCRIPTS": scripts})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     sel = [e.strip() for e in engines.split(",") if e.strip()] or list(DEFAULT_ENGINES)
     # Stream the upload to a private temp file in chunks with a hard size cap, so a huge (or
     # slow-loris many-concurrent) upload can't be buffered whole into RAM and OOM the service.
@@ -273,7 +265,7 @@ async def scan(file: UploadFile = File(...), engines: str = Form("")) -> dict:
             pass
         raise
     try:
-        _store.submit(jid, path, sel)
+        _store.submit(jid, path, sel, params)
     except NotQueued as exc:   # refused BEFORE the item is queued — nothing will ever run it
         _store._update(jid, status="error", error=f"could not queue the job: {exc}")
         for e in sel:   # the UI reads the ENGINE pane first: a pane still 'queued' under an error row spun forever
@@ -396,7 +388,7 @@ INDEX_HTML = r"""<!doctype html>
   .job .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
   .Valid{background:#1c3a25;color:#5ee08a} .Revoked,.Distrusted{background:#3a1c1f;color:#ff7b7b}
-  .UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
+  .ValidRevocationUnchecked,.UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
   .NotSigned,.queued,.running,.unknown{background:#2b3543;color:#9fb0c3}
   table{width:100%;border-collapse:collapse} td{padding:4px 8px;vertical-align:top;border-top:1px solid var(--line)}
   td.k{color:var(--mut);width:160px;white-space:nowrap} .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
@@ -465,7 +457,7 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}
     <div class="muted" style="margin-top:8px">${esc((ac.error)||ac.reason||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
-  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(v.status)}
+  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(ac.status||v.status)}${ac.status&&ac.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
     ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;

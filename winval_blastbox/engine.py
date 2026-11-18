@@ -21,9 +21,13 @@ which the harness turns into a clean ``engine_error`` envelope.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import hashlib
 import json
 import os
 import threading
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from blastbox.contract import DeclaredArtifact, Detection, Record
@@ -48,15 +52,59 @@ _POOL_LOCK = threading.Lock()
 
 KNOB_VALUES = {"AUTHENTICODE_REV": "online|offline|none", "AUTHENTICODE_SCRIPTS": "ps|native"}   # winval.env.example's vocabulary
 KNOB_FALLBACK = {"AUTHENTICODE_REV": "the agent read it as online", "AUTHENTICODE_SCRIPTS": "the agent read it as native (only the exact word ps selects PowerShell)"}   # myatg's ternaries, unvalidated
+_KNOB_PARAM = {"AUTHENTICODE_REV": "rev", "AUTHENTICODE_SCRIPTS": "scripts"}   # the agent's query parameter for each knob
+
+# Per-job values for the knobs above (blastbox Job.params; set by HostRunner around one run_detonation). A ContextVar,
+# not os.environ: the pool-manager and the orchestrator run several jobs at once in threads of ONE process.
+_JOB_PARAMS: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar("authenticode_job_params", default=None)
+
+
+def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
+    """The per-job knobs, stripped, blanks dropped. Raises ValueError naming the first key or value the agent does not know:
+    a per-job value comes from a client, so it is refused (the job is sealed ``rejected``, the door answers 400) rather than
+    answered with the agent's startup default as an operator's environment typo is."""
+    out: dict[str, str] = {}
+    for k, v in (params or {}).items():
+        if k not in KNOB_VALUES:
+            raise ValueError(f"{k!r} is not a per-job parameter of this engine (known: {', '.join(KNOB_VALUES)})")
+        if not isinstance(v, str):
+            raise ValueError(f"{k} must be a string, not {type(v).__name__}")
+        v = v.strip()
+        if not v:
+            continue
+        if v not in KNOB_VALUES[k].split("|"):
+            raise ValueError(f"{k}={v[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]})")
+        out[k] = v
+    return out
+
+
+@contextlib.contextmanager
+def job_params(params: Mapping[str, object] | None) -> Iterator[None]:
+    """Run the enclosed detonation under these per-job knobs (unvalidated here: precheck() refuses a bad one)."""
+    token = _JOB_PARAMS.set(dict(params or {}))
+    try:
+        yield
+    finally:
+        _JOB_PARAMS.reset(token)
+
+
+def effective_knobs() -> dict[str, str]:
+    """Each knob's value for the current job: the per-job value when the job set one, else the process environment ('' = unset)."""
+    per_job = _JOB_PARAMS.get() or {}
+    out = {}
+    for k in KNOB_VALUES:
+        v = per_job.get(k)
+        v = v.strip() if isinstance(v, str) else ""
+        out[k] = v or (os.environ.get(k) or "").strip()   # stripped like every knob: whitespace-only is unset
+    return out
 
 
 def unknown_knob_values() -> dict[str, str]:
     """The per-verdict knobs whose (stripped) value names nothing the agent knows: the agent answers such a value with its startup
     default and says nothing, so the verdict carries a warning naming the knob instead."""
     out = {}
-    for k, allowed in KNOB_VALUES.items():
-        v = (os.environ.get(k) or "").strip()
-        if v and v not in allowed.split("|"):
+    for k, v in effective_knobs().items():
+        if v and v not in KNOB_VALUES[k].split("|"):
             out[k] = v
     return out
 
@@ -100,13 +148,21 @@ def shutdown_pool() -> None:
             _POOL = None
 
 
-# Per-job parameters are NOT forwarded by either tier: /scan takes the file (and an engine list on the orchestrator) only,
-# and detonate() reads AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS from the process environment — one operator-wide value for
-# every job. AUTHENTICODE_GV and AUTHENTICODE_TIER are read by nothing (the graveyard is GOLDEN_GRAVEYARD, baked into the
-# golden's serve startup; TIER is not a myatg parameter): an operator who exports either into the ENGINE PROCESS gets a
-# param_not_forwarded warning on every verdict (below) — a request cannot set them at all.
+# Per-job parameters: both doors' /scan take optional `rev` / `scripts` form fields, stored as the Job's params
+# {AUTHENTICODE_REV, AUTHENTICODE_SCRIPTS}; HostRunner runs the job under them (job_params) and they override the process
+# environment for that job only. AUTHENTICODE_GV and AUTHENTICODE_TIER are read by nothing (the graveyard is GOLDEN_GRAVEYARD,
+# baked into the golden's serve startup; TIER is not a myatg parameter): an operator who exports either into the ENGINE
+# PROCESS gets a param_not_forwarded warning on every verdict (below), and a request naming either is refused.
 
-# Extension → (detection label, mime) for the file-type tag on the envelope.
+SCHEMA_VERSION = "authenticode-record/2"   # the Record's field set; bump on any change to _summary()'s keys or meanings
+
+# Every status myatg prints (myatg.cs, rdp_validate.cs). MapPs passes an unmapped PowerShell status through verbatim, so a
+# status outside this set is possible; it is passed through too, with a status_unrecognized warning.
+MYATG_STATUSES = frozenset({
+    "Valid", "HashMismatch", "Revoked", "Distrusted", "UntrustedRoot", "Expired", "NotYetValid", "NotSigned", "UnknownError",
+})
+
+# Extension → (detection label, mime): the fallback when the content has no signature (text formats).
 _EXT_TYPE = {
     ".exe": ("pe", "application/vnd.microsoft.portable-executable"),
     ".dll": ("pe", "application/vnd.microsoft.portable-executable"),
@@ -119,6 +175,36 @@ _EXT_TYPE = {
     ".js": ("script", "text/plain"),
     ".rdp": ("rdp", "text/plain"),
 }
+
+_MIME = {
+    "pe": "application/vnd.microsoft.portable-executable",
+    "msi": "application/x-msi",
+    "cab": "application/vnd.ms-cab-compressed",
+    "catalog": "application/vnd.ms-pki.seccat",
+    "rdp": "application/x-rdp",
+    "script": "text/plain",
+    "binary": "application/octet-stream",
+}
+_RDP_KEYS = (b"full address:s:", b"signscope:s:", b"screen mode id:i:", b"alternate shell:s:", b"remoteapplicationprogram:s:")
+_SNIFF_BYTES = 4096
+
+
+def _sniff(head: bytes) -> str | None:
+    """The file type from the first bytes, or None when nothing in them is decisive."""
+    if head[:2] == b"MZ":
+        return "pe"
+    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":   # OLE compound file: what an MSI is
+        return "msi"
+    if head[:4] == b"MSCF":
+        return "cab"
+    # DER SEQUENCE carrying the PKCS#7 signedData OID (1.2.840.113549.1.7.2): a catalog / detached signature
+    if head[:1] == b"\x30" and b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02" in head[:64]:
+        return "catalog"
+    text = head.replace(b"\x00", b"").lower()   # .rdp files are often UTF-16LE
+    if any(k in text for k in _RDP_KEYS):
+        return "rdp"
+    return None
+
 
 _SCALAR = (str, int, float, bool)
 
@@ -165,8 +251,10 @@ def _status(myatg_status: object, revocation: str | None) -> object:
     return "Revoked" if revocation == "revoked" else VALID_REVOCATION_UNCHECKED
 
 
-def _summary(verdict: dict) -> Record:
+def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
     """Flatten the myatg verdict into the indexed Record summary fields.
+
+    ``params`` are the agent query parameters this verdict was computed under ({rev, scripts}; absent = agent default).
 
     Every lookup is defensive ``.get()`` — myatg's error/oversize skeletons carry
     null/empty values, and the schema may grow.
@@ -177,7 +265,10 @@ def _summary(verdict: dict) -> Record:
     tsa = verdict.get("timestamper") or {}
 
     revocation = _revocation(chain)
+    params = params or {}
+    rdp = "file" in verdict and "signscope_count" in verdict   # rdp_validate.cs's shape
     fields: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
         "file_sha256": verdict.get("file_sha256"),
         # the engine's status: myatg's, with an unchecked-revocation Valid rewritten (see _status); myatg's own string is
         # myatg_status (and verbatim in authenticode_json)
@@ -222,8 +313,43 @@ def _summary(verdict: dict) -> Record:
         "graveyard_matched_on": grave.get("matched_on"),
         "graveyard_malware": grave.get("malware"),
         "graveyard_malware_type": grave.get("malware_type"),
+        # the knobs this verdict was computed under (None = the agent's startup default)
+        "param_rev": params.get("rev"),
+        "param_scripts": params.get("scripts"),
+        # RDP verdicts only (rdp_validate.cs); None on every other verdict
+        "rdp_file_name": verdict.get("file") if rdp else None,
+        "rdp_signscope_count": verdict.get("signscope_count") if rdp else None,
+        "rdp_total_settings": verdict.get("total_settings") if rdp else None,
+        "rdp_unsigned_settings": verdict.get("unsigned_settings") if rdp else None,
+        "rdp_unsigned_dangerous": verdict.get("unsigned_dangerous") if rdp else None,   # a JSON list (as a string)
     }
     return Record(fields={k: _scalar(v) for k, v in fields.items()})
+
+
+def summarize_envelope(env: dict) -> dict:
+    """The doors' per-job summary of a sealed envelope (pool_manager -> ingress result_summary; the orchestrator's engine pane).
+
+    ``verdict`` is myatg's raw verdict (re-parsed from authenticode_json) and its ``status`` is myatg's own string; ``status`` /
+    ``myatg_status`` / ``revocation`` are the engine's Record fields, so a Valid whose revocation went unchecked reads
+    ValidRevocationUnchecked on every door. ``warnings`` stays the list of codes; ``warning_details`` adds each message."""
+    fields = (env.get("payload") or {}).get("fields") or {}
+    raw = fields.get("authenticode_json")
+    verdict = None
+    if isinstance(raw, str):
+        try:
+            verdict = json.loads(raw)
+        except ValueError:
+            verdict = None
+    warns = [w for w in env.get("warnings") or [] if isinstance(w, dict)]
+    return {
+        "verdict": verdict,
+        "status": fields.get("status"),
+        "myatg_status": fields.get("myatg_status"),
+        "revocation": fields.get("revocation"),
+        "warnings": [w.get("code") for w in warns],
+        "warning_details": [{"code": w.get("code"), "message": w.get("message")} for w in warns],
+        "envelope_status": env.get("status"),
+    }
 
 
 class AuthenticodeEngine:
@@ -243,25 +369,51 @@ class AuthenticodeEngine:
     jobs_per_recycle: int = 25
 
     def detect(self, input: Path) -> Detection:
-        label, mime = _EXT_TYPE.get(input.suffix.lower(), ("binary", "application/octet-stream"))
-        return Detection(label=label, mime=mime, confidence=1.0, source="authenticode")
+        """The file type from the content's signature; the extension only names what the content does not (scripts)."""
+        try:
+            with open(input, "rb") as fh:
+                head = fh.read(_SNIFF_BYTES)
+        except OSError:
+            head = b""
+        label = _sniff(head)
+        if label is not None:
+            return Detection(label=label, mime=_MIME[label], confidence=0.95, source="authenticode:magic")
+        ext = _EXT_TYPE.get(input.suffix.lower())
+        if ext is not None:
+            return Detection(label=ext[0], mime=ext[1], confidence=0.5, source="authenticode:extension")
+        return Detection(label="binary", mime=_MIME["binary"], confidence=0.2, source="authenticode")
+
+    def precheck(self, limits: Limits) -> str | None:
+        """Refuse a job whose per-job parameters name a key or value the agent does not know (sealed ``rejected``, no VM)."""
+        try:
+            validate_job_params(_JOB_PARAMS.get())
+        except ValueError as exc:
+            return f"bad per-job parameter: {exc}"
+        return None
 
     def warmup(self, stop_event=None) -> None:
         """Pre-pay the VM-pool boot for the host runner (optional); `stop_event` ends the wait early."""
         get_pool(stop_event=stop_event)
 
     def detonate(self, input: Path, outdir: Path, limits: Limits) -> DetonationResult:
-        # rev/scripts come from THIS process's environment (see the module comment: nothing forwards per-job
-        # parameters) and go to the agent as ?rev=/?scripts=; gv (graveyard) is baked into the golden's
+        # rev/scripts come from the job's params or THIS process's environment and go to the agent as ?rev=/?scripts=; gv (graveyard) is baked into the golden's
         # --serve-http startup and TIER isn't a myatg parameter, so an operator export of either is
         # answered with a warning rather than silently ignored.
-        req_params = {}
-        rev = (os.environ.get("AUTHENTICODE_REV") or "").strip()   # stripped like every knob: whitespace-only is unset (an agent answers a stray
-        if rev:                                                   # ?rev=++ with its startup default, silently)
-            req_params["rev"] = rev
-        scripts = (os.environ.get("AUTHENTICODE_SCRIPTS") or "").strip()
-        if scripts:
-            req_params["scripts"] = scripts
+        # A bad per-job parameter is refused BEFORE the VM sees the input. precheck() does this on a blastbox whose harness calls
+        # it; this repeats it for one that does not (the released harness), so the refusal never depends on the harness version.
+        reason = self.precheck(limits)
+        if reason is not None:
+            return DetonationResult(
+                payload=Record(fields={}),
+                artifacts=[],
+                detected=self.detect(input),
+                warnings=[BbWarning(code="precheck_rejected", message=reason[:2000])],
+                status="rejected",
+            )
+
+        # per-job values (job_params) override the environment; blanks are unset (an agent answers a stray ?rev=++ with its
+        # startup default, silently)
+        req_params = {_KNOB_PARAM[k]: v for k, v in effective_knobs().items() if v}
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
@@ -283,7 +435,20 @@ class AuthenticodeEngine:
         raw = json.dumps(verdict, separators=(",", ":"), default=str)
         (outdir / "authenticode.json").write_text(raw, encoding="utf-8")
 
-        summary = _summary(verdict)
+        summary = _summary(verdict, req_params)
+        if summary.fields.get("file_sha256") is None:   # RDP verdicts name the file, and myatg's error skeleton carries null:
+            h = hashlib.sha256()                         # the engine hashes the input it was handed
+            with open(input, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            summary.fields["file_sha256"] = h.hexdigest()
+
+        myatg_status = verdict.get("status")
+        if myatg_status not in MYATG_STATUSES:
+            warnings.append(BbWarning(
+                code="status_unrecognized",
+                message=f"myatg status {str(myatg_status)[:200]!r} is not one this engine knows ({', '.join(sorted(MYATG_STATUSES))}); passed through",
+            ))
         # Embed the verbatim verdict so the full chain survives in the envelope,
         # not only in the artifact (the ClippyShot clippyshot_metadata pattern).
         summary.fields["authenticode_json"] = raw

@@ -103,3 +103,16 @@ def test_valid_with_unchecked_revocation_conforms_and_is_named(tmp_path, replay,
     assert "authenticode.status.ValidRevocationUnchecked" in CODES
     assert "authenticode.revocation.unchecked" in CODES
     assert "revocation-unknown-is-valid" not in {g.id for g in CONTRACT.gaps}
+
+
+def test_rejected_job_param_seals_a_conforming_rejection(tmp_path, replay):
+    replay(_ReplayPool(json.loads(FIXTURES[0].read_text())))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "cached"})
+    assert env["status"] == "rejected"
+    ec.assert_conforms(CONTRACT, env)
+
+
+def test_every_warning_code_the_engine_emits_is_named_by_the_contract():
+    toml = CONTRACT_PATH.read_text()
+    for code in ("graveyard_hit", "status_unrecognized", "param_unknown_value", "param_not_forwarded"):
+        assert code in toml

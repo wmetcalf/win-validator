@@ -20,7 +20,7 @@ from pathlib import Path
 
 from blastbox.host.jobs.base import Job, JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
@@ -43,6 +43,31 @@ def _warnings(job: Job) -> list[str]:
     return (job.result_summary or {}).get("warnings") or []
 
 
+def _status(job: Job) -> str | None:
+    """The engine's revocation-aware status (ValidRevocationUnchecked where myatg said Valid without checking revocation);
+    a row written before the pool-manager recorded it falls back to myatg's own."""
+    return (job.result_summary or {}).get("status") or _verdict(job).get("status")
+
+
+# The per-job knobs this door accepts, as form fields, and their vocabulary (engine.KNOB_VALUES; the ingress does not
+# import the engine, whose module pulls in the VM pool). The pool-manager's engine re-validates them (precheck).
+_PARAM_FIELDS = {"rev": ("AUTHENTICODE_REV", ("online", "offline", "none")),
+                 "scripts": ("AUTHENTICODE_SCRIPTS", ("ps", "native"))}
+
+
+def _job_params(**given: str) -> dict[str, str]:
+    out = {}
+    for name, value in given.items():
+        key, allowed = _PARAM_FIELDS[name]
+        v = (value or "").strip()
+        if not v:
+            continue
+        if v not in allowed:
+            raise HTTPException(status_code=400, detail=f"{name}={v[:200]!r} is not one of {'|'.join(allowed)}")
+        out[key] = v
+    return out
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok", "store": type(_store).__name__,
@@ -50,13 +75,17 @@ def healthz() -> dict:
 
 
 @app.post("/scan", status_code=202)
-async def scan(file: UploadFile = File(...)) -> dict:
+async def scan(file: UploadFile = File(...), rev: str = Form(""), scripts: str = Form("")) -> dict:
+    """``rev`` (online|offline|none) and ``scripts`` (ps|native) set this job's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS;
+    blank = the pool-manager's environment. An unknown value is a 400 before anything is spooled."""
+    params = _job_params(rev=rev, scripts=scripts)
     name = Path(file.filename or "input").name
     if not name or name in (".", "..") or "\x00" in name:   # '.', '..' and '/' have an empty basename (the spool path would be the input DIRECTORY); a NUL made open() raise ValueError as a 500 with a rowless dir left behind
         raise HTTPException(status_code=400, detail="filename has no usable name")
     if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX: the open() would fail with ENAMETOOLONG as a 500, leaving a rowless job dir per request
         raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
     job = Job.new(engine=ENGINE, filename=name)
+    job.params = params
     job.result_dir = str(JOB_ROOT / job.job_id)
     indir = Path(job.result_dir) / "input"
     indir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +145,8 @@ def jobs(limit: int = 80) -> dict:
     for j in _store.list(limit=min(max(limit, 1), 500), newest_first=True):
         v = _verdict(j)
         out.append({"job_id": j.job_id, "filename": j.filename, "status": j.status.value,
-                    "verdict": v.get("status"), "signature_type": v.get("signature_type"),
+                    "verdict": _status(j), "myatg_status": v.get("status"),
+                    "revocation": (j.result_summary or {}).get("revocation"), "signature_type": v.get("signature_type"),
                     "graveyard_hit": "graveyard_hit" in _warnings(j)})
     return {"jobs": out}
 
@@ -141,7 +171,7 @@ def cert(tbs_sha256: str) -> dict:
             if c.get("tbs_sha256"):
                 certs.append(c["tbs_sha256"].lower())
         if tbs in certs:
-            hits.append({"job_id": j.job_id, "filename": j.filename, "status": v.get("status")})
+            hits.append({"job_id": j.job_id, "filename": j.filename, "status": _status(j)})
     # the bound is part of the answer: an older sighting past the window must not read as "never seen"
     return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": truncated}
 
@@ -172,7 +202,7 @@ INDEX_HTML = r"""<!doctype html>
   .job:hover{border-color:var(--acc)} .job .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
   .Valid{background:#1c3a25;color:#5ee08a} .Revoked,.Distrusted,.failed{background:#3a1c1f;color:#ff7b7b}
-  .UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
+  .ValidRevocationUnchecked,.UntrustedRoot,.HashMismatch,.Expired,.NotYetValid,.UnknownError,.ContentUnverified{background:#3a311c;color:#ffce6b}
   .NotSigned,.queued,.running,.unknown,.done{background:#2b3543;color:#9fb0c3}
   table{width:100%;border-collapse:collapse} td{padding:4px 8px;vertical-align:top;border-top:1px solid var(--line)}
   td.k{color:var(--mut);width:160px;white-space:nowrap} .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
@@ -234,7 +264,7 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)}
     <div class="muted" style="margin-top:8px">${esc(j.error||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
-  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(v.status)}
+  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
     ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;

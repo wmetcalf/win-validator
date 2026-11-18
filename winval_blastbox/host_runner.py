@@ -31,7 +31,7 @@ from pathlib import Path
 from blastbox.limits import Limits
 from blastbox.worker.harness import run_detonation
 
-from .engine import AuthenticodeEngine, shutdown_pool
+from .engine import AuthenticodeEngine, job_params, shutdown_pool
 
 
 class HostRunner:
@@ -45,8 +45,11 @@ class HostRunner:
         """Boot the VM pool up front (otherwise paid on the first validate); `stop_event` ends the wait early."""
         self.engine.warmup(stop_event=stop_event)
 
-    def validate_to_dir(self, input_path: str | Path, output_dir: str | Path) -> dict:
+    def validate_to_dir(self, input_path: str | Path, output_dir: str | Path, params: dict | None = None) -> dict:
         """Validate ``input_path``, sealing artifacts + metadata.json into ``output_dir``.
+
+        ``params`` are the job's per-job knobs ({AUTHENTICODE_REV, AUTHENTICODE_SCRIPTS}); they override the process
+        environment for this job only, and a key or value the agent does not know seals ``rejected`` without a VM.
 
         Returns the parsed sealed envelope. ``output_dir`` afterwards holds
         ``metadata.json`` plus the ``authenticode.json`` artifact.
@@ -56,12 +59,13 @@ class HostRunner:
         envelope = output_dir / "metadata.json"
         if envelope.exists():   # a populated outdir handed back the PREVIOUS run's envelope when this run wrote nothing
             raise FileExistsError(f"{envelope} already exists: validate_to_dir needs an output dir without an envelope")
-        rc = run_detonation(
-            self.engine,
-            input_path=input_path,
-            output_dir=output_dir,
-            limits=self.limits,
-        )
+        with job_params(params):
+            rc = run_detonation(
+                self.engine,
+                input_path=input_path,
+                output_dir=output_dir,
+                limits=self.limits,
+            )
         if rc or not envelope.exists():   # 1 = the envelope could not be written (logged CRITICAL by the harness): there is no verdict to read
             note = ""
             if envelope.exists():   # a truncated write (ENOSPC mid-file) leaves a file that is not an envelope and would poison the directory for the next run
@@ -73,10 +77,10 @@ class HostRunner:
             raise RuntimeError(f"run_detonation returned {rc}: no envelope at {envelope}{note}")
         return json.loads(envelope.read_text(encoding="utf-8"))
 
-    def validate(self, input_path: str | Path) -> dict:
+    def validate(self, input_path: str | Path, params: dict | None = None) -> dict:
         """Validate a file in a throwaway output dir; return the sealed envelope."""
         with tempfile.TemporaryDirectory(prefix="authenticode-out-") as out:
-            return self.validate_to_dir(input_path, out)
+            return self.validate_to_dir(input_path, out, params=params)
 
     def shutdown(self) -> None:
         shutdown_pool()

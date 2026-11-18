@@ -150,8 +150,6 @@ def test_the_four_readers_are_the_only_ones():
     If this fails, the new reader needs the same trim-and-refuse rule and its own case
     in this file -- not a quiet fourth opinion about what the operator typed.
     """
-    from pathlib import Path
-
     from conftest import REPO
 
     readers = set()
