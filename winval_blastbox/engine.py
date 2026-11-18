@@ -26,6 +26,7 @@ import contextvars
 import hashlib
 import json
 import os
+import re
 import threading
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -36,6 +37,7 @@ from blastbox.limits import Limits
 from blastbox.worker.engine import DetonationResult
 
 from .knobs import env_int
+from .revocation import _status, verdict_revocation
 from .vm_pool import WarmVmPool
 
 # ---------------------------------------------------------------------------
@@ -152,7 +154,9 @@ def shutdown_pool() -> None:
 # {AUTHENTICODE_REV, AUTHENTICODE_SCRIPTS}; HostRunner runs the job under them (job_params) and they override the process
 # environment for that job only. AUTHENTICODE_GV and AUTHENTICODE_TIER are read by nothing (the graveyard is GOLDEN_GRAVEYARD,
 # baked into the golden's serve startup; TIER is not a myatg parameter): an operator who exports either into the ENGINE
-# PROCESS gets a param_not_forwarded warning on every verdict (below), and a request naming either is refused.
+# PROCESS gets a param_not_forwarded warning on every verdict (below), and a Job.params key naming either is refused (precheck).
+# The doors take only the `rev` / `scripts` form fields: any other field (e.g. AUTHENTICODE_REV=) is ignored, and the job's
+# summary records the knobs actually applied (param_rev / param_scripts).
 
 SCHEMA_VERSION = "authenticode-record/2"   # the Record's field set; bump on any change to _summary()'s keys or meanings
 
@@ -179,6 +183,7 @@ _EXT_TYPE = {
 _MIME = {
     "pe": "application/vnd.microsoft.portable-executable",
     "msi": "application/x-msi",
+    "ole": "application/x-ole-storage",
     "cab": "application/vnd.ms-cab-compressed",
     "catalog": "application/vnd.ms-pki.seccat",
     "rdp": "application/x-rdp",
@@ -187,21 +192,54 @@ _MIME = {
 }
 _RDP_KEYS = (b"full address:s:", b"signscope:s:", b"screen mode id:i:", b"alternate shell:s:", b"remoteapplicationprogram:s:")
 _SNIFF_BYTES = 4096
+_RDP_LINE = re.compile(rb"^[a-z0-9 ]+:[sib]:")
+
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+# Root-entry CLSIDs (little-endian GUID bytes) of the Windows Installer family: MSI {000C1084-..}, MSP {000C1086-..},
+# MST {000C1082-..}. Office documents (.doc/.xls/.ppt) are OLE compound files too, with other CLSIDs.
+_MSI_CLSIDS = frozenset(bytes([b, 0x10, 0x0C, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46]) for b in (0x84, 0x86, 0x82))
+_OLE_UNDETERMINED = "ole?"
+
+
+def _ole_root_clsid_offset(head: bytes) -> int | None:
+    """File offset of an OLE compound file's root-entry CLSID (the first directory entry), or None for a malformed header."""
+    shift = int.from_bytes(head[0x1E:0x20], "little")
+    if shift not in (9, 12) or len(head) < 0x34:
+        return None
+    sect = int.from_bytes(head[0x30:0x34], "little")
+    if sect >= 0xFFFFFFFA:   # MAXREGSECT: ENDOFCHAIN/FREESECT etc. are not a directory sector
+        return None
+    return ((sect + 1) << shift) + 0x50
+
+
+def _ole_kind(head: bytes) -> str:
+    """msi / ole from an OLE compound file's root-entry CLSID, or _OLE_UNDETERMINED when the root entry is outside `head`."""
+    off = _ole_root_clsid_offset(head)
+    clsid = head[off:off + 16] if off is not None else b""
+    if len(clsid) < 16:
+        return _OLE_UNDETERMINED
+    return "msi" if clsid in _MSI_CLSIDS else "ole"
 
 
 def _sniff(head: bytes) -> str | None:
     """The file type from the first bytes, or None when nothing in them is decisive."""
     if head[:2] == b"MZ":
         return "pe"
-    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":   # OLE compound file: what an MSI is
-        return "msi"
+    if head[:8] == _OLE_MAGIC:   # OLE compound file: an MSI, or an Office document, told apart by the root CLSID
+        return _ole_kind(head)
     if head[:4] == b"MSCF":
         return "cab"
     # DER SEQUENCE carrying the PKCS#7 signedData OID (1.2.840.113549.1.7.2): a catalog / detached signature
     if head[:1] == b"\x30" and b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02" in head[:64]:
         return "catalog"
     text = head.replace(b"\x00", b"").lower()   # .rdp files are often UTF-16LE
-    if any(k in text for k in _RDP_KEYS):
+    if text.startswith(b"\xff\xfe"):
+        text = text[2:]
+    # an .rdp file is `name:type:value` lines: its FIRST line is one, and a known key starts a line (a script that merely
+    # mentions 'full address:s:' mid-line is not an .rdp)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if lines and _RDP_LINE.match(lines[0]) and any(ln.startswith(k) for ln in lines for k in _RDP_KEYS):
         return "rdp"
     return None
 
@@ -214,41 +252,6 @@ def _scalar(v: object) -> str | int | float | bool | None:
     if v is None or isinstance(v, _SCALAR):
         return v
     return json.dumps(v, separators=(",", ":"), default=str)
-
-
-# myatg's chain.revocation_checked vocabulary (myatg.cs / rdp_validate.cs): "online" / "offline" = the responders (or the
-# CRL cache) answered; "unknown" = they were unreachable; "none" = checking switched off (AUTHENTICODE_REV=none).
-_REV_CHECKED = frozenset({"online", "offline"})
-_REV_UNCHECKED = frozenset({"unknown", "none"})
-
-# The status the engine reports for myatg's Valid when revocation was not checked good.
-VALID_REVOCATION_UNCHECKED = "ValidRevocationUnchecked"
-
-
-def _revocation(chain: dict | None) -> str | None:
-    """The revocation half of the verdict, explicit: checked_good | revoked | unchecked | error, or None (no chain evaluated).
-
-    Fail-closed: a revocation_checked value outside myatg's known vocabulary (or a chain without one) is "error", never good."""
-    if not chain:
-        return None
-    if chain.get("revoked") is True:
-        return "revoked"
-    rc = chain.get("revocation_checked")
-    if isinstance(rc, str) and rc in _REV_CHECKED:
-        return "checked_good"
-    if isinstance(rc, str) and rc in _REV_UNCHECKED:
-        return "unchecked"
-    return "error"
-
-
-def _status(myatg_status: object, revocation: str | None) -> object:
-    """myatg's status, except that Valid is never claimed unless revocation was checked good.
-
-    myatg answers Valid when the responders were unreachable or checking was off; reported verbatim that made such a Record
-    indistinguishable from a fully checked one. A revoked chain under Valid is reported Revoked."""
-    if myatg_status != "Valid" or revocation == "checked_good":
-        return myatg_status
-    return "Revoked" if revocation == "revoked" else VALID_REVOCATION_UNCHECKED
 
 
 def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
@@ -264,7 +267,7 @@ def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
     grave = verdict.get("graveyard") or {}
     tsa = verdict.get("timestamper") or {}
 
-    revocation = _revocation(chain)
+    revocation = verdict_revocation(verdict)
     params = params or {}
     rdp = "file" in verdict and "signscope_count" in verdict   # rdp_validate.cs's shape
     fields: dict[str, object] = {
@@ -346,6 +349,8 @@ def summarize_envelope(env: dict) -> dict:
         "status": fields.get("status"),
         "myatg_status": fields.get("myatg_status"),
         "revocation": fields.get("revocation"),
+        "param_rev": fields.get("param_rev"),          # the knobs the verdict was computed under (null = agent default)
+        "param_scripts": fields.get("param_scripts"),
         "warnings": [w.get("code") for w in warns],
         "warning_details": [{"code": w.get("code"), "message": w.get("message")} for w in warns],
         "envelope_status": env.get("status"),
@@ -373,9 +378,21 @@ class AuthenticodeEngine:
         try:
             with open(input, "rb") as fh:
                 head = fh.read(_SNIFF_BYTES)
+                label = _sniff(head)
+                if label == _OLE_UNDETERMINED:   # the root directory entry lies past the sniffed bytes: read its CLSID there
+                    off = _ole_root_clsid_offset(head)
+                    if off is not None:
+                        fh.seek(off)
+                        clsid = fh.read(16)
+                        if len(clsid) == 16:
+                            label = "msi" if clsid in _MSI_CLSIDS else "ole"
         except OSError:
             head = b""
-        label = _sniff(head)
+            label = None
+        if label == _OLE_UNDETERMINED:   # an OLE file whose root entry is past the sniffed bytes: the extension names the kind
+            if input.suffix.lower() in (".msi", ".msp", ".mst"):
+                return Detection(label="msi", mime=_MIME["msi"], confidence=0.7, source="authenticode:magic+extension")
+            return Detection(label="ole", mime=_MIME["ole"], confidence=0.7, source="authenticode:magic")
         if label is not None:
             return Detection(label=label, mime=_MIME[label], confidence=0.95, source="authenticode:magic")
         ext = _EXT_TYPE.get(input.suffix.lower())

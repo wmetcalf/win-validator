@@ -152,6 +152,12 @@ source = "warnings[].code == 'param_unknown_value'"
 description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS names a value the agent does not know; the verdict was computed under the agent's default. (A per-job value like that is refused: status rejected.)"
 
 [[detections]]
+code = "precheck_rejected"
+severity = "low"
+source = "warnings[].code == 'precheck_rejected' (status rejected; payload.fields empty)"
+description = "A per-job parameter names a key or value the agent does not know; the job was refused before the VM saw the input (detonate()'s own refusal, for a harness that does not call precheck)."
+
+[[detections]]
 code = "param_not_forwarded"
 severity = "low"
 source = "warnings[].code == 'param_not_forwarded'"

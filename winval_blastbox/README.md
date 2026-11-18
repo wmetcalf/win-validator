@@ -63,18 +63,23 @@ rdp_signscope_count, rdp_total_settings, rdp_unsigned_settings, rdp_unsigned_dan
 `file_sha256` is the engine's own hash of the input when myatg names none (RDP, error skeleton).
 A graveyard hit emits a `graveyard_hit` warning; a myatg status outside the known set
 (`engine.MYATG_STATUSES`) is passed through with a `status_unrecognized` warning. The envelope's
-`detected` type comes from the content's signature (PE, OLE/MSI, CAB, PKCS#7 catalog, RDP text), the
-extension only for scripts.
+`detected` type comes from the content's signature (PE, CAB, PKCS#7 catalog, RDP text; an OLE compound
+file is `msi` when its root-entry CLSID is the Windows Installer one, else `ole`), the extension only for
+scripts.
 
 Both doors' job summaries (`result_summary` on the ingress, the `authenticode` pane on the orchestrator)
-carry myatg's raw `verdict` plus the engine's `status`, `myatg_status`, `revocation`, the warning codes
-(`warnings`) and each warning with its message (`warning_details`). `/jobs` lists `verdict` as the
-engine's status with `myatg_status` and `revocation` beside it.
+carry myatg's raw `verdict` plus the engine's `status`, `myatg_status`, `revocation`, the knobs applied
+(`param_rev`, `param_scripts`), the warning codes (`warnings`) and each warning with its message
+(`warning_details`). On the orchestrator pane the engine's status is `verdict_status`, since the pane's
+own `status` is its lifecycle (`running`/`done`/`error`). `/jobs` lists `verdict` as the engine's status
+with `myatg_status` and `revocation` beside it; an ingress row written before this summary existed gets
+the same rule applied to its stored raw verdict.
 
 `revocation` is the revocation half of the verdict, explicit: `checked_good` (responders or CRL cache
 answered, not revoked), `revoked`, `unchecked` (`chain_revocation_checked` is `unknown` = responders
 unreachable, or `none` = `AUTHENTICODE_REV=none`), `error` (a chain whose answer is missing or outside
-myatg's vocabulary; treated as not checked), or null (no chain evaluated: NotSigned, error skeleton).
+myatg's vocabulary; treated as not checked), or null (no chain evaluated: NotSigned, error skeleton). A
+`Valid` with no chain (myatg's `scripts=ps` branch) is `unchecked`.
 myatg answers `Valid` in the unchecked case, so `status` never repeats a bare `Valid` there: it is
 `ValidRevocationUnchecked` unless `revocation == "checked_good"` (`Revoked` if the chain is revoked).
 Every other status passes through; myatg's own string is always `myatg_status`.

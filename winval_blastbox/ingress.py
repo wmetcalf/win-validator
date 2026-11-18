@@ -24,6 +24,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
+from .revocation import verdict_status
 from .knobs import ENGINE, upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
@@ -45,8 +46,12 @@ def _warnings(job: Job) -> list[str]:
 
 def _status(job: Job) -> str | None:
     """The engine's revocation-aware status (ValidRevocationUnchecked where myatg said Valid without checking revocation);
-    a row written before the pool-manager recorded it falls back to myatg's own."""
-    return (job.result_summary or {}).get("status") or _verdict(job).get("status")
+    a row written before the pool-manager recorded it gets the same rule applied to its stored raw verdict."""
+    rs = job.result_summary or {}
+    if rs.get("status"):
+        return rs["status"]
+    v = _verdict(job)
+    return verdict_status(v) if v else None
 
 
 # The per-job knobs this door accepts, as form fields, and their vocabulary (engine.KNOB_VALUES; the ingress does not

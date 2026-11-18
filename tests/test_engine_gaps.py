@@ -112,9 +112,27 @@ def test_myatg_hash_is_kept_when_present(tmp_path, pool):
 
 
 # --- detection by content ------------------------------------------------------------------
+def _ole(root_clsid: bytes, dir_sect: int = 0) -> bytes:
+    """A minimal OLE compound file (512-byte sectors, first directory sector 0) whose root entry carries `root_clsid`.
+    An MSI's root CLSID is {000C1084-...}; a Word .doc's is {00020906-...}: the OLE magic alone cannot tell them apart."""
+    hdr = bytearray(512)
+    hdr[:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    hdr[0x1E:0x20] = (9).to_bytes(2, "little")     # sector shift: 512
+    hdr[0x30:0x34] = dir_sect.to_bytes(4, "little")   # first directory sector
+    root = bytearray(128)
+    root[0x50:0x60] = root_clsid
+    return bytes(hdr) + b"\0" * (512 * dir_sect) + bytes(root) + b"\0" * 384
+
+
 @pytest.mark.parametrize("name,data,label", [
     ("innocent.txt", b"MZ\x90\x00" + b"\0" * 60, "pe"),
-    ("x.exe", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "msi"),
+    ("x.exe", _ole(b"\x84\x10\x0c\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"), "msi"),
+    ("x.doc", _ole(b"\x06\x09\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"), "ole"),
+    ("x.bin", _ole(b"\x84\x10\x0c\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46", dir_sect=20), "msi"),
+    ("x.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "msi"),
+    ("a.ps1", b"Set-Content x.rdp -Value 'full address:s:evil'\r\n", "script"),
+    ("b.rdp", b"\xff\xfe" + "screen mode id:i:2\r\nfull address:s:host\r\n".encode("utf-16-le"), "rdp"),
+    ("x.bin", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "ole"),
     ("x.cab", b"MSCF\0\0\0\0" + b"\0" * 56, "cab"),
     ("x.bin", b"\x30\x82\x01\x00\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02", "catalog"),
     ("a.rdp", b"screen mode id:i:2\r\nfull address:s:host\r\n", "rdp"),
@@ -221,12 +239,36 @@ def test_door_summary_is_revocation_aware(tmp_path, pool, door):
     else:
         from winval_blastbox.orchestrator import _authenticode_verdict as summarize
     s = summarize(env)
-    assert s["status"] == "ValidRevocationUnchecked"
+    assert s["status" if door == "pool_manager" else "verdict_status"] == "ValidRevocationUnchecked"
     assert s["myatg_status"] == "Valid" and s["verdict"]["status"] == "Valid"   # myatg's raw verdict alongside
     assert s["revocation"] == "unchecked"
     assert "graveyard_hit" in s["warnings"]   # codes, as before
     gv = [w for w in s["warning_details"] if w["code"] == "graveyard_hit"]
     assert gv and "matched_on=" in gv[0]["message"]
+
+
+@pytest.mark.parametrize("envelope_status,pane_status", [("ok", "done"), ("engine_error", "error"), ("rejected", "error")])
+def test_orchestrator_pane_keeps_its_lifecycle_status(tmp_path, pool, monkeypatch, envelope_status, pane_status):
+    # the pane's `status` is its lifecycle (queued/running/done/error); the engine's revocation-aware status rides beside it
+    # and must not overwrite it (an engine_error pane read status=None, a Valid one read 'Valid' instead of 'done')
+    import winval_blastbox.orchestrator as orch
+    env = _envelope(tmp_path, pool, _unchecked_valid())
+    if envelope_status != "ok":
+        env = {"status": envelope_status, "payload": {"fields": {}}, "warnings": [], "artifacts": []}
+    monkeypatch.setitem(orch.ENGINES, "authenticode", lambda p, params=None: orch._authenticode_verdict(env))
+    store = orch.JobStore(max_workers=1)
+    jid = store.create("a.exe", ["authenticode"])
+    f = tmp_path / "a.exe"
+    f.write_bytes(b"MZ")
+    store._run_inner(jid, str(f), ["authenticode"])
+    pane = store.get(jid)["engines"]["authenticode"]
+    assert pane["status"] == pane_status
+    row = store.list_jobs()[0]
+    if envelope_status == "ok":
+        assert pane["verdict_status"] == "ValidRevocationUnchecked"
+        assert row["verdict"] == "ValidRevocationUnchecked" and row["myatg_status"] == "Valid"
+    else:
+        assert row["verdict"] is None
 
 
 def _ingress(monkeypatch, tmp_path):
@@ -375,3 +417,40 @@ def test_orchestrator_refuses_bad_params(monkeypatch, rev, scripts):
 def test_ingress_param_vocabulary_is_the_engines():
     import winval_blastbox.ingress as ingress
     assert {k: "|".join(v) for k, v in ingress._PARAM_FIELDS.values()} == eng.KNOB_VALUES
+
+
+def test_valid_without_a_chain_reports_revocation_unchecked():
+    # myatg's scripts=ps branch can answer Valid with chain:null (PowerShell's verdict, no embedded PKCS#7 parsed): no
+    # revocation was evaluated, so the Record says `unchecked` (the contract's source for ValidRevocationUnchecked), not
+    # null (which means "no chain evaluated: NotSigned / error skeleton")
+    v = _load("valid_script_graveyard_hit.json")
+    v["chain"] = None
+    f = eng._summary(v).fields
+    assert f["status"] == "ValidRevocationUnchecked"
+    assert f["revocation"] == "unchecked"
+    n = _load("valid_script_graveyard_hit.json")
+    n["status"], n["chain"] = "NotSigned", None
+    assert eng._summary(n).fields["revocation"] is None
+
+
+def test_ingress_derives_the_revocation_aware_status_for_pre_upgrade_rows(monkeypatch, tmp_path):
+    # a row the previous pool-manager wrote has myatg's raw verdict but no engine `status`: the door applies the engine's
+    # rule to that verdict rather than showing myatg's bare Valid
+    from blastbox.host.jobs.base import Job, JobStatus
+    ingress = _ingress(monkeypatch, tmp_path)
+    v = _unchecked_valid()
+    j = Job.new(engine="authenticode", filename="old.exe")
+    ingress._store.create(j)
+    ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary={"verdict": v, "warnings": [], "envelope_status": "ok"})
+    assert ingress.jobs()["jobs"][0]["verdict"] == "ValidRevocationUnchecked"
+    assert ingress.cert(v["signer"]["tbs_sha256"])["seen_in"][0]["status"] == "ValidRevocationUnchecked"
+
+
+def test_door_summary_records_the_knobs_the_verdict_was_computed_under(tmp_path, pool):
+    # the door shows which rev/scripts applied (Job.params is stripped from the public job), so a client that misnamed a
+    # form field can see its value did not apply
+    pool(_unchecked_valid())
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "none"})
+    s = eng.summarize_envelope(env)
+    assert s["param_rev"] == "none"
+    assert "param_scripts" in s

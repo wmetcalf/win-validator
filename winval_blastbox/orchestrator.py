@@ -57,6 +57,9 @@ def _authenticode_verdict(env: dict) -> dict:
     """The engine pane for one job: myatg's raw verdict, the engine's revocation-aware status and full warnings
     (engine.summarize_envelope), plus the sealed artifact reference."""
     out = summarize_envelope(env)
+    # the pane's own `status` is its lifecycle (queued/running/done/error, set by JobStore._run_inner); the engine's
+    # revocation-aware status is carried as `verdict_status` so neither overwrites the other
+    out["verdict_status"] = out.pop("status")
     out["artifact"] = next((a for a in env.get("artifacts") or [] if a.get("id") == "authenticode"), None)
     return out
 
@@ -141,9 +144,9 @@ class JobStore:
                 try:
                     self._update_engine(jid, e, {"status": "running"})
                     result = runner(path, params)
-                    # a sealed engine_error envelope (VM/transport failure) must surface as 'error',
-                    # not a 'done' job with a silently-null verdict indistinguishable from success.
-                    e_status = "error" if result.get("envelope_status") == "engine_error" else "done"
+                    # a sealed engine_error (VM/transport failure) or rejected (a per-job parameter the agent does not
+                    # know) envelope must surface as 'error', not a 'done' job with a silently-null verdict.
+                    e_status = "error" if result.get("envelope_status") in ("engine_error", "rejected") else "done"
                     self._update_engine(jid, e, {"status": e_status, **result})
                 except Exception as exc:  # noqa: BLE001 — one engine failing must not sink the job
                     self._update_engine(jid, e, {"status": "error", "error": type(exc).__name__})
@@ -164,7 +167,7 @@ class JobStore:
             v = ac.get("verdict") or {}
             out.append({
                 "job_id": j["job_id"], "filename": j["filename"], "status": j["status"],
-                "verdict": ac.get("status") or v.get("status"), "myatg_status": v.get("status"),
+                "verdict": ac.get("verdict_status") or v.get("status"), "myatg_status": v.get("status"),
                 "revocation": ac.get("revocation"), "signature_type": v.get("signature_type"),
                 "graveyard_hit": "graveyard_hit" in (ac.get("warnings") or []),
             })
@@ -186,7 +189,7 @@ class JobStore:
                     if c.get("tbs_sha256"):
                         certs.append(c["tbs_sha256"].lower())
                 if tbs in certs:
-                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": ac.get("status") or v.get("status")})
+                    hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": ac.get("verdict_status") or v.get("status")})
         return hits
 
 
@@ -457,7 +460,7 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}
     <div class="muted" style="margin-top:8px">${esc((ac.error)||ac.reason||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
-  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(ac.status||v.status)}${ac.status&&ac.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
+  let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(ac.verdict_status||v.status)}${ac.verdict_status&&ac.verdict_status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
     ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
