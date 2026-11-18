@@ -640,3 +640,12 @@ def test_the_published_warning_codes_are_every_code_the_engine_writes():
     import re
     src = Path(eng.__file__).read_text()
     assert set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src)) == eng.ENGINE_WARNING_CODES
+
+
+@pytest.mark.parametrize("value", [1, True, "abc", {"a": 1}])
+def test_a_non_list_chain_chain_does_not_drop_the_verdict(tmp_path, pool, value):
+    v = _load("untrusted_root.json")
+    v["chain"]["chain"] = value
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"

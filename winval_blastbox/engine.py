@@ -349,7 +349,7 @@ def _summary(verdict: dict, params: Mapping[str, str] | None = None) -> Record:
         "signer_not_before": signer.get("not_before"),
         "signer_not_after": signer.get("not_after"),
         # chain
-        "chain_len": len(chain.get("chain") or []),
+        "chain_len": len(chain["chain"]) if isinstance(chain.get("chain"), list) else 0,
         "chain_explicit_distrust": chain.get("explicit_distrust"),
         "chain_valid_at_sign_time": chain.get("valid_at_sign_time"),
         "chain_chains_to_trusted_root": chain.get("chains_to_trusted_root"),
@@ -386,7 +386,8 @@ def summarize_envelope(env: dict) -> dict:
 
     ``verdict`` is myatg's raw verdict (re-parsed from authenticode_json) and its ``status`` is myatg's own string; ``status`` /
     ``myatg_status`` / ``revocation`` are the engine's Record fields, so a Valid whose revocation went unchecked reads
-    ValidRevocationUnchecked on every door. ``warnings`` stays the list of codes; ``warning_details`` adds each message."""
+    ValidRevocationUnchecked on every door. ``warnings`` stays the list of codes; ``warning_details`` adds the message of each warning the engine writes
+    (ENGINE_WARNING_CODES), null for any other (an engine_error's infrastructure text is not published)."""
     fields = (env.get("payload") or {}).get("fields") or {}
     raw = fields.get("authenticode_json")
     verdict = None

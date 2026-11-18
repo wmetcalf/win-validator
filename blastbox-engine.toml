@@ -211,7 +211,7 @@ description = "Loadout's manifest exposes AUTHENTICODE_REV and AUTHENTICODE_SCRI
 
 [[gaps]]
 id = "loadout-warnings-unmapped"
-description = "Loadout collects result_summary.warnings as validator_warnings but turns none into a detection or note: param_unknown_value / param_not_forwarded / status_unrecognized are silent. result_summary.warning_details now carries each warning's message."
+description = "Loadout collects result_summary.warnings as validator_warnings but turns none into a detection or note: param_unknown_value / param_not_forwarded / status_unrecognized are silent. result_summary.warning_details carries the message of each warning the engine writes (null for engine_error, whose infrastructure text is not published)."
 
 [[consumers]]
 name = "loadout"
