@@ -25,6 +25,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -305,6 +306,8 @@ _SCALAR = (str, int, float, bool)
 
 def _scalar(v: object) -> str | int | float | bool | None:
     """Coerce an arbitrary JSON value to a Record scalar."""
+    if isinstance(v, float) and not math.isfinite(v):   # NaN / Infinity from the guest: not JSON, so not a Record value
+        return None
     if v is None or isinstance(v, _SCALAR):
         return v
     return json.dumps(v, separators=(",", ":"), default=str)
@@ -474,6 +477,7 @@ class AuthenticodeEngine:
     def precheck(self, limits: Limits) -> str | None:
         """Refuse a job whose per-job parameters name a key or value the agent does not know (sealed ``rejected``, no VM)."""
         try:
+            params_locked()   # a malformed lock setting is refused on every job, not only one that sets a knob
             validate_job_params(_JOB_PARAMS.get())
         except ValueError as exc:
             # capped here, not only in detonate(): a harness that calls precheck() seals this reason as a Warning message,
@@ -534,22 +538,27 @@ class AuthenticodeEngine:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
         guest_sha = summary.fields.get("file_sha256")
+        mismatch = False
         summary.fields["file_sha256"] = h.hexdigest()
         if guest_sha is not None and str(guest_sha).lower() != h.hexdigest():
             shown = repr(str(guest_sha)) if re.fullmatch(r"[0-9A-Fa-f]{64}", str(guest_sha)) else "a non-SHA-256 value"
             warnings.append(BbWarning(code="file_sha256_mismatch",
                                       message=f"the agent reported file_sha256 {shown}; the engine hashed the input as "
                                               f"{h.hexdigest()} (recorded)"[:2000]))
-            # the verdict is about OTHER bytes (or the guest lied): never attribute its status to the submitted file
-            summary.fields["status"] = "UnknownError"
-            summary.fields["revocation"] = None
-            summary.fields["error"] = "the agent's verdict names other bytes (file_sha256 mismatch); its status is not used"
+            # the verdict is about OTHER bytes (or the guest lied): attribute NOTHING of it to the submitted file -- the Record
+            # is the error skeleton's (myatg_status keeps the guest's word, verbatim in authenticode_json), and no graveyard
+            # hit is raised from it
+            mismatch_error = "the agent's verdict names other bytes (file_sha256 mismatch); its answer is not used"
+            summary = _summary({"status": "UnknownError", "error": mismatch_error}, req_params)
+            summary.fields["myatg_status"] = _scalar(verdict.get("status"))
+            summary.fields["file_sha256"] = h.hexdigest()
+            mismatch = True
 
         if summary.fields.get("rdp_file_name") is not None:   # the --serve-http agent names its upload temp file (myatg_<guid>.rdp)
             summary.fields["rdp_file_name"] = input.name
 
         myatg_status = verdict.get("status")
-        if not isinstance(myatg_status, str) or myatg_status not in MYATG_STATUSES:   # a list/dict status is unhashable
+        if not mismatch and (not isinstance(myatg_status, str) or myatg_status not in MYATG_STATUSES):   # a list/dict status is unhashable
             warnings.append(BbWarning(
                 code="status_unrecognized",
                 message=f"myatg status {str(myatg_status)[:200]!r} is not one this engine knows ({', '.join(sorted(MYATG_STATUSES))}); passed through"[:2000],
@@ -559,7 +568,7 @@ class AuthenticodeEngine:
         summary.fields["authenticode_json"] = raw
 
         # A graveyard hit is a strong malicious signal — surface it as a warning.
-        grave = _obj(verdict.get("graveyard"))
+        grave = {} if mismatch else _obj(verdict.get("graveyard"))
         if grave.get("hit"):
             warnings.append(
                 BbWarning(

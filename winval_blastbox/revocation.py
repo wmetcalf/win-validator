@@ -20,7 +20,7 @@ def _revocation(chain: dict | None) -> str | None:
     revoked = chain.get("revoked")
     if revoked is True:
         return "revoked"
-    if revoked not in (False, None):   # fail closed: anything but an explicit false/absent is not "not revoked"
+    if not (revoked is False or revoked is None):   # fail closed: only an explicit false/absent is "not revoked" (0 == False)
         return "error"
     rc = chain.get("revocation_checked")
     if isinstance(rc, str) and rc in _REV_CHECKED:

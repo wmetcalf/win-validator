@@ -767,3 +767,43 @@ def test_an_operator_can_lock_the_knobs_against_per_job_values(tmp_path, pool, m
     assert env["status"] == "rejected" and not p.calls
     env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out2")
     assert env["status"] == "ok" and p.calls[-1] == {"rev": "offline"}
+
+
+@pytest.mark.parametrize("revoked", [0, 0.0])
+def test_a_numeric_zero_revoked_is_not_an_explicit_false(revoked):
+    from winval_blastbox.revocation import verdict_status
+    assert verdict_status({"status": "Valid", "chain": {"revoked": revoked, "revocation_checked": "online"}}) != "Valid"
+
+
+def test_a_hash_mismatch_publishes_nothing_else_from_the_guests_verdict(tmp_path, pool):
+    v = _load("valid_script_graveyard_hit.json")
+    v["file_sha256"] = "ab" * 32
+    pool(v).faithful = False
+    r = _detonate(tmp_path)
+    f = r.payload.fields
+    assert f["graveyard_hit"] in (None, False) and f["signer_subject_cn"] is None
+    assert "graveyard_hit" not in [w.code for w in r.warnings]
+    assert f["myatg_status"] == v["status"]
+
+
+def test_a_non_finite_float_from_the_guest_is_not_published():
+    import math
+    v = json.loads('{"status":"Valid","signer":{"subject_cn":NaN},"chain":{"revoked":false,"revocation_checked":"online"}}')
+    f = eng._summary(v).fields
+    json.dumps(f, allow_nan=False)
+    assert not any(isinstance(x, float) and not math.isfinite(x) for x in f.values())
+
+
+def test_a_malformed_lock_setting_is_refused_on_every_job(tmp_path, pool, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "rejected"
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_content_flag_falls_back_to_the_stored_verdict(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "(rec.content_verified??v.content_verified)===false" in html

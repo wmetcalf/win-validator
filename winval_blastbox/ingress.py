@@ -276,7 +276,7 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=rs.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
   let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
-    ${rec.content_verified===false?'<span class="flag bad">content unverified</span>':''}
+    ${(rec.content_verified??v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
   if(gv&&(gv.hit||gv.malware)) h+=`<div class="gv"><b>cert-graveyard hit</b> ${gv.matched_on?'· matched on '+esc(gv.matched_on):''}
     <div>${esc(gv.malware||gv.malware_type||'')} ${gv.malware_notes?'— '+esc(gv.malware_notes):''}</div></div>`;
