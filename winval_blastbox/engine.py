@@ -55,6 +55,9 @@ _POOL_LOCK = threading.Lock()
 KNOB_VALUES = {"AUTHENTICODE_REV": "online|offline|none", "AUTHENTICODE_SCRIPTS": "ps|native"}   # winval.env.example's vocabulary
 KNOB_FALLBACK = {"AUTHENTICODE_REV": "the agent read it as online", "AUTHENTICODE_SCRIPTS": "the agent read it as native (only the exact word ps selects PowerShell)"}   # myatg's ternaries, unvalidated
 _KNOB_PARAM = {"AUTHENTICODE_REV": "rev", "AUTHENTICODE_SCRIPTS": "scripts"}   # the agent's query parameter for each knob
+# What the agent's ternaries read an unknown value as (KNOB_FALLBACK, in words): the engine sends THIS, never the raw value, so
+# a malformed env value (an unclosed quote hands systemd the rest of the file) reaches neither the guest nor the Record.
+_KNOB_FALLBACK_VALUE = {"AUTHENTICODE_REV": "online", "AUTHENTICODE_SCRIPTS": "native"}
 
 # Per-job values for the knobs above (blastbox Job.params; set by HostRunner around one run_detonation). A ContextVar,
 # not os.environ: the pool-manager and the orchestrator run several jobs at once in threads of ONE process.
@@ -113,11 +116,12 @@ def unknown_knob_values() -> dict[str, str]:
 
 def knob_warnings() -> list[BbWarning]:
     """One warning per knob whose value the agent does not know (it is answered with the startup default, silently).
-    The VALUE is capped at 200 (an unclosed quote hands systemd the rest of the file as the value) and the MESSAGE at the
+    The VALUE is shown as a 32-char first-line prefix (an unclosed quote hands systemd the rest of the file as the value) and the MESSAGE at the
     contract's 2000: repr() of an astral code point is ten characters, so a value cap alone does not deliver the contract."""
     out: list[BbWarning] = []
     for k, bad in unknown_knob_values().items():
-        msg = f"{k}={bad[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
+        shown = (bad.splitlines() or [""])[0][:32]   # a short first-line prefix: the rest may be another variable's secret
+        msg = f"{k}={shown!r}{'...' if shown != bad else ''} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
         out.append(BbWarning(code="param_unknown_value", message=msg[:2000]))
     return out
 
@@ -431,7 +435,8 @@ class AuthenticodeEngine:
 
         # per-job values (job_params) override the environment; blanks are unset (an agent answers a stray ?rev=++ with its
         # startup default, silently)
-        req_params = {_KNOB_PARAM[k]: v for k, v in effective_knobs().items() if v}
+        req_params = {_KNOB_PARAM[k]: (v if v in KNOB_VALUES[k].split("|") else _KNOB_FALLBACK_VALUE[k])
+                      for k, v in effective_knobs().items() if v}
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
@@ -461,11 +466,14 @@ class AuthenticodeEngine:
                     h.update(chunk)
             summary.fields["file_sha256"] = h.hexdigest()
 
+        if summary.fields.get("rdp_file_name") is not None:   # the --serve-http agent names its upload temp file (myatg_<guid>.rdp)
+            summary.fields["rdp_file_name"] = input.name
+
         myatg_status = verdict.get("status")
         if myatg_status not in MYATG_STATUSES:
             warnings.append(BbWarning(
                 code="status_unrecognized",
-                message=f"myatg status {str(myatg_status)[:200]!r} is not one this engine knows ({', '.join(sorted(MYATG_STATUSES))}); passed through",
+                message=f"myatg status {str(myatg_status)[:200]!r} is not one this engine knows ({', '.join(sorted(MYATG_STATUSES))}); passed through"[:2000],
             ))
         # Embed the verbatim verdict so the full chain survives in the envelope,
         # not only in the artifact (the ClippyShot clippyshot_metadata pattern).
@@ -480,7 +488,7 @@ class AuthenticodeEngine:
                     message=(
                         f"signing cert in graveyard (matched_on={grave.get('matched_on')}, "
                         f"malware={grave.get('malware')})"
-                    ),
+                    )[:2000],   # both values come from the guest's answer: the contract caps a message at 2000
                 )
             )
 

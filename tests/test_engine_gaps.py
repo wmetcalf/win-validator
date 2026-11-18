@@ -96,9 +96,10 @@ def test_rdp_findings_are_indexed_and_the_file_is_hashed(tmp_path, pool):
     v["unsigned_dangerous"] = ["full address", "alternate shell"]
     pool(v)
     data = b"full address:s:10.0.0.1\r\nsignscope:s:Full Address\r\n"
-    f = _detonate(tmp_path, "f01392.rdp", data).payload.fields
+    v["file"] = "myatg_0123456789abcdef0123456789abcdef.rdp"   # the --serve-http agent names its upload temp file
+    f = _detonate(tmp_path, "invite.rdp", data).payload.fields
     assert f["file_sha256"] == hashlib.sha256(data).hexdigest()
-    assert f["rdp_file_name"] == "f01392.rdp"
+    assert f["rdp_file_name"] == "invite.rdp"   # the submitted name, not the agent's temp name
     assert (f["rdp_signscope_count"], f["rdp_total_settings"], f["rdp_unsigned_settings"]) == (26, 51, 25)
     assert json.loads(f["rdp_unsigned_dangerous"]) == ["full address", "alternate shell"]
 
@@ -460,3 +461,33 @@ def test_door_summary_records_the_knobs_the_verdict_was_computed_under(tmp_path,
     s = eng.summarize_envelope(env)
     assert s["param_rev"] == "none"
     assert "param_scripts" in s
+
+
+def test_an_unknown_env_knob_never_leaves_the_engine_raw(tmp_path, pool, monkeypatch):
+    # an unclosed quote in the env file hands systemd the REST of the file as the value: it must reach neither the guest VM
+    # (the agent query), nor the Record / door summary, nor a warning beyond a short first-line prefix
+    secret = "S3CRET"
+    monkeypatch.setenv("AUTHENTICODE_REV", f'"online\nBLASTBOX_DATABASE_URL=postgresql://winval:{secret}@127.0.0.1/winval')
+    monkeypatch.setenv("AUTHENTICODE_SCRIPTS", "powershell")
+    p = pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert p.calls[-1] == {"rev": "online", "scripts": "native"}   # what the agent would have read them as, sent explicitly
+    s = eng.summarize_envelope(env)
+    assert (s["param_rev"], s["param_scripts"]) == ("online", "native")
+    assert secret not in json.dumps(env)
+    assert "param_unknown_value" in s["warnings"]
+
+
+@pytest.mark.parametrize("where", ["status", "graveyard"])
+def test_hostile_strings_in_the_verdict_cannot_overflow_a_warning(tmp_path, pool, where):
+    # repr() of an astral code point is ten characters: a 200-char cap on the VALUE does not keep the MESSAGE under the
+    # contract's 2000, and an over-long message made BbWarning raise -> engine_error and the verdict dropped
+    v = _load("valid_script_graveyard_hit.json")
+    if where == "status":
+        v["status"] = chr(0xE0001) * 200
+    else:
+        v["graveyard"] = {"hit": True, "matched_on": chr(0xE0001) * 400, "malware": chr(0xE0001) * 400}
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+    assert all(len(w["message"]) <= 2000 for w in env["warnings"])

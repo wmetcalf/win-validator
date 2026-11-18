@@ -13,7 +13,8 @@ formats = ["*"]
 network = ["none", "drop", "direct", "openvpn", "wireguard", "tor", "inetsim"]
 # detonate() always returns "ok"; a pool/VM/transport failure raises and the harness seals
 # engine_error; precheck() refuses a per-job parameter the agent does not know (rejected, no VM).
-# myatg's own size cap answers status=UnknownError inside an ok result.
+# An input over the agent's size cap (myatg --serve-http, 500 MiB) is answered HTTP 413: engine_error.
+# RDP's own 8 MiB cap answers status=UnknownError inside an ok result.
 statuses = ["ok", "engine_error", "rejected"]
 
 [[artifacts]]
@@ -23,7 +24,7 @@ kind = "json"
 required = true
 max_count = 1
 role = "verdict"
-description = "The verbatim myatg verdict JSON (also embedded as payload.fields.authenticode_json). Not size-capped by the engine."
+description = "The verbatim myatg verdict JSON (also embedded as payload.fields.authenticode_json). A verdict over WINVAL_AGENT_RESPONSE_MB (default 64 MiB) is refused as engine_error."
 
 [payload]
 root = "record"
@@ -110,7 +111,7 @@ description = "myatg said Valid but revocation was not checked: responders unrea
 code = "authenticode.status.UnknownError"
 severity = "info"
 source = "payload.fields.status == 'UnknownError' (payload.fields.error says why when set)"
-description = "myatg could not decide: oversize input, device path, parser exception, chain that fails for an unclassified reason."
+description = "myatg could not decide: an RDP file over its 8 MiB cap, device path, parser exception, chain that fails for an unclassified reason. (A non-RDP input over the agent's 500 MiB cap is engine_error, not this.)"
 
 # --- independent findings --------------------------------------------------------------------
 # payload.fields.revocation: checked_good | revoked | unchecked | error | null (no chain evaluated:
@@ -198,7 +199,7 @@ description = "Two myatg behaviours the engine cannot change: its RDP validator 
 
 [[gaps]]
 id = "loadout-status-map"
-description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no Distrusted or NotYetValid entry (they fall to the generic 'authenticode:<status>' suspicious/30 detection) and lists NotTrusted and Incompatible, which myatg never emits."
+description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no Distrusted or NotYetValid entry (they fall to the generic 'authenticode:<status>' suspicious/30 detection) and lists NotTrusted, which myatg never emits. (Incompatible is not in myatg's map either, but its PowerShell branch passes an unmapped SignatureStatus through verbatim, so it can arrive, with a status_unrecognized warning.)"
 
 [[gaps]]
 id = "loadout-ignores-revocation"

@@ -105,6 +105,6 @@ golden's serve startup; TIER is not a myatg parameter): exporting either into th
 
 P2 engine: **built + validated end-to-end on toolz3** (engine → myatg VM pool → sealed
 envelope; 4/4 verdicts match the corpus `results.jsonl` reference). myatg.exe is baked into
-the golden as the `--serve-http` ONSTART agent (no per-boot compile); `rev`/`scripts` are the engine
-process's operator-wide setting (above), never per job. Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
+the golden as the `--serve-http` ONSTART agent (no per-boot compile); `rev`/`scripts` default to the engine
+process's setting (above) and a scan request may set them per job (`rev`/`scripts` form fields). Follow-ups: the P4 `ember-legacy`/`ember-2024` ML engines (the orchestrator
 already fans out to them).
