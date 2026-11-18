@@ -893,3 +893,11 @@ def test_the_egress_gate_names_the_lock_first(tmp_path):
     p = tmp_path / "winval.env"
     p.write_text("AUTHENTICODE_LOCK_PARAMS=ture\n")   # EXIT unset too: the manager names the lock first
     assert "AUTHENTICODE_LOCK_PARAMS" in run_upgrade_gate("egress", p)
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_refusal_view_renders_before_the_no_verdict_view(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert html.index("w.includes('file_sha256_mismatch')") < html.index("if(!v){$('#detail')")

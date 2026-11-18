@@ -273,11 +273,11 @@ function certRow(c){const cn=c.subject_cn||c.subject||'—';
 function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[];
   if(j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)} <span class="muted">validating…</span>`;return;}
+  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
+    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)}
     <div class="muted" style="margin-top:8px">${esc(j.error||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=rs.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
-  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
-    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
     ${('content_verified' in rec?rec.content_verified:v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}

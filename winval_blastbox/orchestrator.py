@@ -474,11 +474,11 @@ function render(j){const ac=(j.engines||{}).authenticode||{}, v=ac.verdict, w=ac
   if(j.status==='error'&&!v){$('#detail').innerHTML=`<h3>${esc(j.filename||'')}</h3><div class="flag bad">${esc(j.error||ac.error||'failed')}</div>`;return;}
   if(ac.status==='queued'||ac.status==='running'||j.status==='queued'||j.status==='running'){
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||j.status)} <span class="muted">validating…</span>`;return;}
+  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
+    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(ac.status||'error')}
     <div class="muted" style="margin-top:8px">${esc((ac.error)||ac.reason||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=ac.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
-  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
-    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(ac.verdict_status||v.status)}${ac.verdict_status&&ac.verdict_status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
     ${('content_verified' in rec?rec.content_verified:v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
