@@ -24,7 +24,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
-from .revocation import verdict_status
+from .revocation import verdict_revocation, verdict_status
 from .knobs import ENGINE, upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
@@ -44,14 +44,22 @@ def _warnings(job: Job) -> list[str]:
     return (job.result_summary or {}).get("warnings") or []
 
 
+def _summary(job: Job) -> dict:
+    """The job's result_summary with the engine's revocation-aware fields present. A row written before the pool-manager
+    recorded them (status / myatg_status / revocation) gets the engine's rule applied to its stored raw verdict, so no door
+    shows myatg's bare Valid for a verdict whose revocation went unchecked."""
+    rs = dict(job.result_summary or {})
+    v = rs.get("verdict") or {}
+    if v and not rs.get("status"):
+        rs["status"] = verdict_status(v)
+        rs["myatg_status"] = v.get("status")
+        rs["revocation"] = verdict_revocation(v)
+    return rs
+
+
 def _status(job: Job) -> str | None:
-    """The engine's revocation-aware status (ValidRevocationUnchecked where myatg said Valid without checking revocation);
-    a row written before the pool-manager recorded it gets the same rule applied to its stored raw verdict."""
-    rs = job.result_summary or {}
-    if rs.get("status"):
-        return rs["status"]
-    v = _verdict(job)
-    return verdict_status(v) if v else None
+    """The engine's revocation-aware status (ValidRevocationUnchecked where myatg said Valid without checking revocation)."""
+    return _summary(job).get("status")
 
 
 # The per-job knobs this door accepts, as form fields, and their vocabulary (engine.KNOB_VALUES; the ingress does not
@@ -141,7 +149,10 @@ def scan_status(job_id: str) -> dict:
     job = _store.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    return job.to_public_dict()
+    d = job.to_public_dict()
+    if job.result_summary:
+        d["result_summary"] = _summary(job)
+    return d
 
 
 @app.get("/jobs")
@@ -149,9 +160,10 @@ def jobs(limit: int = 80) -> dict:
     out = []
     for j in _store.list(limit=min(max(limit, 1), 500), newest_first=True):
         v = _verdict(j)
+        rs = _summary(j)
         out.append({"job_id": j.job_id, "filename": j.filename, "status": j.status.value,
-                    "verdict": _status(j), "myatg_status": v.get("status"),
-                    "revocation": (j.result_summary or {}).get("revocation"), "signature_type": v.get("signature_type"),
+                    "verdict": rs.get("status"), "myatg_status": v.get("status"),
+                    "revocation": rs.get("revocation"), "signature_type": v.get("signature_type"),
                     "graveyard_hit": "graveyard_hit" in _warnings(j)})
     return {"jobs": out}
 

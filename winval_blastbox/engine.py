@@ -234,8 +234,9 @@ def _sniff(head: bytes) -> str | None:
     if head[:1] == b"\x30" and b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02" in head[:64]:
         return "catalog"
     text = head.replace(b"\x00", b"").lower()   # .rdp files are often UTF-16LE
-    if text.startswith(b"\xff\xfe"):
-        text = text[2:]
+    for bom in (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff"):   # UTF-8 / UTF-16LE / UTF-16BE byte-order marks (NULs already gone)
+        if text.startswith(bom):
+            text = text[len(bom):]
     # an .rdp file is `name:type:value` lines: its FIRST line is one, and a known key starts a line (a script that merely
     # mentions 'full address:s:' mid-line is not an .rdp)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]

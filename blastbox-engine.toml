@@ -154,7 +154,7 @@ description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS name
 [[detections]]
 code = "precheck_rejected"
 severity = "low"
-source = "warnings[].code == 'precheck_rejected' (status rejected; payload.fields empty)"
+source = "warnings[].code == 'precheck_rejected' (status rejected; payload.fields empty, or {error} from a harness that calls precheck)"
 description = "A per-job parameter names a key or value the agent does not know; the job was refused before the VM saw the input (detonate()'s own refusal, for a harness that does not call precheck)."
 
 [[detections]]
@@ -202,7 +202,7 @@ description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no 
 
 [[gaps]]
 id = "loadout-ignores-revocation"
-description = "Loadout's mapper reads neither revocation nor chain_revocation_checked (result_summary.status / .revocation on the ingress door) and has no ValidRevocationUnchecked entry, so such a verdict falls to the generic 'authenticode:<status>' detection rather than one that names unchecked revocation."
+description = "Loadout's mapper reads neither revocation nor chain_revocation_checked (result_summary.status / .revocation on the ingress door) and has no ValidRevocationUnchecked entry. It maps result_summary.verdict.status, which is myatg's raw 'Valid', so a Valid whose revocation was never checked reaches Loadout as a clean authenticode:valid (severity 0)."
 
 [[gaps]]
 id = "loadout-config-not-forwarded"

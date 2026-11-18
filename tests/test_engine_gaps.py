@@ -132,6 +132,8 @@ def _ole(root_clsid: bytes, dir_sect: int = 0) -> bytes:
     ("x.msi", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "msi"),
     ("a.ps1", b"Set-Content x.rdp -Value 'full address:s:evil'\r\n", "script"),
     ("b.rdp", b"\xff\xfe" + "screen mode id:i:2\r\nfull address:s:host\r\n".encode("utf-16-le"), "rdp"),
+    ("c.bin", b"\xef\xbb\xbffull address:s:host\r\nscreen mode id:i:2\r\n", "rdp"),
+    ("d.bin", b"\xfe\xff" + "screen mode id:i:2\r\nfull address:s:host\r\n".encode("utf-16-be"), "rdp"),
     ("x.bin", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 56, "ole"),
     ("x.cab", b"MSCF\0\0\0\0" + b"\0" * 56, "cab"),
     ("x.bin", b"\x30\x82\x01\x00\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02", "catalog"),
@@ -442,8 +444,12 @@ def test_ingress_derives_the_revocation_aware_status_for_pre_upgrade_rows(monkey
     j = Job.new(engine="authenticode", filename="old.exe")
     ingress._store.create(j)
     ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary={"verdict": v, "warnings": [], "envelope_status": "ok"})
-    assert ingress.jobs()["jobs"][0]["verdict"] == "ValidRevocationUnchecked"
+    row = ingress.jobs()["jobs"][0]
+    assert row["verdict"] == "ValidRevocationUnchecked" and row["revocation"] == "unchecked"
     assert ingress.cert(v["signer"]["tbs_sha256"])["seen_in"][0]["status"] == "ValidRevocationUnchecked"
+    rs = ingress.scan_status(j.job_id)["result_summary"]   # the detail view the UI renders from
+    assert rs["status"] == "ValidRevocationUnchecked" and rs["revocation"] == "unchecked"
+    assert rs["myatg_status"] == "Valid"
 
 
 def test_door_summary_records_the_knobs_the_verdict_was_computed_under(tmp_path, pool):
