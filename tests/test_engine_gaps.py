@@ -870,7 +870,7 @@ def test_the_detail_view_hides_a_refused_verdict(door):
 
 def test_the_cli_exits_nonzero_on_a_rejected_job(tmp_path, pool, monkeypatch):
     from winval_blastbox import host_runner
-    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")   # refused by precheck on every job: sealed rejected, no verdict
+    monkeypatch.setattr(eng.AuthenticodeEngine, "precheck", lambda self, limits: "refused")   # sealed rejected, no verdict
     pool(_load("untrusted_root.json"))
     monkeypatch.setattr(host_runner.HostRunner, "shutdown", lambda self: None)
     assert host_runner.main([str(_sample(tmp_path))]) == 1
@@ -901,3 +901,30 @@ def test_the_refusal_view_renders_before_the_no_verdict_view(door):
     import winval_blastbox.orchestrator as orch
     html = (ingress if door == "ingress" else orch).INDEX_HTML
     assert html.index("w.includes('file_sha256_mismatch')") < html.index("if(!v){$('#detail')")
+
+
+def test_a_refused_verdicts_row_keeps_the_guests_status(tmp_path, pool, monkeypatch):
+    import winval_blastbox.orchestrator as orch
+    v = _load("valid_script_graveyard_hit.json")
+    pool(v).faithful = False
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "benign.exe"), tmp_path / "out")
+    monkeypatch.setitem(orch.ENGINES, "authenticode", lambda p, params=None: orch._authenticode_verdict(env))
+    s = orch.JobStore(1)
+    jid = s.create("benign.exe", ["authenticode"])
+    f = tmp_path / "benign.exe"
+    s._run_inner(jid, str(f), ["authenticode"])
+    row = s.list_jobs()[0]
+    assert row["verdict"] == "UnknownError" and row["myatg_status"] == v["status"]
+    from blastbox.host.jobs.base import Job, JobStatus
+    ingress = _ingress(monkeypatch, tmp_path)
+    j = Job.new(engine="authenticode", filename="benign.exe")
+    ingress._store.create(j)
+    ingress._store.update(j.job_id, status=JobStatus.DONE, result_summary=eng.summarize_envelope(env))
+    assert ingress.jobs()["jobs"][0]["myatg_status"] == v["status"]
+
+
+def test_the_cli_refuses_a_malformed_lock_as_a_configuration_error(tmp_path, monkeypatch, capsys):
+    from winval_blastbox import host_runner
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")
+    assert host_runner.main([str(_sample(tmp_path))]) == 2
+    assert "AUTHENTICODE_LOCK_PARAMS" in capsys.readouterr().err

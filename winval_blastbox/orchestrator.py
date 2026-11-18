@@ -194,7 +194,7 @@ class JobStore:
             v = ac.get("verdict") or {}
             out.append({
                 "job_id": j["job_id"], "filename": j["filename"], "status": j["status"],
-                "verdict": ac.get("verdict_status") or v.get("status"), "myatg_status": v.get("status"),
+                "verdict": ac.get("verdict_status") or v.get("status"), "myatg_status": ac.get("myatg_status") or v.get("status"),
                 "revocation": ac.get("revocation"), "signature_type": v.get("signature_type"),
                 "graveyard_hit": "graveyard_hit" in (ac.get("warnings") or []),
             })

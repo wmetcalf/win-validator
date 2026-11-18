@@ -31,7 +31,7 @@ from pathlib import Path
 from blastbox.limits import Limits
 from blastbox.worker.harness import run_detonation
 
-from .engine import AuthenticodeEngine, job_params, shutdown_pool
+from .engine import AuthenticodeEngine, job_params, params_locked, shutdown_pool
 
 
 class HostRunner:
@@ -97,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        params_locked()   # a malformed AUTHENTICODE_LOCK_PARAMS is a configuration error (exit 2), not a rejected job (exit 1)
         runner = HostRunner()
     except ValueError as exc:   # Limits.from_env() refuses a bad BLASTBOX_* value loudly: one line, not a traceback
         print(f"host_runner: {exc}", file=sys.stderr)

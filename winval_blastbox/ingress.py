@@ -162,7 +162,7 @@ def jobs(limit: int = 80) -> dict:
         v = _verdict(j)
         rs = _summary(j)
         out.append({"job_id": j.job_id, "filename": j.filename, "status": j.status.value,
-                    "verdict": rs.get("status"), "myatg_status": v.get("status"),
+                    "verdict": rs.get("status"), "myatg_status": rs.get("myatg_status"),
                     "revocation": rs.get("revocation"), "signature_type": v.get("signature_type"),
                     "graveyard_hit": "graveyard_hit" in _warnings(j)})
     return {"jobs": out}
