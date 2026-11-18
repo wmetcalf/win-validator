@@ -40,6 +40,7 @@ from fastapi.responses import HTMLResponse
 from .body_cap import FRAMING_SLACK, BodyCap
 from .engine import summarize_envelope, validate_job_params
 from .host_runner import HostRunner
+from .revocation import verdict_cert_tbs
 from .knobs import upload_mb
 from .vm_pool import pool_size as _pool_size   # the ONE reader of AUTHENTICODE_POOL_SIZE (tolerant, floor 1)
 
@@ -164,6 +165,7 @@ class JobStore:
                     self._update_engine(jid, e, {"status": e_status, **result})
                 except Exception as exc:  # noqa: BLE001 — one engine failing must not sink the job
                     self._update_engine(jid, e, {"status": "error", "error": type(exc).__name__})
+            _discard(path)   # before 'done': a client that sees done may rely on the upload being gone
             self._update(jid, status="done")
         finally:
             _discard(path)
@@ -192,14 +194,7 @@ class JobStore:
             for j in self._jobs.values():
                 ac = (j.get("engines") or {}).get("authenticode") or {}
                 v = ac.get("verdict") or {}
-                certs = []
-                s = v.get("signer") or {}
-                if s.get("tbs_sha256"):
-                    certs.append(s["tbs_sha256"].lower())
-                for c in (v.get("chain") or {}).get("chain") or []:
-                    if c.get("tbs_sha256"):
-                        certs.append(c["tbs_sha256"].lower())
-                if tbs in certs:
+                if tbs in verdict_cert_tbs(v):
                     hits.append({"job_id": j["job_id"], "filename": j["filename"], "status": ac.get("verdict_status") or v.get("status")})
         return hits
 

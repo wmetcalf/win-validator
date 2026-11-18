@@ -543,3 +543,41 @@ def test_every_warning_code_the_engine_emits_is_named_by_the_contract_without_th
     toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
     declared = set(re.findall(r"warnings\[\]\.code == '([a-z_]+)'", toml))
     assert emitted and emitted <= declared, emitted - declared
+
+
+@pytest.mark.parametrize("value", ["onlinePGPASSWORD=S3CRET-hunter2", "online\\", "\"online", "x" * 17])
+def test_only_a_short_plain_knob_token_is_echoed(monkeypatch, value):
+    # a backslash-newline continuation joins the NEXT env-file line onto the value with no newline left in it
+    monkeypatch.setenv("AUTHENTICODE_REV", value)
+    msgs = [w.message for w in eng.knob_warnings()]
+    assert msgs and not any(value in m or "S3CRET" in m for m in msgs)
+    monkeypatch.setenv("AUTHENTICODE_REV", "onlin")
+    assert "'onlin'" in eng.knob_warnings()[0].message   # a plain typo is still named
+
+
+@pytest.mark.parametrize("status", [["Valid"], {"x": 1}])
+def test_an_unhashable_status_is_passed_through_not_engine_error(tmp_path, pool, status):
+    v = _load("untrusted_root.json")
+    v["status"] = status
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+    assert "status_unrecognized" in [w["code"] for w in env["warnings"]]
+
+
+def test_a_non_string_tbs_in_one_row_does_not_break_cert_lookups(monkeypatch, tmp_path):
+    import winval_blastbox.orchestrator as orch
+    from blastbox.host.jobs.base import Job, JobStatus
+    good = "ab" * 32
+    s = orch.JobStore(1)
+    for verdict in ({"signer": {"tbs_sha256": 1}, "chain": {"chain": [1, {"tbs_sha256": None}]}},
+                    {"signer": {"tbs_sha256": good.upper()}}):
+        j = s.create("p.exe", ["authenticode"])
+        s._update_engine(j, "authenticode", {"verdict": verdict})
+    assert len(s.cert_lookup(good)) == 1
+    ingress = _ingress(monkeypatch, tmp_path)
+    for verdict in ({"signer": "x", "chain": {"chain": [{"tbs_sha256": ["a"]}]}}, {"signer": {"tbs_sha256": good}}):
+        jj = Job.new(engine="authenticode", filename="p.exe")
+        ingress._store.create(jj)
+        ingress._store.update(jj.job_id, status=JobStatus.DONE, result_summary={"verdict": verdict})
+    assert len(ingress.cert(good)["seen_in"]) == 1

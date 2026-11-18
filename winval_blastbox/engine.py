@@ -104,6 +104,11 @@ def effective_knobs() -> dict[str, str]:
     return out
 
 
+# The only shape of unknown knob value echoed back: a short plain token (a typo like 'onlin' or 'PS'). Anything else may carry
+# the rest of the env file (unclosed quote, backslash-newline continuation), secrets included.
+_SHOWABLE_KNOB = re.compile(r"[A-Za-z0-9_-]{1,16}")
+
+
 def _raw_knobs() -> dict[str, str]:
     """Each knob's UNSTRIPPED source value (per-job, else environment): strip() would hide that a value spans lines."""
     per_job = _JOB_PARAMS.get() or {}
@@ -126,15 +131,15 @@ def unknown_knob_values() -> dict[str, str]:
 
 def knob_warnings() -> list[BbWarning]:
     """One warning per knob whose value the agent does not know (the engine sends the agent's fallback reading instead).
-    An unclosed quote hands systemd the REST of the env file as the value, secrets included: a value spanning lines is not shown
-    at all, a one-line value only as a 32-char prefix. The MESSAGE is capped at the contract's 2000."""
+    An unclosed quote or a backslash-newline continuation hands systemd the next env-file lines as the value, secrets included:
+    only a short plain token (_SHOWABLE_KNOB) is echoed, anything else by its length. The MESSAGE is capped at the contract's 2000."""
     out: list[BbWarning] = []
     raw = _raw_knobs()
     for k, bad in unknown_knob_values().items():
-        if "\n" in raw.get(k, "") or "\r" in raw.get(k, ""):
-            shown = "<a multi-line value, not shown>"
-        else:
-            shown = repr(bad[:32]) + ("..." if len(bad) > 32 else "")
+        if _SHOWABLE_KNOB.fullmatch(raw.get(k, "").strip()):
+            shown = repr(bad)
+        else:   # an unclosed quote or a backslash-newline continuation pulls the next env-file lines in: show only the size
+            shown = f"<a {len(raw.get(k, ''))}-character value, not shown>"
         msg = f"{k}={shown} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
         out.append(BbWarning(code="param_unknown_value", message=msg[:2000]))
     return out
@@ -144,7 +149,13 @@ def _no_lone_surrogates(v: object) -> object:
     """The verdict with every unpaired UTF-16 surrogate (myatg's J() writes \\uD800 for one; json.loads keeps it) escaped as
     text: a lone surrogate in any string made BbWarning raise or the envelope fail to serialise, dropping the verdict."""
     if isinstance(v, str):
-        return v.encode("utf-8", "backslashreplace").decode("utf-8") if any("\ud800" <= c <= "\udfff" for c in v) else v
+        if v.isascii():
+            return v
+        try:
+            v.encode("utf-8")   # C-speed probe: only a string holding a lone surrogate fails it
+            return v
+        except UnicodeEncodeError:
+            return v.encode("utf-8", "backslashreplace").decode("utf-8")
     if isinstance(v, dict):
         return {_no_lone_surrogates(k): _no_lone_surrogates(x) for k, x in v.items()}
     if isinstance(v, list):
@@ -496,7 +507,7 @@ class AuthenticodeEngine:
             summary.fields["rdp_file_name"] = input.name
 
         myatg_status = verdict.get("status")
-        if myatg_status not in MYATG_STATUSES:
+        if not isinstance(myatg_status, str) or myatg_status not in MYATG_STATUSES:   # a list/dict status is unhashable
             warnings.append(BbWarning(
                 code="status_unrecognized",
                 message=f"myatg status {str(myatg_status)[:200]!r} is not one this engine knows ({', '.join(sorted(MYATG_STATUSES))}); passed through"[:2000],

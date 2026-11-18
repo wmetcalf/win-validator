@@ -49,3 +49,19 @@ def verdict_revocation(verdict: dict) -> str | None:
 def verdict_status(verdict: dict) -> object:
     """The engine's status for a raw myatg verdict: Valid only when revocation was checked good."""
     return _status(verdict.get("status"), verdict_revocation(verdict))
+
+
+def verdict_cert_tbs(verdict: object) -> list[str]:
+    """The lower-cased tbs_sha256 of the signer and every chain element, skipping anything that is not a string: the verdict
+    is the guest's answer, and one stored row with a non-string value made every /cert lookup on a door a 500."""
+    if not isinstance(verdict, dict):
+        return []
+    out = []
+    signer = verdict.get("signer")
+    chain = verdict.get("chain")
+    elems = chain.get("chain") if isinstance(chain, dict) else None
+    for c in [signer, *(elems if isinstance(elems, list) else [])]:
+        t = c.get("tbs_sha256") if isinstance(c, dict) else None
+        if isinstance(t, str) and t:
+            out.append(t.lower())
+    return out

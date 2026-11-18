@@ -24,7 +24,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .body_cap import FRAMING_SLACK, BodyCap
-from .revocation import verdict_revocation, verdict_status
+from .revocation import verdict_cert_tbs, verdict_revocation, verdict_status
 from .knobs import ENGINE, upload_mb
 
 JOB_ROOT = Path(os.environ.get("WINVAL_JOB_ROOT", "/var/lib/winval/jobs"))
@@ -180,14 +180,7 @@ def cert(tbs_sha256: str) -> dict:
             break
         scanned += 1
         v = _verdict(j)
-        certs = []
-        s = v.get("signer") or {}
-        if s.get("tbs_sha256"):
-            certs.append(s["tbs_sha256"].lower())
-        for c in (v.get("chain") or {}).get("chain") or []:
-            if c.get("tbs_sha256"):
-                certs.append(c["tbs_sha256"].lower())
-        if tbs in certs:
+        if tbs in verdict_cert_tbs(v):
             hits.append({"job_id": j.job_id, "filename": j.filename, "status": _status(j)})
     # the bound is part of the answer: an older sighting past the window must not read as "never seen"
     return {"tbs_sha256": tbs_sha256, "seen_in": hits, "scanned": scanned, "truncated": truncated}
