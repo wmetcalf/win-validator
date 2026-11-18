@@ -581,3 +581,27 @@ def test_a_non_string_tbs_in_one_row_does_not_break_cert_lookups(monkeypatch, tm
         ingress._store.create(jj)
         ingress._store.update(jj.job_id, status=JobStatus.DONE, result_summary={"verdict": verdict})
     assert len(ingress.cert(good)["seen_in"]) == 1
+
+
+@pytest.mark.parametrize("params", [{"X" * 3000: "online"}, {"AUTHENTICODE_REV": chr(0xE0001) * 200}])
+def test_a_precheck_reason_fits_a_warning(params):
+    # a harness that calls precheck() seals the reason as Warning(message=...), capped at 2000
+    from blastbox.contract import Warning as W
+    token = eng._JOB_PARAMS.set(params)
+    try:
+        r = eng.AuthenticodeEngine().precheck(Limits())
+    finally:
+        eng._JOB_PARAMS.reset(token)
+    assert r and len(r) <= 2000
+    W(code="precheck_rejected", message=r)
+
+
+def test_a_one_argument_engine_runner_still_runs(tmp_path, monkeypatch):
+    import winval_blastbox.orchestrator as orch
+    monkeypatch.setitem(orch.ENGINES, "ember", lambda p: {"verdict": {"status": "x"}})
+    store = orch.JobStore(max_workers=1)
+    jid = store.create("a.exe", ["ember"])
+    f = tmp_path / "a.exe"
+    f.write_bytes(b"MZ")
+    store._run_inner(jid, str(f), ["ember"], {"AUTHENTICODE_REV": "none"})
+    assert store.get(jid)["engines"]["ember"]["status"] == "done"

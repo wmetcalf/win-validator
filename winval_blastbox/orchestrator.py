@@ -20,6 +20,7 @@ Run on the libvirt host (toolz3):
 from __future__ import annotations
 
 import concurrent.futures.thread as _futures_thread
+import inspect
 import json
 import logging
 import os
@@ -49,7 +50,20 @@ _log = logging.getLogger("winval.orchestrator")
 # Engine registry. Each entry: name -> callable(path, params) -> verdict dict (params: the job's per-job knobs). authenticode is the
 # only built engine; ember-legacy / ember-2024 (P4) register here later with the same shape.
 # Populated at startup (lifespan) so the VM pool warms once.
-ENGINES: dict[str, Callable[[str], dict]] = {}
+ENGINES: dict[str, Callable[..., dict]] = {}
+
+
+def _call_runner(runner: Callable[..., dict], path: str, params: dict | None) -> dict:
+    """Call an engine runner: callable(path, params) for one that takes per-job params, callable(path) for one registered with
+    the original one-argument shape (it gets no params, so a scan's rev/scripts mean nothing to it)."""
+    try:
+        sig = inspect.signature(runner)
+        sig.bind(path, params)
+    except TypeError:
+        return runner(path)
+    except ValueError:   # no signature available (a builtin): assume the current shape
+        pass
+    return runner(path, params)
 
 DEFAULT_ENGINES = ("authenticode",)
 
@@ -158,7 +172,7 @@ class JobStore:
                     continue
                 try:
                     self._update_engine(jid, e, {"status": "running"})
-                    result = runner(path, params)
+                    result = _call_runner(runner, path, params)
                     # a sealed engine_error (VM/transport failure) or rejected (a per-job parameter the agent does not
                     # know) envelope must surface as 'error', not a 'done' job with a silently-null verdict.
                     e_status = "error" if result.get("envelope_status") in ("engine_error", "rejected") else "done"

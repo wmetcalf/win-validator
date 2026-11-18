@@ -71,14 +71,14 @@ def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in (params or {}).items():
         if k not in KNOB_VALUES:
-            raise ValueError(f"{k!r} is not a per-job parameter of this engine (known: {', '.join(KNOB_VALUES)})")
+            raise ValueError(f"{str(k)[:64]!r} is not a per-job parameter of this engine (known: {', '.join(KNOB_VALUES)})")
         if not isinstance(v, str):
             raise ValueError(f"{k} must be a string, not {type(v).__name__}")
         v = v.strip()
         if not v:
             continue
         if v not in KNOB_VALUES[k].split("|"):
-            raise ValueError(f"{k}={v[:200]!r} is not a value the agent knows ({KNOB_VALUES[k]})")
+            raise ValueError(f"{k}={v[:64]!r} is not a value the agent knows ({KNOB_VALUES[k]})")
         out[k] = v
     return out
 
@@ -447,7 +447,9 @@ class AuthenticodeEngine:
         try:
             validate_job_params(_JOB_PARAMS.get())
         except ValueError as exc:
-            return f"bad per-job parameter: {exc}"
+            # capped here, not only in detonate(): a harness that calls precheck() seals this reason as a Warning message,
+            # which the contract caps at 2000 (repr() of an astral code point is ten characters)
+            return f"bad per-job parameter: {exc}"[:2000]
         return None
 
     def warmup(self, stop_event=None) -> None:
