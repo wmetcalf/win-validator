@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -486,8 +487,59 @@ def test_hostile_strings_in_the_verdict_cannot_overflow_a_warning(tmp_path, pool
     if where == "status":
         v["status"] = chr(0xE0001) * 200
     else:
-        v["graveyard"] = {"hit": True, "matched_on": chr(0xE0001) * 400, "malware": chr(0xE0001) * 400}
+        v["graveyard"] = {"hit": True, "matched_on": "x" * 3000, "malware": "y" * 3000}
     pool(v)
     env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
     assert env["status"] == "ok"
     assert all(len(w["message"]) <= 2000 for w in env["warnings"])
+
+
+def test_orchestrator_hands_the_engine_the_submitted_filename_and_cleans_up(monkeypatch):
+    # rdp_file_name (and myatg's own routing on the extension) see the path's basename: it must be the client's name, not
+    # scan-<random>-name; the private spool dir goes with the file
+    import os
+    import winval_blastbox.orchestrator as orch
+    seen = {}
+
+    def runner(p, params=None):
+        seen["name"], seen["dir"] = os.path.basename(p), os.path.dirname(p)
+        return {}
+    monkeypatch.setitem(orch.ENGINES, "authenticode", runner)
+    store = orch.JobStore(max_workers=1)
+    monkeypatch.setattr(orch, "_store", store)
+    r = asyncio.run(orch.scan(file=_Upload("invite.rdp", b"full address:s:h\r\n"), engines="", rev="", scripts=""))
+    deadline = time.time() + 10
+    while store.get(r["job_id"])["status"] != "done" and time.time() < deadline:
+        time.sleep(0.05)
+    assert seen["name"] == "invite.rdp"
+    assert not os.path.exists(seen["dir"])
+
+
+def test_a_knob_value_spanning_lines_is_not_shown(monkeypatch):
+    # AUTHENTICODE_REV=" at the end of its line: systemd's value is '\n<the next lines>'; strip() made the NEXT assignment the
+    # "first line" shown in every verdict's warning
+    monkeypatch.setenv("AUTHENTICODE_REV", "\nPGPASSWORD=S3CRET-hunter2\nOTHER=1")
+    msgs = [w.message for w in eng.knob_warnings()]
+    assert msgs and not any("S3CRET" in m or "PGPASSWORD" in m for m in msgs)
+
+
+@pytest.mark.parametrize("where", ["signer", "graveyard"])
+def test_a_lone_surrogate_in_the_verdict_does_not_drop_it(tmp_path, pool, where):
+    v = _load("valid_script_graveyard_hit.json")
+    if where == "signer":
+        v["signer"]["subject_cn"] = "Contoso\ud800"
+    else:
+        v["graveyard"] = {"hit": True, "matched_on": "E\ud800", "malware": "M"}
+    pool(v)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert env["status"] == "ok"
+
+
+def test_every_warning_code_the_engine_emits_is_named_by_the_contract_without_the_checker():
+    # runs on a released blastbox too (the contract module test is skipped there): pure text over the source and the toml
+    import re
+    src = Path(eng.__file__).read_text()
+    emitted = set(re.findall(r'BbWarning\(\s*code="([a-z_]+)"', src))
+    toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
+    declared = set(re.findall(r"warnings\[\]\.code == '([a-z_]+)'", toml))
+    assert emitted and emitted <= declared, emitted - declared

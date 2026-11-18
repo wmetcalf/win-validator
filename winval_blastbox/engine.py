@@ -67,7 +67,7 @@ _JOB_PARAMS: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.Cont
 def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
     """The per-job knobs, stripped, blanks dropped. Raises ValueError naming the first key or value the agent does not know:
     a per-job value comes from a client, so it is refused (the job is sealed ``rejected``, the door answers 400) rather than
-    answered with the agent's startup default as an operator's environment typo is."""
+    sent as what the agent reads it as (_KNOB_FALLBACK_VALUE), with a warning, as an operator's environment typo is."""
     out: dict[str, str] = {}
     for k, v in (params or {}).items():
         if k not in KNOB_VALUES:
@@ -104,9 +104,19 @@ def effective_knobs() -> dict[str, str]:
     return out
 
 
+def _raw_knobs() -> dict[str, str]:
+    """Each knob's UNSTRIPPED source value (per-job, else environment): strip() would hide that a value spans lines."""
+    per_job = _JOB_PARAMS.get() or {}
+    out = {}
+    for k in KNOB_VALUES:
+        v = per_job.get(k)
+        out[k] = v if isinstance(v, str) and v.strip() else (os.environ.get(k) or "")
+    return out
+
+
 def unknown_knob_values() -> dict[str, str]:
-    """The per-verdict knobs whose (stripped) value names nothing the agent knows: the agent answers such a value with its startup
-    default and says nothing, so the verdict carries a warning naming the knob instead."""
+    """The per-verdict knobs whose (stripped) value names nothing the agent knows: the agent reads such a value as its fallback
+    (KNOB_FALLBACK: rev -> online, scripts -> native) and says nothing, so the verdict carries a warning naming the knob instead."""
     out = {}
     for k, v in effective_knobs().items():
         if v and v not in KNOB_VALUES[k].split("|"):
@@ -115,15 +125,31 @@ def unknown_knob_values() -> dict[str, str]:
 
 
 def knob_warnings() -> list[BbWarning]:
-    """One warning per knob whose value the agent does not know (it is answered with the startup default, silently).
-    The VALUE is shown as a 32-char first-line prefix (an unclosed quote hands systemd the rest of the file as the value) and the MESSAGE at the
-    contract's 2000: repr() of an astral code point is ten characters, so a value cap alone does not deliver the contract."""
+    """One warning per knob whose value the agent does not know (the engine sends the agent's fallback reading instead).
+    An unclosed quote hands systemd the REST of the env file as the value, secrets included: a value spanning lines is not shown
+    at all, a one-line value only as a 32-char prefix. The MESSAGE is capped at the contract's 2000."""
     out: list[BbWarning] = []
+    raw = _raw_knobs()
     for k, bad in unknown_knob_values().items():
-        shown = (bad.splitlines() or [""])[0][:32]   # a short first-line prefix: the rest may be another variable's secret
-        msg = f"{k}={shown!r}{'...' if shown != bad else ''} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
+        if "\n" in raw.get(k, "") or "\r" in raw.get(k, ""):
+            shown = "<a multi-line value, not shown>"
+        else:
+            shown = repr(bad[:32]) + ("..." if len(bad) > 32 else "")
+        msg = f"{k}={shown} is not a value the agent knows ({KNOB_VALUES[k]}); {KNOB_FALLBACK[k]}"
         out.append(BbWarning(code="param_unknown_value", message=msg[:2000]))
     return out
+
+
+def _no_lone_surrogates(v: object) -> object:
+    """The verdict with every unpaired UTF-16 surrogate (myatg's J() writes \\uD800 for one; json.loads keeps it) escaped as
+    text: a lone surrogate in any string made BbWarning raise or the envelope fail to serialise, dropping the verdict."""
+    if isinstance(v, str):
+        return v.encode("utf-8", "backslashreplace").decode("utf-8") if any("\ud800" <= c <= "\udfff" for c in v) else v
+    if isinstance(v, dict):
+        return {_no_lone_surrogates(k): _no_lone_surrogates(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_no_lone_surrogates(x) for x in v]
+    return v
 
 
 def get_pool(stop_event=None) -> WarmVmPool:
@@ -440,7 +466,7 @@ class AuthenticodeEngine:
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
-        verdict = get_pool().validate(str(input), params=req_params or None)
+        verdict = _no_lone_surrogates(get_pool().validate(str(input), params=req_params or None))
 
         warnings: list[BbWarning] = knob_warnings()
         unforwardable = sorted(k for k in ("AUTHENTICODE_GV", "AUTHENTICODE_TIER") if (os.environ.get(k) or "").strip())

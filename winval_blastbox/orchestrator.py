@@ -64,6 +64,20 @@ def _authenticode_verdict(env: dict) -> dict:
     return out
 
 
+def _discard(path: str) -> None:
+    """Remove an upload and its private spool dir (scan()'s mkdtemp); missing either is fine."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith("scan-"):
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
+
+
 class NotQueued(RuntimeError):
     """submit() refused BEFORE queueing: nothing will ever run this job (the executor is shut down)."""
 
@@ -152,10 +166,7 @@ class JobStore:
                     self._update_engine(jid, e, {"status": "error", "error": type(exc).__name__})
             self._update(jid, status="done")
         finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            _discard(path)
 
     def list_jobs(self, limit: int = 100) -> list[dict]:
         """Recent scans (newest first) with just the headline status — for the UI list."""
@@ -240,11 +251,15 @@ async def scan(file: UploadFile = File(...), engines: str = Form(""), rev: str =
         raise HTTPException(status_code=400, detail="filename has no usable name")
     if len(name.encode("utf-8", "surrogateescape")) > 255:   # NAME_MAX, as the ingress twin bounds it: the row stored and served a 4 KB name verbatim
         raise HTTPException(status_code=400, detail="filename is longer than 255 bytes")
-    # the client's name is only a HINT in the temp name — bounded, or a >NAME_MAX name made mkstemp raise ENAMETOOLONG as
-    # a 500 (the ingress twin answers 400) — but its EXTENSION is what the engine routes on (.rdp vs a binary): keep it whole
-    stem, ext = os.path.splitext(name)
-    hint = stem.encode("utf-8", "surrogateescape")[:100].decode("utf-8", "ignore") + ext.encode("utf-8", "surrogateescape")[:20].decode("utf-8", "ignore")
-    fd, path = tempfile.mkstemp(prefix="scan-", suffix="-" + hint)
+    # a private 0700 spool dir per upload, the file inside it under the client's (sanitised, NAME_MAX-bounded) basename: the
+    # engine routes on its extension and records it (rdp_file_name), so it must be the submitted name, not scan-<random>-name
+    spool = tempfile.mkdtemp(prefix="scan-")
+    path = os.path.join(spool, name)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except BaseException:
+        _discard(path)
+        raise
     try:
         written = 0
         with os.fdopen(fd, "wb") as f:
@@ -254,18 +269,12 @@ async def scan(file: UploadFile = File(...), engines: str = Form(""), rev: str =
                     raise HTTPException(413, f"upload exceeds {max_bytes} bytes")
                 f.write(chunk)
     except BaseException:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         raise
     try:
         jid = _store.create(name, sel)   # the sanitised basename, as the ingress records it — not ../../evil.exe verbatim
     except Exception:   # no row, no job: the temp upload must not outlive the request (nothing sweeps /tmp)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         raise
     try:
         _store.submit(jid, path, sel, params)
@@ -273,10 +282,7 @@ async def scan(file: UploadFile = File(...), engines: str = Form(""), rev: str =
         _store._update(jid, status="error", error=f"could not queue the job: {exc}")
         for e in sel:   # the UI reads the ENGINE pane first: a pane still 'queued' under an error row spun forever
             _store._update_engine(jid, e, {"status": "error", "error": f"not queued: {exc}"})
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _discard(path)
         # a 503, not the bare re-raise's generic 500: the service could not take the job (shutting down, the executor broken) and a
         # retry is the answer; the row it recorded is named so the operator can find it, and the client's next submission is a new job
         _log.error("job %s: could not queue it (%s); recorded as error, the upload removed, the client told to retry (503)", jid, exc)   # a handled

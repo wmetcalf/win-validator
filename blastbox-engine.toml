@@ -150,7 +150,7 @@ description = "An RDP file sets security-relevant settings outside its signed sc
 code = "param_unknown_value"
 severity = "low"
 source = "warnings[].code == 'param_unknown_value'"
-description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS names a value the agent does not know; the verdict was computed under the agent's default. (A per-job value like that is refused: status rejected.)"
+description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS names a value the agent does not know; the engine sent the agent's reading of it instead (rev online, scripts native), recorded in param_rev / param_scripts. (A per-job value like that is refused: status rejected.)"
 
 [[detections]]
 code = "precheck_rejected"
