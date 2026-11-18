@@ -100,6 +100,7 @@ and `scripts` (`ps|native`), stored as the job's `params` (`AUTHENTICODE_REV` / 
 else is a 400 before the upload is spooled, and the engine re-checks them (a bad value in the job store seals
 `rejected`, recorded as a failed job, without a VM). A job's value overrides the engine process's environment for
 that job only; blank falls back to it. The values a verdict was computed under are `param_rev` / `param_scripts`.
+`AUTHENTICODE_LOCK_PARAMS=1` pins the environment's values: a job that sets either is refused (`rejected`) instead.
 `AUTHENTICODE_GV` and `AUTHENTICODE_TIER` are read by nothing (the graveyard knob is `GOLDEN_GRAVEYARD`, baked into the
 golden's serve startup; TIER is not a myatg parameter): exporting either into the engine process puts an honest
 `param_not_forwarded` warning on every verdict, and a request cannot set them.

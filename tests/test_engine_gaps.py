@@ -735,3 +735,35 @@ def test_a_non_hex_guest_hash_is_not_echoed(tmp_path, pool):
     r = _detonate(tmp_path)
     msgs = [w.message for w in r.warnings if w.code == "file_sha256_mismatch"]
     assert msgs and "<script>" not in msgs[0]
+
+
+def test_an_engine_error_record_is_not_published(tmp_path, monkeypatch):
+    # the harness seals engine_error with payload.fields {error: str(exception)}: the same infrastructure text warning_details
+    # hides must not ride in `record`
+    def boom(stop_event=None):
+        raise RuntimeError("agent 192.168.122.57:8765 on winval-w2 refused")
+    monkeypatch.setattr(eng, "get_pool", boom)
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out")
+    assert "192.168" not in json.dumps(eng.summarize_envelope(env))
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_detail_view_shows_the_engines_hash_and_content_flag(door):
+    # the guest's file_sha256 is untrusted; the detail view renders the Record's
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "v.file_sha256" not in html and "record" in html
+    assert "v.content_verified===false" not in html
+
+
+def test_an_operator_can_lock_the_knobs_against_per_job_values(tmp_path, pool, monkeypatch):
+    # AUTHENTICODE_LOCK_PARAMS=1: the operator's rev/scripts are not overridable per job (a client could otherwise turn the
+    # guest's CRL/OCSP fetches back on); a per-job value is refused, not silently replaced
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "1")
+    monkeypatch.setenv("AUTHENTICODE_REV", "offline")
+    p = pool(_load("untrusted_root.json"))
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out", params={"AUTHENTICODE_REV": "online"})
+    assert env["status"] == "rejected" and not p.calls
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path), tmp_path / "out2")
+    assert env["status"] == "ok" and p.calls[-1] == {"rev": "offline"}

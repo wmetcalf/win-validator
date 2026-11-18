@@ -273,15 +273,15 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
     $('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)} <span class="muted">validating…</span>`;return;}
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)}
     <div class="muted" style="margin-top:8px">${esc(j.error||'no verdict')}</div>`;return;}
-  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{};
+  const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=rs.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
   let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
-    ${v.content_verified===false?'<span class="flag bad">content unverified</span>':''}
+    ${rec.content_verified===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
   if(gv&&(gv.hit||gv.malware)) h+=`<div class="gv"><b>cert-graveyard hit</b> ${gv.matched_on?'· matched on '+esc(gv.matched_on):''}
     <div>${esc(gv.malware||gv.malware_type||'')} ${gv.malware_notes?'— '+esc(gv.malware_notes):''}</div></div>`;
   h+='<table>'; const row=(k,val)=>{if(val==null||val==='')return;h+=`<tr><td class="k">${k}</td><td>${val}</td></tr>`;};
-  row('file sha256',`<span class="mono">${esc(v.file_sha256)}</span>`);
+  row('file sha256',`<span class="mono">${esc(rec.file_sha256||j.input_sha256||'')}</span>`);
   if(s.subject||s.subject_cn) row('signer',`${esc(s.subject_cn||s.subject)}<div class="muted">issuer ${esc(s.issuer_cn||s.issuer||'—')}</div>
     <div class="muted">${esc((s.not_before||'').slice(0,10))} → ${esc((s.not_after||'').slice(0,10))}</div>`);
   if(s.tbs_sha256) row('signer cert',`<span class="mono"><a onclick="cert(${js(s.tbs_sha256)})">${esc(s.tbs_sha256)}</a></span>`);

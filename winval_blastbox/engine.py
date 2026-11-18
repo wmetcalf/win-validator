@@ -36,6 +36,8 @@ from blastbox.contract import Warning as BbWarning
 from blastbox.limits import Limits
 from blastbox.worker.engine import DetonationResult
 
+from blastbox.host.netwire import parse_strict_bool
+
 from .knobs import env_int
 from .revocation import _status, verdict_revocation
 from .vm_pool import WarmVmPool
@@ -64,6 +66,12 @@ _KNOB_FALLBACK_VALUE = {"AUTHENTICODE_REV": "online", "AUTHENTICODE_SCRIPTS": "n
 _JOB_PARAMS: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar("authenticode_job_params", default=None)
 
 
+def params_locked() -> bool:
+    """AUTHENTICODE_LOCK_PARAMS: the operator's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS are not overridable per job (a client
+    could otherwise turn the guest's CRL/OCSP/AIA fetches back on). blastbox's strict boolean: a typo raises, never reads OFF."""
+    return parse_strict_bool(os.environ.get("AUTHENTICODE_LOCK_PARAMS"), default=False)
+
+
 def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
     """The per-job knobs, stripped, blanks dropped. Raises ValueError naming the first key or value the agent does not know:
     a per-job value comes from a client, so it is refused (the job is sealed ``rejected``, the door answers 400) rather than
@@ -79,6 +87,8 @@ def validate_job_params(params: Mapping[str, object] | None) -> dict[str, str]:
             continue
         if v not in KNOB_VALUES[k].split("|"):
             raise ValueError(f"{k}={v[:64]!r} is not a value the agent knows ({KNOB_VALUES[k]})")
+        if params_locked():
+            raise ValueError(f"{k} is locked by the operator (AUTHENTICODE_LOCK_PARAMS): a job cannot set it")
         out[k] = v
     return out
 
@@ -413,7 +423,8 @@ def summarize_envelope(env: dict) -> dict:
         "envelope_status": env.get("status"),
         # the engine's Record (its own file_sha256, rdp_*, signer_* / chain_* flags) minus the verbatim verdict, which is
         # already under `verdict`: the doors publish only this summary, so a Record-only field must ride here
-        "record": {k: v for k, v in fields.items() if k != "authenticode_json"},
+        # (an ok envelope only: an engine_error's payload is the harness's str(exception), infrastructure text)
+        "record": {k: v for k, v in fields.items() if k != "authenticode_json"} if env.get("status") == "ok" else {},
     }
 
 
