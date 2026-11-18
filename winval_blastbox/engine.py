@@ -416,6 +416,8 @@ def summarize_envelope(env: dict) -> dict:
         except ValueError:
             verdict = None
     warns = [w for w in env.get("warnings") or [] if isinstance(w, dict)]
+    if any(w.get("code") == "file_sha256_mismatch" for w in warns):
+        verdict = None   # refused: the guest's verdict is about other bytes (verbatim in the authenticode.json artifact only)
     # messages only for the warnings this engine writes: an engine_error's message is the harness's str(exception) from the
     # VM / transport layer (internal addresses, domain names), which a door must not publish
     return {

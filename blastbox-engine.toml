@@ -165,7 +165,7 @@ description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS name
 code = "file_sha256_mismatch"
 severity = "medium"
 source = "warnings[].code == 'file_sha256_mismatch'"
-description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with: status is then UnknownError (myatg_status keeps the guest's), the rest of the Record is the error skeleton's (signer / chain / graveyard / rdp fields null), error says why, and no graveyard_hit or status_unrecognized is raised from the refused verdict; the doors' /cert lookups skip it."
+description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with: status is then UnknownError (myatg_status keeps the guest's), the rest of the Record is the error skeleton's (signer / chain / graveyard / rdp fields null), error says why, and no graveyard_hit or status_unrecognized is raised from the refused verdict; the doors publish result_summary.verdict as null for it (the verbatim answer stays only in the authenticode.json artifact) and their /cert lookups skip it."
 
 [[detections]]
 code = "precheck_rejected"

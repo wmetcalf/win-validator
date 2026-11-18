@@ -129,10 +129,10 @@ if sys.argv[1] == "egress":
     # the paths that skipped it, the IP pool, a supported exit name, inetsim's sink, gateway-and-leg together). With several knobs wrong the
     # same one is named here and there. A posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
     SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
-    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
-    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
     lp = (env.get("AUTHENTICODE_LOCK_PARAMS") or "").strip().lower()   # _refuse_open_egress's first guard (engine.params_locked); the value is not echoed
     if lp and lp not in ("1", "true", "yes", "on", "0", "false", "no", "off"): print("malformed: AUTHENTICODE_LOCK_PARAMS is not a boolean (true/false): the pool-manager refuses that posture at start"); sys.exit(0)
+    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
+    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
     bi_raw = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip(); bi = bi_raw.lower()
     def bool_guard():   # the spec parses the boolean fail-closed (blastbox's parse_strict_bool) wherever it is first built
         if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):

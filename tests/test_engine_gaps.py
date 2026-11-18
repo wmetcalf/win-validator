@@ -866,3 +866,30 @@ def test_the_detail_view_hides_a_refused_verdict(door):
     import winval_blastbox.orchestrator as orch
     html = (ingress if door == "ingress" else orch).INDEX_HTML
     assert "'content_verified' in rec" in html and "file_sha256_mismatch" in html
+
+
+def test_the_cli_exits_nonzero_on_a_rejected_job(tmp_path, pool, monkeypatch):
+    from winval_blastbox import host_runner
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "treu")   # refused by precheck on every job: sealed rejected, no verdict
+    pool(_load("untrusted_root.json"))
+    monkeypatch.setattr(host_runner.HostRunner, "shutdown", lambda self: None)
+    assert host_runner.main([str(_sample(tmp_path))]) == 1
+
+
+def test_a_refused_verdict_is_not_published_by_the_doors(tmp_path, pool):
+    # file_sha256_mismatch: the door summary's `verdict` (what Loadout maps) must not carry the guest's signer / graveyard
+    v = _load("valid_script_graveyard_hit.json")
+    pool(v).faithful = False
+    env = HostRunner(limits=Limits()).validate_to_dir(_sample(tmp_path, "benign.exe"), tmp_path / "out")
+    s = eng.summarize_envelope(env)
+    assert s["verdict"] is None and s["status"] == "UnknownError"
+    assert "file_sha256_mismatch" in s["warnings"]
+
+
+def test_the_egress_gate_names_the_lock_first(tmp_path):
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from conftest import run_upgrade_gate
+    p = tmp_path / "winval.env"
+    p.write_text("AUTHENTICODE_LOCK_PARAMS=ture\n")   # EXIT unset too: the manager names the lock first
+    assert "AUTHENTICODE_LOCK_PARAMS" in run_upgrade_gate("egress", p)
