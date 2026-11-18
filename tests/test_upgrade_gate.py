@@ -185,3 +185,10 @@ def test_the_verdict_is_printed_not_echoed(tmp_path):
             offenders.append(f"{number}: {line.strip()}")
     assert offenders == [], offenders
     assert text.count("printf '%s\\n' \"upgrade.sh:") >= 3, "a verdict line stopped using printf"
+
+
+def test_the_egress_gate_refuses_a_malformed_lock_params(tmp_path):
+    # the pool-manager refuses a malformed AUTHENTICODE_LOCK_PARAMS at start (before the orphan recovery): the gate must too
+    env = write_env(tmp_path, AUTHENTICODE_EXIT="none", AUTHENTICODE_LOCK_PARAMS="ture")
+    v = run_upgrade_gate("egress", env)
+    assert "AUTHENTICODE_LOCK_PARAMS" in v and v != "ok"

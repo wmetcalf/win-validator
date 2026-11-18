@@ -53,7 +53,9 @@ required_root_fields = [
 # myatg's string passed through, with ONE engine rewrite: myatg's Valid becomes ValidRevocationUnchecked
 # unless payload.fields.revocation == 'checked_good' (Revoked if the chain is revoked). myatg's own string
 # is always payload.fields.myatg_status. myatg_status is one of the codes below (engine.MYATG_STATUSES);
-# anything else is passed through with a status_unrecognized warning.
+# anything else is passed through with a status_unrecognized warning -- except on a file_sha256_mismatch,
+# where the verdict is refused (status UnknownError, the Record the error skeleton's) and no warning but
+# file_sha256_mismatch is raised from it.
 [[detections]]
 code = "authenticode.status.HashMismatch"
 severity = "high"
@@ -144,7 +146,7 @@ description = "The signing certificate is in the cert graveyard: already seen si
 [[detections]]
 code = "status_unrecognized"
 severity = "medium"
-source = "warnings[].code == 'status_unrecognized' (payload.fields.myatg_status is outside the status codes above)"
+source = "warnings[].code == 'status_unrecognized' (payload.fields.myatg_status is outside the status codes above, and the verdict was not refused by file_sha256_mismatch)"
 description = "myatg printed a status this engine does not know (its PowerShell path passes unmapped statuses through); the verdict is passed through unclassified."
 
 [[detections]]
@@ -163,7 +165,7 @@ description = "The engine process's AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS name
 code = "file_sha256_mismatch"
 severity = "medium"
 source = "warnings[].code == 'file_sha256_mismatch'"
-description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with: status is then UnknownError (myatg_status keeps the guest's), revocation null, and error says why."
+description = "The agent's file_sha256 differs from the engine's own hash of the input. payload.fields.file_sha256 is always the engine's hash; the guest is untrusted, so a disagreement means its answer is about other bytes or was tampered with: status is then UnknownError (myatg_status keeps the guest's), the rest of the Record is the error skeleton's (signer / chain / graveyard / rdp fields null), error says why, and no graveyard_hit or status_unrecognized is raised from the refused verdict; the doors' /cert lookups skip it."
 
 [[detections]]
 code = "precheck_rejected"
@@ -220,7 +222,7 @@ description = "Loadout's _STATUS table (backend/loadout/authenticode.py) has no 
 
 [[gaps]]
 id = "loadout-ignores-revocation"
-description = "Loadout's mapper reads neither revocation nor chain_revocation_checked (result_summary.status / .revocation on the ingress door) and has no ValidRevocationUnchecked entry. It maps result_summary.verdict.status, which is myatg's raw 'Valid', so a Valid whose revocation was never checked reaches Loadout as a clean authenticode:valid (severity 0)."
+description = "Loadout's mapper reads neither revocation nor chain_revocation_checked (result_summary.status / .revocation on the ingress door) and has no ValidRevocationUnchecked entry. It maps result_summary.verdict.status, which is myatg's raw 'Valid', so a Valid whose revocation was never checked reaches Loadout as a clean authenticode:valid (severity 0). Loadout PR #8 (resolve_revocation) applies the engine's rule to the raw verdict and maps ValidRevocationUnchecked; until it is deployed, a per-job rev=none launders an unchecked Valid as clean."
 
 [[gaps]]
 id = "loadout-config-not-forwarded"

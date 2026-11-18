@@ -180,6 +180,8 @@ def cert(tbs_sha256: str) -> dict:
             break
         scanned += 1
         v = _verdict(j)
+        if "file_sha256_mismatch" in _warnings(j):   # the engine refused this verdict: it is about other bytes
+            continue
         if tbs in verdict_cert_tbs(v):
             hits.append({"job_id": j.job_id, "filename": j.filename, "status": _status(j)})
     # the bound is part of the answer: an older sighting past the window must not read as "never seen"
@@ -274,9 +276,11 @@ function render(j){const rs=j.result_summary||{}, v=rs.verdict, w=rs.warnings||[
   if(!v){$('#detail').innerHTML=`<h3>${esc(j.filename)}</h3>${pill(j.status)}
     <div class="muted" style="margin-top:8px">${esc(j.error||'no verdict')}</div>`;return;}
   const s=v.signer||{}, ch=v.chain||{}, gv=v.graveyard||{}, rec=rs.record||{};   // rec: the engine's Record (its own hash; the guest's is untrusted)
+  if(w.includes('file_sha256_mismatch')){const h0=`<h3>${esc(j.filename)}</h3>${pill('UnknownError')}<span class="flag bad">file_sha256_mismatch</span>
+    <div class="muted" style="margin-top:8px">the agent's verdict names other bytes; it is not shown</div>`;$('#detail').innerHTML=h0;return;}
   let h=`<h3>${esc(j.filename)}</h3><div style="margin:6px 0 14px">${pill(rs.status||v.status)}${rs.status&&rs.status!==v.status?`<span class="flag">myatg: ${esc(v.status)}</span>`:''}
     <span class="flag">${esc(v.signature_type)}</span>${v.is_os_binary?'<span class="flag ok">OS binary</span>':''}
-    ${(rec.content_verified??v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
+    ${('content_verified' in rec?rec.content_verified:v.content_verified)===false?'<span class="flag bad">content unverified</span>':''}
     ${w.map(x=>`<span class="flag bad">${esc(x)}</span>`).join('')}</div>`;
   if(gv&&(gv.hit||gv.malware)) h+=`<div class="gv"><b>cert-graveyard hit</b> ${gv.matched_on?'· matched on '+esc(gv.matched_on):''}
     <div>${esc(gv.malware||gv.malware_type||'')} ${gv.malware_notes?'— '+esc(gv.malware_notes):''}</div></div>`;

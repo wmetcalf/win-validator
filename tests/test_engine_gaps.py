@@ -806,7 +806,7 @@ def test_the_content_flag_falls_back_to_the_stored_verdict(door):
     import winval_blastbox.ingress as ingress
     import winval_blastbox.orchestrator as orch
     html = (ingress if door == "ingress" else orch).INDEX_HTML
-    assert "(rec.content_verified??v.content_verified)===false" in html
+    assert "('content_verified' in rec?rec.content_verified:v.content_verified)===false" in html
 
 
 def test_a_malformed_lock_value_is_never_echoed(tmp_path, pool, monkeypatch):
@@ -831,3 +831,38 @@ def test_a_revoked_chain_is_a_detection_whatever_the_status():
     toml = (Path(__file__).parent.parent / "blastbox-engine.toml").read_text()
     assert 'code = "authenticode.revocation.revoked"' in toml
     assert "payload.fields.revocation == 'revoked'" in toml
+
+
+def test_cert_lookup_skips_a_verdict_the_engine_refused(monkeypatch, tmp_path):
+    # a file_sha256 mismatch means the guest's verdict (and its signer) is about other bytes
+    import winval_blastbox.orchestrator as orch
+    from blastbox.host.jobs.base import Job, JobStatus
+    tbs = "cd" * 32
+    verdict = {"signer": {"tbs_sha256": tbs}}
+    s = orch.JobStore(1)
+    j = s.create("p.exe", ["authenticode"])
+    s._update_engine(j, "authenticode", {"verdict": verdict, "warnings": ["file_sha256_mismatch"]})
+    assert s.cert_lookup(tbs) == []
+    ingress = _ingress(monkeypatch, tmp_path)
+    jj = Job.new(engine="authenticode", filename="p.exe")
+    ingress._store.create(jj)
+    ingress._store.update(jj.job_id, status=JobStatus.DONE,
+                          result_summary={"verdict": verdict, "warnings": ["file_sha256_mismatch"]})
+    assert ingress.cert(tbs)["seen_in"] == []
+
+
+def test_the_start_guard_refuses_a_malformed_lock_params(monkeypatch):
+    # in _refuse_open_egress (the manager's pre-orphan-recovery guard, mirrored by the rotation preflight)
+    from winval_blastbox.pool_manager import _refuse_open_egress
+    monkeypatch.setenv("AUTHENTICODE_EXIT", "none")
+    monkeypatch.setenv("AUTHENTICODE_LOCK_PARAMS", "ture")
+    with pytest.raises(ValueError, match="AUTHENTICODE_LOCK_PARAMS"):
+        _refuse_open_egress(1)
+
+
+@pytest.mark.parametrize("door", ["ingress", "orchestrator"])
+def test_the_detail_view_hides_a_refused_verdict(door):
+    import winval_blastbox.ingress as ingress
+    import winval_blastbox.orchestrator as orch
+    html = (ingress if door == "ingress" else orch).INDEX_HTML
+    assert "'content_verified' in rec" in html and "file_sha256_mismatch" in html

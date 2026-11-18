@@ -35,7 +35,7 @@ from pathlib import Path
 from blastbox.host.jobs.base import JobStatus
 from blastbox.host.jobs.factory import build_job_store_from_env
 
-from .engine import summarize_envelope
+from .engine import params_locked, summarize_envelope
 from .host_runner import HostRunner
 from .knobs import ENGINE, agent_port, env_float, upload_mb
 from .vm_pool import pool_size
@@ -214,6 +214,7 @@ def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
     it); sysctl="loadable" is for a caller whose RESTART will apply it: it passes when the sysctl exists (the unit sets it)
     or br_netfilter would be inserted (a verbose modprobe dry run, see _bridge_nf_loadable), and refuses on the host the unit's own comment
     names — one that cannot load the module, where ExecStartPre's `-` lets the start reach the manager and refuse."""
+    params_locked()   # a malformed AUTHENTICODE_LOCK_PARAMS (strict boolean) refuses the start here, before the orphan recovery
     raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
     if not raw:
         raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
