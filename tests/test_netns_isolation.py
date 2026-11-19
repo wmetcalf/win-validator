@@ -572,7 +572,7 @@ VALID_ONLINE = {"status": "Valid", "chain": {"revoked": False, "revocation_check
 
 
 @pytest.mark.parametrize("rev, passes", [
-    ({"status": "Revoked", "chain": {"revoked": True, "revocation_checked": "offline"}}, True),
+    ({"status": "Revoked", "chain": {"revoked": True, "revocation_checked": "online"}}, True),   # myatg: revoked -> the rev it applied
     ({"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),   # on the Disallowed list
     ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),   # lost entry / uncheckable: fails
     ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}, False),
@@ -671,6 +671,7 @@ def test_a_wrong_status_is_named_before_the_chain_shape(gr, monkeypatch, tmp_pat
 @pytest.mark.parametrize("rev_env, rc, passes", [
     ("none", "online", False), ("offline", "online", False),      # the agent ignored ?rev=
     ("offline", "unknown", True), ("offline", "offline", True), ("none", "none", True), ("online", "none", False),
+    ("online", "offline", False), ("online", "online", True), ("online", "unknown", True),
 ])
 def test_the_gate_checks_the_agent_applied_the_rev_it_sent(gr, monkeypatch, tmp_path, rev_env, rc, passes):
     monkeypatch.setenv("AUTHENTICODE_REV", rev_env)

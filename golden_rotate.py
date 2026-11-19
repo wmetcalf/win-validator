@@ -828,8 +828,10 @@ def validate_golden(qcow2: str) -> bool:
         from winval_blastbox.engine import effective_knobs, request_params
         gate_params = request_params(effective_knobs())
         sent_rev = gate_params.get("rev", "online")   # myatg's own default when no ?rev= is sent
-        # what myatg reports per rev it actually applied: an answer outside this set means the agent ignored ?rev=
-        expected_rc = {"none": ("none",), "offline": ("offline", "unknown")}.get(sent_rev, ("online", "offline", "unknown"))
+        # what myatg can report under the rev it was sent (myatg.cs / rdp_validate.cs): online -> online|unknown, offline ->
+        # offline|unknown, none -> none. An answer outside the set proves the agent did not apply that rev (switched off, or
+        # ignoring ?rev=); 'unknown' is common to online and offline, so an agent swapping those two is not always caught
+        expected_rc = {"none": ("none",), "offline": ("offline", "unknown")}.get(sent_rev, ("online", "unknown"))
         for sample, want in checks:
             try:
                 verdict = agent_validate(slot.endpoint, sample, netns=slot_netns(slot), params=gate_params or None)
