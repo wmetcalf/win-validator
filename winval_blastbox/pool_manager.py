@@ -1,10 +1,10 @@
 """win-validator POOL-MANAGER — the privileged dispatcher half of the split.
 
 The libvirt analogue of ``blastbox dispatch``: instead of ``docker run``ning a worker container per
-job, it keeps a warm VM pool (the ``WarmPool`` primitive — spawn/snapshot/recycle + rooter egress +
-the tunnel kill-switch) and validates each job through a long-lived worker's myatg HTTP agent.
+job, it keeps a warm VM pool (the ``WarmPool`` primitive — spawn/snapshot/recycle, each worker in a
+private network namespace with no egress, see netns_isolation) and validates each job through a long-lived worker's myatg HTTP agent.
 
-It owns ALL the host privilege (libvirt, iptables) and is NEVER exposed to untrusted network input:
+It owns ALL the host privilege (libvirt, network namespaces) and is NEVER exposed to untrusted network input:
 it only reads queued jobs from the shared JobStore + their spooled inputs from ``job_root``, runs
 them through the VM (the sandbox), and writes the verdict back as the Job's ``result_summary``. The
 unprivileged ``ingress`` is the only client-facing tier; this is its counterpart across the boundary.
@@ -25,7 +25,6 @@ import os
 import shutil
 import signal
 import stat
-import subprocess
 import tempfile
 import threading
 import time
@@ -37,7 +36,7 @@ from blastbox.host.jobs.factory import build_job_store_from_env
 
 from .engine import params_locked, summarize_envelope
 from .host_runner import HostRunner
-from .knobs import ENGINE, agent_port, env_float, upload_mb
+from .knobs import ENGINE, env_float, upload_mb
 from .vm_pool import pool_size
 
 logger = logging.getLogger("winval.pool_manager")
@@ -107,151 +106,26 @@ def _clear_ready() -> None:
         logger.warning("stale readiness marker %s not removed (%s)", READY_FILE, exc)
 
 
-BRIDGE_NF_SYSCTL = "/proc/sys/net/bridge/bridge-nf-call-iptables"   # absent when br_netfilter is not loaded
-BRIDGE_NF_MODPROBE = ("modprobe",)   # the binary (a test points it at a -C config dir or a stub); the helper adds its own arguments
+HOST_TOOLS = ("ip", "dnsmasq", "setpriv")   # what namespace isolation runs on the host (iproute2 for the namespace and tap, dnsmasq for the
+# guest's DHCP, setpriv to start it unprivileged)
+_which = shutil.which   # one seam: a test host without dnsmasq judges the env, not itself
 
 
-def _modprobe(*args: str) -> tuple[int, list[str]]:
-    r = subprocess.run(BRIDGE_NF_MODPROBE + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-    return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
-
-
-SELF_LOAD_FLAGS = {"--ignore-install", "-i", "--quiet", "-q", "--verbose", "-v", "--all", "-a", "--use-blacklist", "-b", "--syslog", "-s"}
-# the insertion-preserving flags of modprobe(8): anything else (-n -r -D -R -c, or -S/-C/-d/-w which take a value and eat the
-# module's name) makes the command something other than an insertion, or cannot be told apart from one by its text
-
-
-def _is_self_load(words: list[str]) -> list[str] | None:
-    """Is an install directive's command EXACTLY the self-load idiom — `modprobe --ignore-install br_netfilter`? Returns the
-    words to confirm it with (its flags and its module argument), or None. Only the FIRST simple command is judged (up to &&,
-    ||, ; or |: a sysctl chained after the load is the documented shape): its first word must be the system's modprobe (a bare
-    name, or a path that resolves to the same binary the probe runs — a busybox or a wrapper elsewhere is not it), every flag
-    drawn from SELF_LOAD_FLAGS with --ignore-install or -i among them, and its one non-flag the module: a bare name (kmod reads
-    br-netfilter as br_netfilter) or a .ko path. A directive that merely CONTAINS those words (`test -f /etc/allow && modprobe
-    --ignore-install br_netfilter`, an echo of a policy, `modprobe -n -i br_netfilter`) is not the idiom: it is refused."""
-    first: list[str] = []
-    for w in words:
-        if w in ("&&", "||", ";", "|"):
-            break
-        first.append(w)
-    if not first:
-        return None
-    prog = first[0]
-    if os.path.basename(prog) != "modprobe":
-        return None
-    if "/" in prog:
-        system = shutil.which("modprobe")
-        if not system or not os.access(prog, os.X_OK) or os.path.realpath(prog) != os.path.realpath(system):
-            return None
-    flags = [w for w in first[1:] if w.startswith("-")]
-    args = [w for w in first[1:] if not w.startswith("-")]
-    if not all(f in SELF_LOAD_FLAGS for f in flags) or not any(f in ("--ignore-install", "-i") for f in flags) or len(args) != 1:
-        return None
-    name = os.path.basename(args[0])
-    for suffix in (".zst", ".xz", ".gz", ".ko"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    if name.replace("-", "_") != "br_netfilter":
-        return None
-    return [w for w in first[1:] if w not in ("-q", "--quiet", "-s", "--syslog")]   # harmless to the insertion, but they hide the plan the confirming dry run reads
-
-
-def _bridge_nf_loadable() -> tuple[bool, str]:
-    """Would `modprobe br_netfilter` insert the module? Its dry run's exit code says nothing: with an `install br_netfilter /bin/false`
-    directive (the one way to make a module unloadable; `blacklist` never stops an explicit modprobe) `-n` exits 0 for a module it
-    would not insert — for a module that does not exist, even. The verbose dry run prints the plan: `insmod .../br_netfilter.ko*` when
-    the module would be inserted, `install <command>` when a directive replaces an insertion — but WITHOUT the module's name, so whose
-    directive it is cannot be told from the plan; the effective configuration (`modprobe -c`) names it. Loadable, then: the dry run
-    exits 0, and EITHER br_netfilter has an install directive that is the self-load idiom man 5 modprobe.d documents (`modprobe
-    --ignore-install br_netfilter` as its first simple command, see _is_self_load — kmod prints a trailing comment sh would drop —
-    and then on that command's own dry run, which must insert br_netfilter.ko: the directive's text does not say the module exists),
-    OR it has none, the plan inserts br_netfilter.ko and carries no install line at all (a dependency's directive: whether the load
-    survives it cannot be told from the plan, so it is refused). What only the real insertion can tell (a lockdown/signature refusal,
-    a stale .ko) stays with the manager's own start, which reads the sysctl live."""
-    try:
-        rc, plan = _modprobe("-n", "-v", "br_netfilter")
-        if rc != 0:
-            return False, f"modprobe -n -v br_netfilter failed (rc {rc}: {' | '.join(plan)[:200]})"
-        _, conf = _modprobe("-c")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
-    own = [ln for ln in conf if ln.split()[:2] == ["install", "br_netfilter"]]
-    if own:
-        words: list[str] = []
-        for w in own[0].split()[2:]:
-            if w.startswith("#"):
-                break
-            words.append(w)
-        argv = _is_self_load(words)
-        if argv is None:
-            return False, f"a modprobe.d install directive replaces the insertion ({own[0][:120]}); only the plain self-load idiom is read as loadable"
-        try:   # the idiom's OWN words, dry-run (a .ko path is resolved as it would be): the directive's text does not say the module EXISTS
-            rc, plan = _modprobe("-n", "-v", *argv)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return False, f"{' '.join(BRIDGE_NF_MODPROBE)} could not run ({exc})"
-        if rc != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
-            return False, f"the self-load directive's own modprobe --ignore-install br_netfilter would insert nothing (rc {rc}: {' | '.join(plan)[:200] or 'no output'})"
-        if any(ln.startswith("install ") for ln in plan):
-            return False, "a dependency in the self-load's plan carries an install directive: whether the load survives it cannot be told from the plan"
-        return True, ""
-    if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan):
-        return False, f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
-    installs = [ln for ln in plan if ln.startswith("install ")]
-    if installs:
-        return False, f"a dependency in the plan carries an install directive ({installs[0][:120]}): whether the load survives it cannot be told from the plan"
-    return True, ""
-
-
-def _refuse_open_egress(workers: int, *, sysctl: str = "live") -> None:
-    """Fail closed at start on the two egress holes the README used to leave to the operator (design changes #7/#8):
-    an UNSET AUTHENTICODE_EXIT (a worker gets the libvirt network's plain NAT and reaches the host's own listeners) is a
-    refusal unless the operator writes AUTHENTICODE_EXIT=none, the explicit opt-out; and with more than one worker on the
-    bridge, the policy must actually drop worker-to-worker traffic: AUTHENTICODE_BLOCK_INTERNAL=1 (or a port allowlist that does not admit the agent port, or the drop exit)
-    AND net.bridge.bridge-nf-call-iptables=1 (br_netfilter), without which the FORWARD rules never see bridged frames
-    and a compromised worker reaches its siblings' agent port. One worker has no sibling to reach.
-    The rotation preflight mirrors this before promoting (a promotion restarts the pool-manager: a refusal there is an
-    outage). sysctl="live" reads the sysctl as it is now (the manager's own start, after the unit's ExecStartPre applied
-    it); sysctl="loadable" is for a caller whose RESTART will apply it: it passes when the sysctl exists (the unit sets it)
-    or br_netfilter would be inserted (a verbose modprobe dry run, see _bridge_nf_loadable), and refuses on the host the unit's own comment
-    names — one that cannot load the module, where ExecStartPre's `-` lets the start reach the manager and refuse."""
+def _refuse_open_egress(workers: int | None = None) -> None:
+    """Fail closed at start on a network posture this pool cannot provide (the rotation preflight mirrors it before promoting:
+    a promotion restarts the pool-manager, and a refusal there is an outage). Workers are isolated by a private network
+    namespace each (netns_isolation) — no host firewall rule, no br_netfilter, no shared bridge — so the posture is fixed:
+    AUTHENTICODE_EXIT unset or none, no rooter-era egress knob, and the host tools the namespaces need present.
+    ``workers`` is accepted for the callers that pass the pool size; every worker has its own namespace, so it changes nothing."""
     params_locked()   # a malformed AUTHENTICODE_LOCK_PARAMS (strict boolean) refuses the start here, before the orphan recovery
-    raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
-    if not raw:
-        raise SystemExit("AUTHENTICODE_EXIT is not set: a worker started without an exit driver reaches the libvirt network's plain NAT "
-                         "and the host's own listeners (the ingress on 8099). Name an exit driver (direct is the minimum: it installs the "
-                         "per-worker chains), or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose")
-    if raw.lower() == "none" or workers < 2:
-        return
-    from winval_blastbox.vm_pool import authenticode_spec
-    eg = authenticode_spec().egress
-    if eg is not None and eg.exit_driver != "drop" and not eg.block_internal and eg.egress_ports is not None and agent_port() in eg.egress_ports:
-        raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge, AUTHENTICODE_BLOCK_INTERNAL off and AUTHENTICODE_EGRESS_PORTS "
-                         f"admitting the agent port {agent_port()}: a compromised worker reaches its siblings' agent through the allowlist. Set "
-                         "AUTHENTICODE_BLOCK_INTERNAL=1, drop the agent port from the allowlist, or run one worker")
-    if eg is not None and eg.exit_driver != "drop" and not eg.block_internal and eg.egress_ports is None:   # () is the CLOSED allowlist (drops siblings
-        # too); only None is 'no allowlist: ACCEPT'. The drop exit ends its chain in an unconditional DROP (blastbox's rooter): closed already
-        raise SystemExit(f"AUTHENTICODE_EXIT={raw} with {workers} workers on one bridge and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor a port "
-                         "allowlist: the policy ends in ACCEPT for worker-to-worker traffic, so a compromised worker reaches its siblings' "
-                         "agent port. Set AUTHENTICODE_BLOCK_INTERNAL=1 (or an AUTHENTICODE_EGRESS_PORTS that does not admit the agent port, or AUTHENTICODE_EXIT=drop), or run one worker")
-    if sysctl == "loadable":
-        if Path(BRIDGE_NF_SYSCTL).exists():
-            return   # br_netfilter is loaded: the unit's `sysctl -w` sets the value at the next start
-        loadable, why = _bridge_nf_loadable()
-        if not loadable:
-            raise SystemExit(f"br_netfilter is not loaded and cannot be ({why}): the pool-manager's next start "
-                             f"would refuse with {workers} workers on one bridge (the FORWARD rules never see worker-to-worker frames, so "
-                             "the policy's DROP for them never fires). Install the module (a kernel with CONFIG_BRIDGE_NETFILTER), "
-                             "or run one worker")
-        return
+    from winval_blastbox.vm_pool import validate_egress_posture
     try:
-        enabled = Path(BRIDGE_NF_SYSCTL).read_text().strip() == "1"
-    except OSError:
-        enabled = False
-    if not enabled:
-        raise SystemExit(f"{BRIDGE_NF_SYSCTL} is not 1 (br_netfilter not loaded, or the sysctl off): with {workers} workers on one bridge the "
-                         "FORWARD rules never see worker-to-worker frames, so the policy's DROP for them (block_internal, an allowlist or the drop exit) never fires and a compromised "
-                         "worker reaches its siblings' agent port. Run: modprobe br_netfilter; sysctl -w net.bridge.bridge-nf-call-iptables=1 "
-                         "(and persist both), or run one worker")
+        validate_egress_posture()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    missing = [t for t in HOST_TOOLS if not _which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]
+    if missing:
+        raise SystemExit(f"{', '.join(missing)} not found: namespace isolation needs iproute2 (ip), dnsmasq and setpriv (util-linux) on the host")
 
 
 def _rel_parts(p: Path, what: str, root: Path = JOB_ROOT) -> tuple:
@@ -604,7 +478,7 @@ class PoolManager:
         if WORK_ROOT.is_symlink() or WORK_ROOT.stat().st_uid != os.geteuid():
             raise SystemExit(f"WINVAL_WORK_ROOT {WORK_ROOT} must be a directory owned by this process (uid {os.geteuid()})")
         os.chmod(WORK_ROOT, 0o700)
-        try:   # design changes #7/#8: fail closed on an unset exit and on provably reachable siblings — BEFORE the orphan recovery (a refusal that fires on the first start after an upgrade must not first fail every RUNNING job and unlink its spool), the pool shut on the way out like every other start failure
+        try:   # fail closed on a network posture this pool cannot provide — BEFORE the orphan recovery (a refusal that fires on the first start after an upgrade must not first fail every RUNNING job and unlink its spool), the pool shut on the way out like every other start failure
             _refuse_open_egress(self._concurrency)
         except (ValueError, RuntimeError) as exc:   # a posture typo, or a golden base outside printable ASCII: the warm-up's own one-line path
             logger.error("the pool cannot start: %s", exc)

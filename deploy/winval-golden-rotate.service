@@ -1,6 +1,6 @@
 # win-validator golden rotation — one gated refresh+rotate cycle (driven by the .timer).
 # Rebakes the golden's trust state (disallowed kill-list / CRL cache / roots via myatg --refresh),
-# validates the candidate (benign==Valid + revoked==Revoked), and promotes it ONLY if it passes,
+# validates the candidate (benign==Valid + revoked in Revoked|Distrusted), and promotes it ONLY if it passes,
 # keeping the last N goldens as rollback backups. A failing gate keeps the current golden + exits
 # non-zero (surfaced by systemd). Restarts the pool-manager on success to re-warm off the new base.
 # Every GOLDEN_MAX_CHAIN cycles (and always with GOLDEN_REBAKE_FROM=master) the cycle is the FULL
@@ -30,9 +30,10 @@ Environment=GOLDEN_KEEP_N=5
 # a second copy of the golden's chain-depth record OFF the images store (the copy that survives that store
 # refusing writes at promotion time); the preflight warns every run it cannot be written
 Environment=GOLDEN_CHAIN_MIRROR=/var/lib/winval/golden-base.chain
-# The benign signed sample the rotation gate validates (benign==Valid, and revoked==Revoked when
+# The benign signed sample the rotation gate validates (benign==Valid, and revoked Revoked|Distrusted when
 # GOLDEN_REVOKED_SAMPLE is set): set both in /etc/winval/winval.env (see the deploy README).
-# Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
+# Set a known-revoked sample to also gate the disallowed/revocation path (one the golden can judge OFFLINE, e.g. a signer
+# on the Disallowed list: workers have no egress, see deploy/README.md):
 #   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
 Environment=MYATG_SRC=/opt/myatg

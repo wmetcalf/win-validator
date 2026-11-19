@@ -1,10 +1,8 @@
 # DESCRIPTIVE ONLY — the shape of the win-validator VM worker in blastbox vm_compose terms. NOTHING in
 # this repo parses this file: the pool is configured in code by winval_blastbox/vm_pool.py from the
 # AUTHENTICODE_* variables in /etc/winval/winval.env (POOL_SIZE, GOLDEN_BASE, AGENT_PORT — baked into the
-# golden's URL ACL/firewall/task by golden_build, so changing it needs a build-and-promote — IP_POOL,
-# SSH_KEY, SMOKE_SAMPLE, SMOKE_EXPECT, WARM_DIR, and for egress: AUTHENTICODE_EXIT,
-# AUTHENTICODE_EGRESS_PORTS, AUTHENTICODE_BLOCK_INTERNAL, AUTHENTICODE_VPN_TABLE/VPN_TUN,
-# AUTHENTICODE_FAKENET_ADDR, AUTHENTICODE_GATEWAY, AUTHENTICODE_LEG). Editing this file changes
+# golden's URL ACL/firewall/task by golden_build, so changing it needs a build-and-promote —
+# SSH_KEY, SMOKE_SAMPLE, SMOKE_EXPECT, WARM_DIR, AGENT_CALLER). Editing this file changes
 # nothing; set those instead. The domain-shape values below (mem_mb, vcpus, network, disk_bus,
 # nic_model, overlay_dir, max_jobs_per_slot) have NO knob: they are blastbox's VmWorkerSpec defaults
 # as authenticode_spec() leaves them, and change only with blastbox.
@@ -27,7 +25,7 @@ workers:
     # domain shape
     mem_mb: 4096
     vcpus: 2
-    network: default
+    network: none  # a private network namespace per worker, not a libvirt network (see below)
     disk_bus: sata
     nic_model: e1000
     overlay_dir: /dev/shm
@@ -38,12 +36,5 @@ workers:
     jobs_per_recycle: 25
     max_jobs_per_slot: 0
 
-    # egress (rooter model) — documentation of the AUTHENTICODE_EXIT / EGRESS_PORTS / BLOCK_INTERNAL knobs above;
-    # this block is not read. exit: direct | openvpn | wireguard | tor | inetsim.
-    # egress_ports composes onto any exit; unset = all traffic over the exit. tor blocks non-TCP.
-    egress:
-      exit: direct
-      # egress_ports: [53, 80, 443, 8080]
-      # block_internal: true
-      # vpn_table: vpn
-      # vpn_tun: tun0
+    # network: NOT a libvirt network. Each worker's NIC is a tap in its own network namespace with no
+    # uplink (winval_blastbox/netns_isolation.py): no egress, no host firewall rule. AUTHENTICODE_EXIT=none.

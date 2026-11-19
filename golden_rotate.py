@@ -11,7 +11,7 @@ failure is surfaced — so a bad bake (the WU-wedge / corruption scenarios) neve
                      -> overlay clone -> refresh trust state -> flatten -> candidate.qcow2
                      Every GOLDEN_MAX_CHAIN cycles (or GOLDEN_REBAKE_FROM=master) the cycle is
                      instead golden_build's FULL bake from the packer master (it carries no agent).
-  validate_golden()  boot a worker off a qcow2 -> assert benign==Valid AND revoked==Revoked
+  validate_golden()  boot a worker off a qcow2 -> assert benign==Valid AND revoked in (Revoked, Distrusted), revocation on
   rotate()           backup current base (keep last N) -> promote candidate -> base -> record the
                      chain depth (beside the golden + the mirror off the images store) -> restart
                      the pool-manager so the promoted golden is in service
@@ -410,7 +410,7 @@ CONVERT_TIMEOUT_S = _env_int("GOLDEN_CONVERT_TIMEOUT_S", 3600, floor=60)   # the
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
-REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set
+REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status Revoked or Distrusted when set
 WARM_DIR = os.environ.get("GOLDEN_WARM_DIR", "")   # a GUEST directory (C:\...) of signed binaries for myatg --warm-cache; NOT AUTHENTICODE_WARM_DIR, which is a HOST corpus the pool posts to the agent        # optional in-guest dir of certs to re-warm
 
 _SSH = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
@@ -553,10 +553,9 @@ def _rotation_preflight(estimate_bytes: int | None, candidate_built: bool, keep:
         # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
         from winval_blastbox.pool_manager import _refuse_open_egress
-        _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
-        # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
-        # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
-        # cannot load br_netfilter at all is refused here
+        _refuse_open_egress(pool_size())   # the manager's OWN start refusals (the network posture: AUTHENTICODE_EXIT none, no rooter-era
+        # egress knob, the namespace tools present); the restart after the promotion would otherwise refuse and the pool would be down
+        # until the knobs were fixed
         # then the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name), in the manager's order — its
         # start runs _refuse_open_egress first, these later: with two knobs wrong the same one is named here and there
         from winval_blastbox.vm_pool import smoke_expect
@@ -788,23 +787,23 @@ def build_candidate(src: str | None = None) -> str:
 
 
 def _gate_spec(qcow2: str):
-    """The PRODUCTION spec (egress policy, exit routing, agent port) with the candidate as its image: the gate
-    must judge the candidate under the network posture the workers will run with, and with the same clock sync
-    at ready (a golden without qemu-ga gets its clock ONLY from that hook — and both verdicts are clock-bound).
-    The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP."""
+    """The PRODUCTION spec (agent port, network posture) with the candidate as its image: the gate must judge the
+    candidate under the network posture the workers will run with — a private network namespace, no egress
+    (vm_pool.build_runtime) — and with the same clock sync at ready (a golden without qemu-ga gets its clock ONLY
+    from that hook — and both verdicts are clock-bound)."""
     import dataclasses
     from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
     from blastbox.host.runtime.vm_compose import VmImageSpec
     spec = dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
-    validate_egress_posture(spec)   # the rooter's spawn-time refusals (an unsupported exit, inetsim without a sink, gateway xor leg), before any build
+    validate_egress_posture(spec)   # the posture's refusals (a rooter-era exit or knob), before any build
     return spec
 
 
 def validate_golden(qcow2: str) -> bool:
     """Boot a throwaway worker off ``qcow2`` and assert the validation gate: a benign signed sample
-    is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
+    is Valid AND (if configured) a known-revoked sample is Revoked or Distrusted, with revocation checking on. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
-    from winval_blastbox.vm_pool import agent_validate, _sync_clock
+    from winval_blastbox.vm_pool import agent_validate, build_runtime, slot_netns, _sync_clock
     c = Path(qcow2)
     if c.is_symlink() or not c.is_file():   # a mistyped path was 'did not boot a healthy worker' — the verdict a corrupt golden gives — after a 240 s wait
         logger.error("GATE FAIL: candidate %s is not a regular file (no such file, or a symlink/directory); nothing was booted", qcow2)
@@ -816,7 +815,7 @@ def validate_golden(qcow2: str) -> bool:
         logger.error("GATE FAIL: GOLDEN_REVOKED_SAMPLE=%r is not a file: the gate cannot run; nothing was booted", REVOKED)
         return False
     try:   # the spec too: a knob blastbox refuses is a GATE FAIL by name, never a traceback (the preflight refuses it earlier still)
-        rt = _gate_spec(qcow2).runtime(on_ready=_sync_clock)
+        rt = build_runtime(_gate_spec(qcow2), on_ready=_sync_clock)
         slot = rt.spawn_ready(timeout_s=240)
     except Exception as exc:
         logger.error("GATE FAIL: candidate %s did not boot a healthy worker: %s", qcow2, exc)
@@ -825,15 +824,36 @@ def validate_golden(qcow2: str) -> bool:
         checks = [(BENIGN, "Valid")]
         if REVOKED:
             checks.append((REVOKED, "Revoked"))
+        # judged with the knobs production sends (engine.detonate, the same function): AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS
+        from winval_blastbox.engine import effective_knobs, request_params
+        gate_params = request_params(effective_knobs())
+        sent_rev = gate_params.get("rev", "online")   # myatg's own default when no ?rev= is sent
+        # what myatg can report under the rev it was sent (myatg.cs / rdp_validate.cs): online -> online|unknown, offline ->
+        # offline|unknown, none -> none. An answer outside the set proves the agent did not apply that rev (switched off, or
+        # ignoring ?rev=); 'unknown' is common to online and offline, so an agent swapping those two is not always caught
+        expected_rc = {"none": ("none",), "offline": ("offline", "unknown")}.get(sent_rev, ("online", "unknown"))
         for sample, want in checks:
             try:
-                got = agent_validate(slot.endpoint, sample).get("status")
+                verdict = agent_validate(slot.endpoint, sample, netns=slot_netns(slot), params=gate_params or None)
+                got = verdict.get("status")
             except Exception as exc:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False
             logger.info("gate: %s -> %s (want %s)", Path(sample).name, got, want)
-            if got != want:
+            if want == "Revoked" and got in ("Revoked", "Distrusted"):
+                pass   # caught either way: myatg answers Distrusted for a signer on the Disallowed list (it overrides Revoked)
+            elif got != want:
                 logger.error("GATE FAIL: %s gave %r, expected %r", sample, got, want)
+                return False
+            chain = verdict.get("chain")
+            if not isinstance(chain, dict):   # no chain evaluated with the right status (a script judged by the PS fallback)
+                logger.error("GATE FAIL: %s gave %r but no certificate chain: the gate cannot see revocation on it", sample, got)
+                return False
+            rc = chain.get("revocation_checked")
+            if rc not in expected_rc:
+                # the agent ignored the rev production sends, or switched revocation OFF though production checks it: workers
+                # would never report a revoked signer again, and a Disallowed-list sample (Distrusted either way) cannot show it
+                logger.error("GATE FAIL: %s was judged with revocation_checked %r, which rev=%s cannot produce", sample, rc, sent_rev)
                 return False
         logger.info("GATE PASS: candidate %s validated", qcow2)
         return True

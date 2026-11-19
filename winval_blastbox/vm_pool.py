@@ -17,7 +17,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import socket
 import subprocess
 import time
@@ -26,9 +25,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from blastbox.host.netwire import parse_egress_ports, parse_strict_bool
-from blastbox.host.runtime.libvirt_egress import ExitRouting, VmEgressPolicy
+from blastbox.host.pool import WarmPool
 from blastbox.host.runtime.vm_compose import VmImageSpec, VmWorkerSpec
+
+from .netns_isolation import NetnsVmRuntime, host_addr, netns_opener
 
 from .knobs import agent_port, env_int
 
@@ -122,13 +122,15 @@ def fault_of(exc: BaseException) -> str:
 
 
 def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
-                   params: dict | None = None) -> dict:
+                   params: dict | None = None, netns: str | None = None) -> dict:
     """Validate a file via the myatg guest agent's HTTP API:
     ``POST http://<ip>:<port>/validate?name=<filename>[&rev=..&scripts=..]`` with the raw file bytes
     as the body, returning the verdict JSON. The filename is passed for extension-based routing
     (.rdp / script SIP type) only — myatg verdicts are content-hashed, so the base name is irrelevant.
     ``params`` carries per-request myatg overrides (``rev`` / ``scripts``); myatg validates the values
-    itself, reading an unknown rev as online and an unknown scripts as native (the engine sends those explicitly)."""
+    itself, reading an unknown rev as online and an unknown scripts as native (the engine sends those explicitly).
+    ``netns`` is the worker's private network namespace (netns_isolation): the connection is made from inside it, the only
+    place the guest's address exists."""
     host, port = endpoint
     size = os.stat(path).st_size
     q = {"name": os.path.basename(path)}
@@ -141,7 +143,10 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     with open(path, "rb") as fh:
         req = urllib.request.Request(
             url, data=fh, method="POST", headers={"Content-Type": "application/octet-stream", "Content-Length": str(size)})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        if not netns:   # never the host namespace: there, the guest's address may be some other VM on libvirt's default network
+            raise ValueError("agent_validate needs the worker's network namespace (slot.netns): no host-namespace fallback")
+        opener = netns_opener(netns)
+        with opener.open(req, timeout=timeout) as r:
             body = r.read(AGENT_RESPONSE_MAX + 1)
     if len(body) > AGENT_RESPONSE_MAX:
         raise RuntimeError(f"the guest agent's verdict exceeds {AGENT_RESPONSE_MAX} bytes (WINVAL_AGENT_RESPONSE_MB); "
@@ -151,95 +156,81 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 
 
 
-def _egress_ports(raw: str | None) -> tuple[int, ...] | None:
-    ports = parse_egress_ports(raw)
-    if ports and raw:
-        def _kept(t: str) -> bool:   # the PARSER's own verdict per token (isdigit()/int() re-derived it wrongly: '²' raised, '+443' was reported dropped though honoured)
-            try:
-                return bool(parse_egress_ports(t))
-            except ValueError:
-                return False
-        dropped = [t for t in re.split(r"[,\s]+", raw.strip()) if t and not _kept(t)]
-        if dropped:   # blastbox's parser skips a token it cannot read (a range, a name) silently: the operator must hear which
-            logger.warning("AUTHENTICODE_EGRESS_PORTS=%r: %s dropped (comma- or space-separated port NUMBERS 1..65535 only); allowing %s", raw, dropped, list(ports))
-    if ports is None and raw is not None:   # PRESENT but parsing to nothing (blank included) is CLOSED, as vm_compose._ports reads a YAML value
-        logger.error("AUTHENTICODE_EGRESS_PORTS=%r parses to no port at all (comma- or space-separated numbers 1..65535): the allowlist is CLOSED, not open", raw)
-        return ()
-    return ports
+# The host-firewall egress knobs of the rooter era. Isolation is now a private network namespace per worker (netns_isolation):
+# no host iptables/nftables/ebtables rule, no br_netfilter, no libvirt network or nwfilter — and so no egress. Any of these set to
+# a value that asks for egress is refused by name rather than silently ignored.
+EGRESS_EXITS_REMOVED = ("drop", "direct", "openvpn", "wireguard", "tor", "inetsim")
+OBSOLETE_EGRESS_KNOBS = ("AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN", "AUTHENTICODE_FAKENET_ADDR",
+                         "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL",
+                         "AUTHENTICODE_LIBVIRT_NETWORK")   # the golden's agent rule used to admit that network's host address;
+# the workers now call from AUTHENTICODE_AGENT_CALLER, so a set LIBVIRT_NETWORK means an existing golden may admit another address   # each asked for egress or a shared network;
+# AUTHENTICODE_BLOCK_INTERNAL only ever RESTRICTED a worker, and a namespace already blocks everything it blocked: it is ignored
 
 
-def validate_egress_posture(spec: VmWorkerSpec) -> None:
-    """The refusals LibvirtEgress.apply() makes at worker spawn (a routed exit without ExitRouting, inetsim
-    without a FakeNet sink, an unsupported exit driver, a shared-router VPN with gateway xor leg), checked
-    without a worker: the rotation preflight refuses a bad posture before the hour-long build, and the pool
-    refuses it before booting a VM. The rooter's own check stays the enforcement; this only moves the error
-    earlier (the exit sets are imported from blastbox so the two cannot drift apart)."""
-    try:   # private names, imported so the sets cannot drift from blastbox's own; a blastbox without them must not escape as an ImportError traceback
-        from blastbox.host.runtime.libvirt_egress import _ROUTING_DRIVERS, _SUPPORTED_EXITS
-        from blastbox.host.runtime.libvirt_vm import _parse_ip_pool
-    except ImportError as exc:
-        try:
-            import importlib.metadata
-            ver = importlib.metadata.version("blastbox")
-        except Exception:   # a source checkout on PYTHONPATH has no dist metadata — and PackageNotFoundError IS an ImportError, which must not escape here
-            import blastbox
-            ver = getattr(blastbox, "__version__", None) or f"an unversioned checkout at {os.path.dirname(blastbox.__file__)}"
-        raise RuntimeError(f"the installed blastbox ({ver}) lacks a name this posture check relies on ({exc}); upgrade blastbox (deploy/README.md pins the minimum)") from exc
-    if spec.worker_ip_pool:   # parsed only inside LibvirtVmRuntime.__init__ otherwise: the one AUTHENTICODE_* knob that could still fail after the build
-        try:
-            _parse_ip_pool(spec.worker_ip_pool)
-        except ValueError as exc:
-            raise ValueError(f"AUTHENTICODE_IP_POOL={spec.worker_ip_pool!r} is not a usable range ({exc})") from exc
-    pol, rt = spec.egress, spec.routing
-    if pol is None:
-        return
-    if pol.exit_driver in _ROUTING_DRIVERS and rt is None:
-        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} needs the exit routing knobs (a filter-only policy would leak via the host route)")
-    if pol.exit_driver == "inetsim" and not (rt and rt.fakenet_addr):
-        raise ValueError("AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink)")
-    if pol.exit_driver not in _SUPPORTED_EXITS:
-        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} is not an exit the VM rooter supports ({', '.join(sorted(_SUPPORTED_EXITS))})")
-    if pol.exit_driver in ("openvpn", "wireguard") and rt is not None and bool(rt.gateway) != bool(rt.leg):
-        raise ValueError(f"AUTHENTICODE_EXIT={pol.exit_driver!r} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (got gateway={rt.gateway!r}, leg={rt.leg!r})")
+def exit_driver() -> str:
+    """AUTHENTICODE_EXIT as the pool reads it: unset, blank or ``none`` (any case) is ``none``, the only posture there is.
+    Every other value named an exit that installed host firewall rules (blastbox's rooter) and is refused by name."""
+    raw = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
+    if not raw or raw.lower() == "none":
+        return "none"
+    raise ValueError(f"AUTHENTICODE_EXIT={raw!r}: host-side egress exits ({', '.join(EGRESS_EXITS_REMOVED)}) were removed — they installed "
+                     "iptables chains on the host. Workers are isolated in a private network namespace with no egress; "
+                     "set AUTHENTICODE_EXIT=none (or unset it)")
+
+
+def validate_egress_posture(spec: VmWorkerSpec | None = None) -> None:
+    """The network posture, checked without a worker (the rotation preflight before the hour-long build, the pool before
+    booting a VM): the exit is none, no rooter-era knob is set, and the namespace addressing (AUTHENTICODE_AGENT_CALLER) parses.
+    ``spec`` is accepted for the callers that hold one: it must carry no egress policy, routing or IP pool."""
+    exit_driver()
+    stale = [k for k in OBSOLETE_EGRESS_KNOBS if (os.environ.get(k) or "").strip()]
+    if stale:
+        raise ValueError(f"{', '.join(stale)} configured host-firewall egress or a shared libvirt network, both removed: workers are isolated "
+                         "in a private network namespace with no egress. Remove the knob(s) from winval.env (for AUTHENTICODE_LIBVIRT_NETWORK: "
+                         "set AUTHENTICODE_AGENT_CALLER to the host address on that network, the one your golden's agent rule admits)")
+    if spec is not None and (spec.egress is not None or spec.routing is not None or spec.worker_ip_pool):
+        raise ValueError("the worker spec carries host-side egress (an egress policy, exit routing or an IP pool): not available under namespace isolation")
+    host_addr()
 
 
 def authenticode_spec() -> VmWorkerSpec:
-    """Build the authenticode VM-worker spec from AUTHENTICODE_* env (golden, pool size, agent,
-    optional egress: AUTHENTICODE_EXIT/EGRESS_PORTS/BLOCK_INTERNAL/VPN_TABLE/...)."""
-    exit_driver = (os.environ.get("AUTHENTICODE_EXIT") or "").strip()
-    if exit_driver.lower() == "none":   # the EXPLICIT opt-out (design change #7): no egress policy, on purpose and by name — an unset knob is a pool-manager refusal
-        exit_driver = ""
-    egress = routing = None
-    if exit_driver:
-        egress = VmEgressPolicy(
-            exit_driver=exit_driver,
-            # blastbox's own fail-closed parsers: a typo in a SECURITY knob must raise (BLOCK_INTERNAL=treu) or be
-            # dropped (a port outside 1..65535), never read as "off" or written into a broken --dports —
-            # and a value GIVEN but wholly unparsable ('8080-8090', 'http,https') is a CLOSED allowlist (), never
-            # None, which the rooter reads as "no allowlist: ACCEPT" (blastbox's own YAML path does the same)
-            egress_ports=_egress_ports(os.environ.get("AUTHENTICODE_EGRESS_PORTS")),
-            block_internal=parse_strict_bool(os.environ.get("AUTHENTICODE_BLOCK_INTERNAL")),
-        )
-        routing = ExitRouting(
-            vpn_table=(os.environ.get("AUTHENTICODE_VPN_TABLE") or "").strip() or "vpn",   # stripped like every routing knob: whitespace-only is unset (the default)
-            vpn_tun=(os.environ.get("AUTHENTICODE_VPN_TUN") or "").strip() or "tun0",
-            fakenet_addr=(os.environ.get("AUTHENTICODE_FAKENET_ADDR") or "").strip() or None,
-            gateway=(os.environ.get("AUTHENTICODE_GATEWAY") or "").strip() or None,
-            leg=(os.environ.get("AUTHENTICODE_LEG") or "").strip() or None,
-        )
+    """Build the authenticode VM-worker spec from AUTHENTICODE_* env (golden, pool size, agent port). The network is NOT in the
+    spec: build_runtime() puts every worker's NIC in its own network namespace (netns_isolation), with no egress."""
+    exit_driver()   # a rooter-era exit is refused here, by name, wherever the spec is built
     return VmWorkerSpec(
         name="authenticode",
         image=VmImageSpec(golden=golden_base()),
         agent_port=agent_port(),
         warm_size=pool_size(),
-        egress=egress,
-        routing=routing,
-        # Assign+enforce (blastbox >= 0.1.18): when AUTHENTICODE_IP_POOL is set (e.g.
-        # "192.168.122.200-192.168.122.249", one /16, sized >= POOL_SIZE), blastbox reserves + pins a
-        # fixed IP per worker so a root-compromised guest can't re-IP around the egress rooter. Empty
-        # ⇒ DHCP-learning (clean-traffic CTRL_IP_LEARNING=dhcp).
-        worker_ip_pool=(os.environ.get("AUTHENTICODE_IP_POOL") or "").strip(),   # stripped like AUTHENTICODE_EXIT (and the sink, gateway and leg above): a whitespace-only value is unset, as the upgrade gate reads it
+        egress=None,
+        routing=None,
+        nwfilter="",   # no libvirt nwfilter (ebtables on the host): the NIC is a private tap, not a bridge port
+        worker_ip_pool="",
     )
+
+
+def build_runtime(spec: VmWorkerSpec, *, health_check=None, pre_snapshot=None, on_ready=None) -> NetnsVmRuntime:
+    """The ONE place a worker runtime is made (the pool and the rotation's gate): namespace isolation, never a libvirt network."""
+    return NetnsVmRuntime(spec.to_vm_config(health_check=health_check, pre_snapshot=pre_snapshot, on_ready=on_ready))
+
+
+def build_pool(spec: VmWorkerSpec, *, jobs_per_recycle: int, health_check=None, pre_snapshot=None, on_ready=None) -> WarmPool:
+    """VmWorkerSpec.build_pool's WarmPool, over build_runtime()'s runtime (the same knobs it passes)."""
+    rt = build_runtime(spec, health_check=health_check, pre_snapshot=pre_snapshot, on_ready=on_ready)
+    return WarmPool(
+        runtime=rt,  # type: ignore[arg-type]  # a VmSlot runtime, as vm_compose passes it
+        warm_size=spec.warm_size,
+        concurrent_ceiling=spec.concurrent_ceiling,
+        spawn_rate_limit=spec.spawn_rate_limit,
+        jobs_per_recycle=jobs_per_recycle,
+        max_jobs_per_slot=spec.max_jobs_per_slot,
+        warming_timeout_s=rt.cfg.boot_timeout_s + 60,
+    )
+
+
+def slot_netns(slot) -> str | None:
+    """The worker's private namespace (set by NetnsVmRuntime.spawn); None for a slot from anything else."""
+    return getattr(slot, "netns", None)
 
 
 AGENT_STATUSES = frozenset({"Valid", "Revoked", "Distrusted", "UntrustedRoot", "HashMismatch", "Expired", "NotYetValid", "UnknownError",
@@ -266,7 +257,7 @@ def _smoke(slot) -> bool:
     sample = (os.environ.get("AUTHENTICODE_SMOKE_SAMPLE") or "").strip()
     expect = smoke_expect()
     try:
-        v = agent_validate(slot.endpoint, sample, timeout=30.0)
+        v = agent_validate(slot.endpoint, sample, timeout=30.0, netns=slot_netns(slot))
     except Exception:
         return False
     return isinstance(v, dict) and str(v.get("status", "")).strip().lower() == expect.lower()
@@ -283,7 +274,7 @@ def _warm_crl(slot) -> None:
         p = os.path.join(warm_dir, name)
         if os.path.isfile(p):
             try:
-                agent_validate(slot.endpoint, p, timeout=40.0)
+                agent_validate(slot.endpoint, p, timeout=40.0, netns=slot_netns(slot))
             except Exception:
                 pass  # best-effort warm; one bad sample must not block the snapshot
 
@@ -302,8 +293,9 @@ def _sync_clock(slot) -> None:
     enc = base64.b64encode(ps.encode("utf-16-le")).decode()
     key = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
     try:
+        ns = slot_netns(slot)
         subprocess.run(
-            ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            (["ip", "netns", "exec", ns] if ns else []) + ["ssh", "-F", "/dev/null", "-n", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
              "-o", "ConnectTimeout=10", "-i", key, f"Administrator@{slot.ip}",
              "powershell -NoProfile -EncodedCommand " + enc],
             capture_output=True, text=True, timeout=30)
@@ -334,9 +326,9 @@ class WarmVmPool:
             raise RuntimeError(f"AUTHENTICODE_WARM_DIR={warm_dir!r} is not a directory; put the benign signed samples there or unset it")
         pre_snapshot = _warm_crl if warm_dir else None
         spec = authenticode_spec()
-        validate_egress_posture(spec)   # by name, before a single VM boots (the rooter would refuse at spawn, after the boot)
-        self._pool = spec.build_pool(
-            jobs_per_recycle=jobs_per_recycle, health_check=health_check,
+        validate_egress_posture(spec)   # by name, before a single VM boots
+        self._pool = build_pool(
+            spec, jobs_per_recycle=jobs_per_recycle, health_check=health_check,
             pre_snapshot=pre_snapshot, on_ready=_sync_clock)
         self._claim_timeout_s = claim_timeout_s
 
@@ -388,7 +380,7 @@ class WarmVmPool:
         if slot is None:
             raise RuntimeError("no warm VM worker available")
         try:
-            verdict = agent_validate(slot.endpoint, path, params=params)  # type: ignore[attr-defined]
+            verdict = agent_validate(slot.endpoint, path, params=params, netns=slot_netns(slot))  # type: ignore[attr-defined]
         except (KeyboardInterrupt, SystemExit):
             self._pool.release(slot, **release_kwargs(self._pool.release, dirty=True))   # the slot ran something: revert it; nobody's evidence
             raise

@@ -122,89 +122,34 @@ if sys.argv[1] == "rotation":   # the ROTATION's own refusal (golden_rotate.rota
     if legacy and legacy != effective: print(f"rotation: GOLDEN_BASE={legacy[:200]!r} is the rotator's OLD name for the RAM base and nothing else reads it (the pool and the unit boot from AUTHENTICODE_GOLDEN_BASE, {effective}); the weekly rotation refuses that posture — rename the knob"); sys.exit(0)
     print("ok"); sys.exit(0)
 if sys.argv[1] == "egress":
-    import os, subprocess
-    # the pool-manager's START, judged in ITS order, read the way it reads the env: _refuse_open_egress first (an unset exit; then, with
-    # several workers and an exit other than none: the boolean, an allowlist admitting the agent port, the kernel half), then
-    # WarmVmPool.__init__'s knob guards (the smoke sample, its status, the warm dir), then validate_egress_posture (the boolean again for
-    # the paths that skipped it, the IP pool, a supported exit name, inetsim's sink, gateway-and-leg together). With several knobs wrong the
-    # same one is named here and there. A posture refused after checkout, pip and restart is what this gate exists to refuse BEFORE
-    SUPPORTED = ['direct', 'drop', 'inetsim', 'none', 'openvpn', 'tor', 'wireguard']   # blastbox.host.runtime.libvirt_egress._SUPPORTED_EXITS, inlined: this runs before the checkout and cannot import the target version (a harness scenario keeps the two equal)
+    import os
+    # the pool-manager's START, judged in ITS order, read the way it reads the env: _refuse_open_egress first (LOCK_PARAMS, then the
+    # network posture: workers live in a private network namespace each, with no egress — so AUTHENTICODE_EXIT must be unset or none and
+    # no rooter-era egress knob may be set — and the namespace's host address must parse), then WarmVmPool.__init__'s knob guards (the
+    # smoke sample, its status, the warm dir), then the golden base. A posture refused after checkout, pip and restart is what this gate
+    # exists to refuse BEFORE
     lp = (env.get("AUTHENTICODE_LOCK_PARAMS") or "").strip().lower()   # _refuse_open_egress's first guard (engine.params_locked); the value is not echoed
     if lp and lp not in ("1", "true", "yes", "on", "0", "false", "no", "off"): print("malformed: AUTHENTICODE_LOCK_PARAMS is not a boolean (true/false): the pool-manager refuses that posture at start"); sys.exit(0)
-    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset
-    if not ex: print("unset: AUTHENTICODE_EXIT is not set (this version's pool-manager refuses to start without one): name an exit driver (direct is the minimum) or write AUTHENTICODE_EXIT=none to run with no egress policy on purpose"); sys.exit(0)
-    bi_raw = (env.get("AUTHENTICODE_BLOCK_INTERNAL") or "").strip(); bi = bi_raw.lower()
-    def bool_guard():   # the spec parses the boolean fail-closed (blastbox's parse_strict_bool) wherever it is first built
-        if bi and bi not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
-            print(f"malformed: AUTHENTICODE_BLOCK_INTERNAL={bi_raw!r} is not a boolean (true/false): the pool-manager refuses that posture"); sys.exit(0)   # the value as written, for the grep
+    ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset, which is none
+    if ex and ex.lower() != "none":
+        print(f"refuse: AUTHENTICODE_EXIT={ex[:40]!r} names a host-side egress exit; those were removed (they installed iptables chains on the host) — workers are isolated in a private network namespace with no egress: set AUTHENTICODE_EXIT=none or unset it"); sys.exit(0)
+    OBSOLETE = ("AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN", "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL", "AUTHENTICODE_LIBVIRT_NETWORK")   # vm_pool.OBSOLETE_EGRESS_KNOBS, inlined: this runs before the checkout
+    stale = [k for k in OBSOLETE if (env.get(k) or "").strip()]
+    if stale: print(f"refuse: {', '.join(stale)} configured host-firewall egress or a shared libvirt network, both removed: remove the knob(s) (for AUTHENTICODE_LIBVIRT_NETWORK: set AUTHENTICODE_AGENT_CALLER to that network's host address, the one your golden's agent rule admits); the pool-manager refuses that posture at start"); sys.exit(0)
+    caller = (env.get("AUTHENTICODE_AGENT_CALLER") or "").strip()
+    if caller:
+        import ipaddress
+        try:
+            a = ipaddress.IPv4Address(caller)
+            if int(a) & 0xff in (0, 255): raise ValueError("network or broadcast address of its /24")   # netns_isolation.host_addr
+        except ValueError: print("malformed: AUTHENTICODE_AGENT_CALLER is not one IPv4 address (the host side of every worker's private namespace); the pool-manager refuses that posture at start"); sys.exit(0)
+    import shutil
+    missing = [t for t in ("ip", "dnsmasq", "setpriv") if not shutil.which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]   # pool_manager.HOST_TOOLS
+    if missing: print(f"refuse: {', '.join(missing)} not found: namespace isolation needs iproute2 (ip), dnsmasq and setpriv on the host; the pool-manager refuses to start without them"); sys.exit(0)
     def golden_guard():   # vm_pool.golden_base and the unit's pre-start, mirrored: space and tab trimmed at the ends, any other byte outside
-        # printable ASCII refused — read where the manager builds its spec: right after the boolean, on both the several-workers path
-        # (_refuse_open_egress) and the others (WarmVmPool.__init__, after the smoke and warm-dir guards)
+        # printable ASCII refused — read where the manager builds its spec, after the smoke and warm-dir guards
         gb = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"
         if not all(32 <= ord(c) < 127 for c in gb): print(f"malformed: AUTHENTICODE_GOLDEN_BASE={gb[:200]!r} carries a character outside printable ASCII (a pasted U+00A0, a stray newline?); the pool-manager's pre-start refuses that posture"); sys.exit(0)
-    try: workers = max(1, int((env.get("AUTHENTICODE_POOL_SIZE") or "2").strip()))
-    except ValueError: workers = 2
-    if ex.lower() != "none" and workers >= 2:   # _refuse_open_egress's rules beyond the unset exit
-        bool_guard(); golden_guard()   # authenticode_spec() is built here: the boolean, then the golden base
-        if "AUTHENTICODE_EGRESS_PORTS" in env and ex != "drop" and bi not in ("1", "true", "yes", "on"):   # an allowlist admitting the AGENT port opens the siblings' agent to a compromised worker
-            try: agent = max(1, int((env.get("AUTHENTICODE_AGENT_PORT") or "8765").strip()))   # knobs.env_int: int() of the stripped value, floored at 1, the default on a non-integer
-            except ValueError: agent = 8765
-            listed = set()   # blastbox's parse_egress_ports, mirrored: split on commas AND whitespace, int() (so +8765 and 8_765 count, as there), 1..65535, the rest dropped
-            for tok in re.split(r"[,\s]+", (env.get("AUTHENTICODE_EGRESS_PORTS") or "").strip()):
-                if not tok: continue
-                try: n = int(tok)
-                except ValueError: continue
-                if 1 <= n <= 65535: listed.add(n)
-            if agent in listed:
-                print(f"refuse: AUTHENTICODE_EGRESS_PORTS admits the agent port {agent} with AUTHENTICODE_BLOCK_INTERNAL off and {workers} workers: the pool-manager refuses to start (a compromised worker reaches its siblings' agent through the allowlist); set AUTHENTICODE_BLOCK_INTERNAL=1 or drop the port"); sys.exit(0)
-        if ex != "drop" and "AUTHENTICODE_EGRESS_PORTS" not in env and bi not in ("1", "true", "yes", "on"):
-            print(f"refuse: an AUTHENTICODE_EXIT driver with {workers} workers and neither AUTHENTICODE_BLOCK_INTERNAL=1 nor an AUTHENTICODE_EGRESS_PORTS that does not admit the agent port (nor the drop exit): the pool-manager refuses to start (a worker could reach its siblings' agent port); set one"); sys.exit(0)
-        # the kernel half, as the restart will find it: the unit's ExecStartPre loads br_netfilter and sets the sysctl (both with `-`, so a host
-        # that cannot load the module reaches the manager, which refuses by name); refuse that host HERE, before the move
-        why = ""
-        if not os.path.exists(os.environ.get("WINVAL_BRIDGE_NF_SYSCTL") or "/proc/sys/net/bridge/bridge-nf-call-iptables"):
-            # the VERBOSE dry run (the exit code says nothing: with an `install br_netfilter /bin/false` directive `-n` exits 0 for a module it
-            # would not insert) is the plan, and `modprobe -c` names whose install directive a plan line is (the plan does not): loadable = rc 0
-            # and EITHER br_netfilter's own directive is the documented `modprobe --ignore-install br_netfilter` self-load (the command's words
-            # up to a comment), OR it has none, the plan inserts br_netfilter.ko and carries no install line (a dependency's directive is refused:
-            # whether the load survives it cannot be told from the plan) — winval_blastbox.pool_manager._bridge_nf_loadable, inlined
-            def mp(*a):
-                r = subprocess.run(["modprobe", *a], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-                return r.returncode, [ln.strip() for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
-            try:
-                rc, plan = mp("-n", "-v", "br_netfilter"); conf = mp("-c")[1] if rc == 0 else []
-                why = "" if rc == 0 else f"modprobe -n -v br_netfilter failed (rc {rc}: {' | '.join(plan)[:200]})"
-                own = [ln for ln in conf if ln.split()[:2] == ["install", "br_netfilter"]]
-                if not why and own:
-                    words = []
-                    for w in own[0].split()[2:]:
-                        if w.startswith("#"): break
-                        words.append(w)
-                    first = []   # the idiom, EXACTLY (pool_manager._is_self_load): the first simple command the system's modprobe, flags from the insertion-preserving set, the module its one argument
-                    for w in words:
-                        if w in ("&&", "||", ";", "|"): break
-                        first.append(w)
-                    import shutil
-                    prog = first[0] if first else ""; flags = [w for w in first[1:] if w.startswith("-")]; args = [w for w in first[1:] if not w.startswith("-")]
-                    system = shutil.which("modprobe") or ""
-                    prog_ok = os.path.basename(prog) == "modprobe" and ("/" not in prog or (bool(system) and os.access(prog, os.X_OK) and os.path.realpath(prog) == os.path.realpath(system)))
-                    OKFLAGS = {"--ignore-install", "-i", "--quiet", "-q", "--verbose", "-v", "--all", "-a", "--use-blacklist", "-b", "--syslog", "-s"}
-                    name = os.path.basename(args[0]) if len(args) == 1 else ""
-                    for suf in (".zst", ".xz", ".gz", ".ko"):
-                        if name.endswith(suf): name = name[:-len(suf)]
-                    idiom = prog_ok and all(f in OKFLAGS for f in flags) and any(f in ("--ignore-install", "-i") for f in flags) and name.replace("-", "_") == "br_netfilter"
-                    if not idiom: why = f"a modprobe.d install directive replaces the insertion ({own[0][:120]}); only the plain self-load idiom is read as loadable"
-                    else:   # the idiom's own command, dry-run: the directive's text does not say the module EXISTS
-                        rc2, plan2 = mp("-n", "-v", *[w for w in first[1:] if w not in ("-q", "--quiet", "-s", "--syslog")])   # the idiom's OWN words, dry-run (quiet/syslog would hide the plan)
-                        if rc2 != 0 or not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan2): why = f"the self-load directive's own modprobe --ignore-install br_netfilter would insert nothing (rc {rc2}: {' | '.join(plan2)[:200] or 'no output'})"
-                        elif any(ln.startswith("install ") for ln in plan2): why = "a dependency in the self-load's plan carries an install directive: whether the load survives it cannot be told from the plan"
-                elif not why:
-                    installs = [ln for ln in plan if ln.startswith("install ")]
-                    if not any(ln.startswith("insmod ") and "/br_netfilter.ko" in ln for ln in plan): why = f"the dry run names no br_netfilter.ko to insert ({' | '.join(plan)[:200] or 'no output'})"
-                    elif installs: why = f"a dependency in the plan carries an install directive ({installs[0][:120]}): whether the load survives it cannot be told from the plan"
-            except (OSError, subprocess.SubprocessError) as exc: why = f"modprobe could not run ({exc})"
-        if why:
-            print(f"refuse: br_netfilter is not loaded and cannot be ({why}): with {workers} workers on one bridge the pool-manager refuses to start (the FORWARD rules never see worker-to-worker frames); install the module or run one worker"); sys.exit(0)
     def pool_guards():   # WarmVmPool.__init__'s own refusals (after _refuse_open_egress, as the manager orders them): the smoke sample, its
         # expected status, the warm dir — each refused by name at start, so refused HERE before the move
         AGENT = {"valid", "revoked", "distrusted", "untrustedroot", "hashmismatch", "expired", "notyetvalid", "unknownerror", "notsigned"}
@@ -216,27 +161,7 @@ if sys.argv[1] == "egress":
         wd = (env.get("AUTHENTICODE_WARM_DIR") or "").strip()
         if wd and not os.path.isdir(wd): print(f"malformed: AUTHENTICODE_WARM_DIR={wd!r} is not a directory; the pool-manager refuses that posture at start"); sys.exit(0)
     pool_guards()
-    if ex.lower() != "none": bool_guard()   # under none the spec builds no policy and never parses the boolean (authenticode_spec)
     golden_guard()   # __init__ builds the spec after the smoke and warm-dir guards
-    pool_spec = (env.get("AUTHENTICODE_IP_POOL") or "").strip()
-    if pool_spec:
-        import ipaddress
-        start, _, end = pool_spec.partition("-")
-        try:
-            if not end: raise ValueError("must be 'START-END'")
-            lo, hi = int(ipaddress.IPv4Address(start.strip())), int(ipaddress.IPv4Address(end.strip()))
-            if hi < lo: raise ValueError("END < START")
-            if start.strip().split(".")[:2] != end.strip().split(".")[:2]: raise ValueError("must fit in one /16")
-        except (ValueError, ipaddress.AddressValueError) as exc:
-            print(f"malformed: AUTHENTICODE_IP_POOL is not a usable range ({exc}); the pool-manager refuses that posture at start"); sys.exit(0)
-    if ex.lower() != "none":
-        if ex not in SUPPORTED:
-            print(f"malformed: AUTHENTICODE_EXIT names an exit the VM rooter does not support (one of {', '.join(SUPPORTED)}); the pool-manager refuses that posture at start"); sys.exit(0)
-        # the rest of validate_egress_posture: inetsim needs its sink; a shared-router VPN needs BOTH gateway and leg or neither
-        if ex == "inetsim" and not (env.get("AUTHENTICODE_FAKENET_ADDR") or "").strip():
-            print("malformed: AUTHENTICODE_EXIT=inetsim needs AUTHENTICODE_FAKENET_ADDR (the FakeNet sink); the pool-manager refuses that posture at start"); sys.exit(0)
-        if ex in ("openvpn", "wireguard") and bool((env.get("AUTHENTICODE_GATEWAY") or "").strip()) != bool((env.get("AUTHENTICODE_LEG") or "").strip()):
-            print(f"malformed: AUTHENTICODE_EXIT={ex} shared-router mode needs BOTH AUTHENTICODE_GATEWAY and AUTHENTICODE_LEG (or neither); the pool-manager refuses that posture at start"); sys.exit(0)
     print("ok"); sys.exit(0)
 secret = re.compile(r"^(BLASTBOX_DATABASE_URL|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*)$")
 assignment = re.compile(r"(BLASTBOX_DATABASE_URL\s*=\s*|[A-Za-z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|LICENSE)[A-Za-z_]*\s*=\s*)")   # a secret assignment a continuation landed INSIDE another knob's value: cut there, whatever follows (newlines included)
@@ -272,7 +197,7 @@ fi
 git checkout -B "$branch" "refs/remotes/origin/$branch"   # by the remote ref, never the bare name: a tag named like the branch resolved first and detached the live tree at it; -B is a fast-forward here (the guard above proved the local branch an ancestor)
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$branch")" ] || { echo "upgrade.sh: HEAD is not origin/$branch after the checkout; stopping" >&2; exit 1; }
 # the unit files go in RIGHT AFTER the checkout, before pip and the restart gate: installing a unit restarts nothing, and the code
-# just checked out depends on what its unit does at start (the RAM base it materialises, the br_netfilter it loads) — a pip failure,
+# just checked out depends on what its unit does at start (the RAM base it materialises) — a pip failure,
 # a crash or a reboot from here on would otherwise leave or start the new code under the old unit and latch the pool-manager failed
 install -m 0644 deploy/*.service deploy/*.timer /etc/systemd/system/   # its own line: in an AND-list a failed install was exempt from set -e and the restart ran under the OLD unit
 systemctl daemon-reload

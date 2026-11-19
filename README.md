@@ -15,7 +15,7 @@ Three repos, one job each:
 
 | Repo | Role |
 |------|------|
-| [**blastbox**](https://github.com/wmetcalf/blastbox) | the framework — job store, warm worker pool, disposable **libvirt/KVM VM-per-job** runtime, egress rooter, output-trust sealing. Ships *no* domain engines. |
+| [**blastbox**](https://github.com/wmetcalf/blastbox) | the framework — job store, warm worker pool, disposable **libvirt/KVM VM-per-job** runtime, output-trust sealing. Ships *no* domain engines. |
 | [**myatg**](https://github.com/wmetcalf/myatg) | the leaf tool — a self-contained native Windows Authenticode/catalog/script/RDP validator (`myatg.exe`). Runs *inside* the worker. |
 | **win-validator** *(this repo)* | the **`authenticode` blastbox engine** + a fan-out orchestrator. Turns "run myatg in a disposable Windows VM" into a blastbox `Engine`, and wires the golden-image build + rolling refresh + least-privilege deployment around it. |
 
@@ -33,7 +33,7 @@ flowchart TB
     pg[("<b>Postgres JobStore</b><br/>queue · results · shared job_root")]
     ingress -->|enqueue| pg
 
-    subgraph host["privileged host tier — toolz3 · libvirt + iptables"]
+    subgraph host["privileged host tier — toolz3 · libvirt + a private netns per worker"]
         pm["<b>pool-manager</b><br/>AuthenticodeEngine + warm pool"]
         pg -->|"claim_next()"| pm
         pm -->|"seal verdict (hashes recomputed from disk)"| pg
@@ -52,7 +52,7 @@ flowchart TB
     end
 
     pm <-->|"HTTP :8765 — POST /validate?name=..[&rev=..&scripts=..] → verdict JSON"| agent
-    w -.->|"egress: VPN/SOCKS/tor · web-only 53/80/443 · block RFC1918"| resp(["revocation responders<br/>(AIA / CRL / OCSP / RFC3161)"])
+    w -.-x|"no egress: the worker's netns has no uplink"| resp(["revocation responders<br/>(AIA / CRL / OCSP / RFC3161)"])
 ```
 
 1. **ingress** (an unprivileged, read-only container) takes the upload, spools it to a shared
@@ -107,42 +107,45 @@ build_candidate()  private copy of the PROMOTED golden --overlay--> myatg.exe --
                    full golden_build bake from the packer master — the Disallowed store is add-only, so the
                    chain of goldens is reset from the pristine image; see deploy/README.md)
 validate_golden()  boot a throwaway worker off the candidate
-                   GATE:  benign binary == Valid  AND  known-revoked == Revoked
+                   GATE:  benign binary == Valid  AND  known-revoked in Revoked|Distrusted
 rotate()           back up current golden (keep last N) --> promote candidate --> restart pool-manager
 ```
 
 > **The hourly/daily/weekly/monthly ladder is a backup rotation, not "validate as-of T."** Workers
-> sync real time and do live CRL/OCSP on restore, so they always validate against *now*; the only
+> sync real time on restore, so validity windows are judged against *now* (revocation comes from the
+> golden's cache — workers have no egress, see below); the only
 > thing an old snapshot freezes is trust-store state, which is a **liability if stale** (you want the
 > *freshest* disallowed list). So old goldens are rollback targets for a bad re-bake — nothing more.
 
 A candidate is promoted **only if it passes the gate**, so a wedged Windows-Update re-bake or a
 corrupted image is rejected and the current golden is kept.
 
-## Locked-down egress — why it matters here
+## Worker network isolation — no host firewall rules
 
-**Required, or opted out by name:** the pool-manager refuses to start unless `AUTHENTICODE_EXIT` names an exit
-driver (`direct` is the minimum: it installs the per-worker chains) or is set to `none`, the explicit opt-out that
-gives a worker whatever the libvirt network allows (plain NAT, RFC1918 included) on purpose. An unset knob used to
-mean the same as `none` silently; it is a refusal now.
-With it set, the worker's network is a **class policy, not a host allowlist**: an anonymizing exit
-(VPN/SOCKS, tor optional) + **DNS/HTTP/HTTPS only (53/80/443)** + **block all RFC1918/internal**,
-fail-closed on a tunnel drop. This is because signature validation *itself* reaches out — WinVerifyTrust
-and X509Chain **fetch attacker-controlled embedded URLs** (AIA / CRL / OCSP / RFC3161 timestamp). So we
-anonymize that beacon, protocol-limit it, and block SSRF/lateral movement. An unreachable responder
-just yields `revocation_checked="unknown"`. **Two hops to know about:** (1) worker to worker on the same
-libvirt bridge is switched, not routed: the FORWARD rules see it only with `net.bridge.bridge-nf-call-iptables=1`
-(`br_netfilter` loaded) on the host, AND only `AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist that does not admit the agent port, or the `drop` exit, whose chain ends in DROP) drops it —
-the documented default `direct` exit with block_internal off ends in ACCEPT, so a compromised worker reaches
-its siblings' agent port 8765 (a golden baked before this version opened that port to any source); (2) the host's own
-listeners on the bridge address (the ingress on 8099, libvirt's dnsmasq) are inbound: with an exit driver set,
-blastbox's per-worker INPUT chain drops host-destined traffic except established, DHCP and gated DNS, and
-`block_internal` covers the docker-published 8099; with `none` there is no chain at all — see `deploy/README.md`.
-Both hops are checked at start (with an exit driver set; `none` opts out of both): with more than one worker, the pool-manager refuses to start unless
-`AUTHENTICODE_BLOCK_INTERNAL=1` (or a port allowlist that does not admit the agent port, or the `drop` exit) is set AND `net.bridge.bridge-nf-call-iptables` is 1, so a
-policy that could not drop worker-to-worker traffic never runs a pool. And the golden's own firewall rule for the
-agent port admits the pool-manager's address alone (the host's address on the libvirt network, learned at bake
-time; `AUTHENTICODE_AGENT_CALLER` overrides it), so a sibling never reaches the port even where the host rules miss.
+Every VM worker's NIC is a tap device in its **own network namespace** (`wvn-<slot>`, see
+`winval_blastbox/netns_isolation.py`). The namespace holds `lo`, the tap, the host side of the tap
+(`AUTHENTICODE_AGENT_CALLER`, default `192.168.122.1` — the one address the golden's agent-port firewall
+rule admits) and a dnsmasq answering the guest's DHCP (no DNS; run as nobody with `CAP_NET_RAW` only and
+no_new_privs), and **nothing else: no uplink, no route**.
+So, by construction rather than by rule:
+
+- the guest cannot reach the host — none of the host's addresses exist in its namespace (the ingress on
+  8099, Postgres, docker bridges, the LAN);
+- the guest cannot reach a sibling — there is no shared bridge, each worker has its own namespace;
+- the guest cannot reach the internet — no egress at all.
+
+The pool-manager reaches the guest's agent by opening its socket *inside* that namespace. Nothing touches the
+host's nftables/iptables/ebtables, loads `br_netfilter`, sets a host sysctl, or creates a libvirt network or
+nwfilter: `nft list ruleset` is unchanged by a worker's whole life. The rooter-era exits (`direct`, `drop`,
+`openvpn`, `wireguard`, `tor`, `inetsim`) and their knobs installed host iptables chains; they are removed and
+refused by name at start (`AUTHENTICODE_EXIT` must be unset or `none`).
+
+**Consequence: no live revocation.** WinVerifyTrust/X509Chain cannot fetch AIA/CRL/OCSP/RFC3161 URLs, so
+revocation is answered from the golden's baked CRL/OCSP cache or not at all — the engine reports a `Valid`
+whose revocation was not checked as `ValidRevocationUnchecked`, never as `Valid` — in its revocation-aware status
+field (named per door: see `winval_blastbox/README.md`); the raw myatg verdict it also carries still says `Valid`, so a
+consumer must read the revocation-aware field (Loadout's mapper does from its 2026-11 engine-contract release on). Controlled egress
+(an anonymizing, web-only path) is a follow-up that must not need host firewall rules.
 
 ## Repo layout
 
@@ -175,7 +178,7 @@ Full bring-up (the ingress/pool-manager privilege split, the rolling-golden time
 [`deploy/README.md`](deploy/README.md). The single-host orchestrator:
 
 ```sh
-# on the libvirt host — warms the VM pool at startup
+# on the libvirt host, AS ROOT (each worker's network namespace needs it) — warms the VM pool at startup
 uvicorn winval_blastbox.orchestrator:app --host 127.0.0.1 --port 8099
 
 curl -F file=@suspect.dll 'http://127.0.0.1:8099/scan'   # -> {job_id, status: queued}
@@ -199,7 +202,7 @@ chain carries that cert; the ingress's `/cert/{tbs}` searches its store's newest
 
 This project exists to handle **untrusted, frequently-malicious files**. It never *executes* a
 sample — it only parses signatures (WinVerifyTrust / catalog / SignedCms) — so residual risk is a
-signature-*parser* exploit, contained to a throwaway VM that resets every few jobs and is egress-locked
-once `AUTHENTICODE_EXIT` is set (above).
+signature-*parser* exploit, contained to a throwaway VM that resets every few jobs and has no network beyond its own
+private namespace (above).
 Do not repurpose the workers to detonate samples without revisiting that model. Malware corpora,
 VM images, keys, and infra config are excluded from this repo by `.gitignore` — keep them out.

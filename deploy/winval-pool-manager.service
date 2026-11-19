@@ -1,8 +1,8 @@
 # win-validator POOL-MANAGER — the privileged dispatcher (host systemd unit).
 #
-# Runs on the libvirt host (it needs virsh + iptables for the VM pool + rooter egress + tunnel
-# kill-switch). It is NEVER client-facing: it only claims queued jobs from the same Postgres the
-# ingress container writes to, reads their spooled inputs from the shared job_root, validates them
+# Runs on the libvirt host (it needs virsh for the VM pool, and root to give every worker a private
+# network namespace: ip netns/tuntap, dnsmasq for the guest's DHCP inside it — no host firewall rule).
+# It is NEVER client-facing: it only claims queued jobs from the same Postgres the ingress container writes to, reads their spooled inputs from the shared job_root, validates them
 # in a warm VM worker, and writes the verdict back. Install:
 #     sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator && cd /opt/win-validator
 #     sudo python3 -m venv --system-site-packages .venv && sudo .venv/bin/pip install "blastbox>=0.1.33" "psycopg[binary,pool]" redis fastapi "uvicorn[standard]" python-multipart prometheus_client
@@ -46,15 +46,11 @@ Requires=libvirtd.service
 # no readiness marker from a previous life: the pool-manager writes WINVAL_READY_FILE once the pool is warm (the rotation's
 # restart_pool waits for it) and clears it itself at start and on exit, but a start refused before that point never reaches its clear
 ExecStartPre=-/bin/sh -c 'rm -f "$${WINVAL_READY_FILE:-/run/winval-pool-manager.ready}"'
-# design change #8: worker-to-worker frames on the bridge meet the FORWARD rules only with br_netfilter loaded and the sysctl at 1;
-# both are set at every start ('-': a host that cannot is not failed here — the manager then refuses by name, with the remedy)
-ExecStartPre=-/usr/sbin/modprobe br_netfilter
-ExecStartPre=-/usr/sbin/sysctl -q -w net.bridge.bridge-nf-call-iptables=1
 Type=simple
-# Needs libvirt + iptables, and ROOT: the ExecStartPre below creates and locks /run/winval-golden-rotate.lock
+# Needs libvirt + network namespaces, and ROOT: the ExecStartPre below creates and locks /run/winval-golden-rotate.lock
 # (0600, shared with the root-run rotation) and owns the RAM base in /dev/shm; a non-root User= fails the
 # pre-step with 'Permission denied' and latches the unit failed in ~4 min. (LibvirtVmConfig.sudo prefixes
-# virsh/iptables, which root makes a no-op.)
+# virsh/ip, which root makes a no-op.)
 User=root
 # The checkout (or a symlink to it) at a canonical path — nothing host-specific in this unit.
 WorkingDirectory=/opt/win-validator
@@ -65,7 +61,7 @@ Environment=LC_ALL=C
 Environment=LANG=C
 Environment=PYTHONPATH=/opt/win-validator
 # Defaults; /etc/winval/winval.env (deploy/winval.env.example) overrides any of them and is the
-# place for the Postgres password, the pool size, the ssh key, egress and smoke settings.
+# place for the Postgres password, the pool size, the ssh key and the smoke settings.
 Environment=BLASTBOX_DATABASE_URL=postgresql://winval:winval@127.0.0.1:5433/winval
 Environment=WINVAL_JOB_ROOT=/var/lib/winval/jobs
 # The manager's OWN scratch tree (created 0700 at start): the engine never reads from or writes into the

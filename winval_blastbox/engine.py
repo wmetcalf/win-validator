@@ -109,6 +109,13 @@ def job_params(params: Mapping[str, object] | None) -> Iterator[None]:
         _JOB_PARAMS.reset(token)
 
 
+def request_params(knobs: dict[str, str]) -> dict[str, str]:
+    """The agent query parameters for these knob values, as production sends them: a value outside the vocabulary is sent as
+    the agent's own fallback, never verbatim (a raw env value can carry the rest of winval.env). Shared with the rotation gate."""
+    return {_KNOB_PARAM[k]: (v if v in KNOB_VALUES[k].split("|") else _KNOB_FALLBACK_VALUE[k])
+            for k, v in knobs.items() if v}
+
+
 def effective_knobs() -> dict[str, str]:
     """Each knob's value for the current job: the per-job value when the job set one, else the process environment ('' = unset)."""
     per_job = _JOB_PARAMS.get() or {}
@@ -516,8 +523,7 @@ class AuthenticodeEngine:
 
         # per-job values (job_params) override the environment; blanks are unset (an agent answers a stray ?rev=++ with its
         # startup default, silently)
-        req_params = {_KNOB_PARAM[k]: (v if v in KNOB_VALUES[k].split("|") else _KNOB_FALLBACK_VALUE[k])
-                      for k, v in effective_knobs().items() if v}
+        req_params = request_params(effective_knobs())
 
         # The VM pool provides isolation + recycle; a transport/VM failure raises
         # and the harness writes a clean engine_error envelope.
