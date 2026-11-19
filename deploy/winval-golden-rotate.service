@@ -32,7 +32,8 @@ Environment=GOLDEN_KEEP_N=5
 Environment=GOLDEN_CHAIN_MIRROR=/var/lib/winval/golden-base.chain
 # The benign signed sample the rotation gate validates (benign==Valid, and revoked==Revoked when
 # GOLDEN_REVOKED_SAMPLE is set): set both in /etc/winval/winval.env (see the deploy README).
-# Set a known-revoked sample to also gate the disallowed/revocation path (strongly recommended):
+# Set a known-revoked sample to also gate the disallowed/revocation path (one the golden can judge OFFLINE: workers have
+# no egress, and a revocation that needs a live fetch is logged INCONCLUSIVE, see deploy/README.md):
 #   GOLDEN_REVOKED_SAMPLE=/var/lib/winval/samples/revoked.dll
 Environment=GOLDEN_RESTART_SERVICE=winval-pool-manager
 Environment=MYATG_SRC=/opt/myatg

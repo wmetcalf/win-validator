@@ -824,13 +824,21 @@ def validate_golden(qcow2: str) -> bool:
         checks = [(BENIGN, "Valid")]
         if REVOKED:
             checks.append((REVOKED, "Revoked"))
+        from winval_blastbox.revocation import verdict_revocation
         for sample, want in checks:
             try:
-                got = agent_validate(slot.endpoint, sample, netns=slot_netns(slot)).get("status")
+                verdict = agent_validate(slot.endpoint, sample, netns=slot_netns(slot))
+                got = verdict.get("status")
             except Exception as exc:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False
             logger.info("gate: %s -> %s (want %s)", Path(sample).name, got, want)
+            if want == "Revoked" and got == "Valid" and verdict_revocation(verdict) == "unchecked":
+                # the gate worker has no egress (a private network namespace, as every worker): a revocation the golden's cache
+                # does not hold cannot be fetched, so this sample proves nothing either way — said by name, never a pass in disguise
+                logger.warning("gate: %s: revocation could not be checked (no egress, not in the golden's CRL cache): the "
+                               "revoked-sample check is INCONCLUSIVE and does not gate this candidate", Path(sample).name)
+                continue
             if got != want:
                 logger.error("GATE FAIL: %s gave %r, expected %r", sample, got, want)
                 return False

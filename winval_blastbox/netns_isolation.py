@@ -37,6 +37,7 @@ import re
 import socket
 import subprocess
 import threading
+import time
 import urllib.request
 from http.client import HTTPConnection
 from pathlib import Path
@@ -185,31 +186,58 @@ class NetnsVmRuntime(LibvirtVmRuntime):
 
     # ---- ownership ------------------------------------------------------------------------------
     @staticmethod
-    def _take_lock(sid: str) -> int | None:
-        """flock LOCK_DIR/<sid>.lock without blocking: the descriptor when this process now owns the sid, None when another
-        live process holds it. The lock dies with its holder, so a crashed owner's sid is free to sweep."""
-        os.makedirs(LOCK_DIR, mode=0o700, exist_ok=True)
-        fd = os.open(os.path.join(LOCK_DIR, f"{sid}.lock"), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except OSError:
-            os.close(fd)
-            return None
+    def _lock_path(sid: str) -> str:
+        return os.path.join(LOCK_DIR, f"{sid}.lock")
+
+    @staticmethod
+    def _take_lock(sid: str, *, create: bool = False, wait_s: float = 0.0) -> int | None:
+        """flock LOCK_DIR/<sid>.lock: the descriptor when this process now owns the sid, None when another live process holds it
+        (or, without ``create``, when there is no lock file at all — a probe never creates one). The lock dies with its holder,
+        so a crashed owner's sid is free to sweep. The descriptor is returned only when it still names the file at the path: a
+        file unlinked between this open and the flock (a sweep reclaiming it) would be a lock nobody else can see, so the open
+        is retried. An owner may wait ``wait_s`` for a sweep's momentary probe of its own fresh sid to pass."""
+        path = NetnsVmRuntime._lock_path(sid)
+        if create:
+            os.makedirs(LOCK_DIR, mode=0o700, exist_ok=True)
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | (os.O_CREAT if create else 0), 0o600)
+            except FileNotFoundError:
+                return None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.05)
+                continue
+            try:
+                same = os.fstat(fd).st_ino == os.stat(path, follow_symlinks=False).st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                return fd
+            os.close(fd)   # unlinked under us: the next open creates (owner) or finds nothing (probe)
+            if not create:
+                return None
 
     @staticmethod
     def _drop_lock(sid: str, fd: int | None) -> None:
+        """Unlink, then release: only ever by the holder, so no one can be holding the file being removed."""
         if fd is None:
             return
         try:
-            os.unlink(os.path.join(LOCK_DIR, f"{sid}.lock"))
+            os.unlink(NetnsVmRuntime._lock_path(sid))
         except OSError:
             pass
         os.close(fd)
 
     @staticmethod
     def _held_sids() -> list[str]:
-        """sids whose lock a LIVE process holds (this one included)."""
+        """sids whose lock a LIVE process holds (this one included). A free lock file found here is a dead owner's: reclaimed
+        under its own lock (an owner that opened it meanwhile re-checks the inode after its flock and re-creates)."""
         try:
             names = os.listdir(LOCK_DIR)
         except OSError:
@@ -221,14 +249,15 @@ class NetnsVmRuntime(LibvirtVmRuntime):
                 continue
             fd = NetnsVmRuntime._take_lock(sid)
             if fd is None:
-                held.append(sid)
+                if os.path.exists(NetnsVmRuntime._lock_path(sid)):
+                    held.append(sid)
             else:
-                os.close(fd)   # never unlinked here: an owner may have just opened this path and not flock'ed it yet
+                NetnsVmRuntime._drop_lock(sid, fd)
         return held
 
     # ---- addressing -----------------------------------------------------------------------------
     def _alloc_guest(self, sid: str) -> str:
-        lock = self._take_lock(sid)
+        lock = self._take_lock(sid, create=True, wait_s=2.0)   # a fresh random id: only a sweep's momentary probe can hold it
         if lock is None:
             raise RuntimeError(f"worker id {sid} is held by another live process")
         with self._lock:
@@ -357,7 +386,7 @@ class NetnsVmRuntime(LibvirtVmRuntime):
             if not name.startswith(NETNS_PREFIX) or not _HEX.fullmatch(name[len(NETNS_PREFIX):]):
                 continue
             sid = name[len(NETNS_PREFIX):]
-            lock = self._take_lock(sid)   # held for the whole removal: the owner flocks BEFORE `netns add`, so a namespace whose
+            lock = self._take_lock(sid, create=True)   # held for the whole removal (created if absent: an owner's file exists before its namespace): the owner flocks BEFORE `netns add`, so a namespace whose
             if lock is None:              # lock this process can take has no live owner, and none can appear while it is held
                 continue   # a live process (the pool beside a rotation gate, or the gate beside the pool) owns it
             try:

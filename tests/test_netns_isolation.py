@@ -61,9 +61,7 @@ class Host:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def spawn_dhcp(self, argv):
-        argv = list(argv)
-        if argv[0] == "sudo":
-            argv = argv[1:]
+        argv = list(argv)   # verbatim: a sudo parent here is a regression (it would not relay the stop)
         self.cmds.append(argv)
 
         class P:
@@ -239,6 +237,7 @@ def test_the_agent_probe_runs_inside_the_slots_namespace_only(host, monkeypatch)
     slot = rt.spawn()
     assert rt._port_up(slot.ip) is True
     assert seen == [(slot.netns, (slot.ip, 8765))]
+    monkeypatch.setattr(libvirt_vm.LibvirtVmRuntime, "_port_up", lambda *a, **k: pytest.fail("probed in the HOST namespace"))
     assert rt._port_up("192.168.122.99") is False and len(seen) == 1   # an address no worker holds is never probed
 
 
@@ -432,8 +431,10 @@ def test_a_dnsmasq_that_dies_at_start_fails_the_spawn(host, monkeypatch):
 
 def test_ipv6_left_on_fails_the_spawn_closed(host):
     host.fail["ip netns exec"] = (1, "sysctl: permission denied")
-    with pytest.raises(RuntimeError):
+    import re as _re
+    with pytest.raises(RuntimeError, match="IPv6 not disabled"):
         runtime().spawn()
+    assert not any(c[:2] == ["ip", "-n"] and c[-1] == "up" and _re.match(r"wvt", c[-2]) for c in host.cmds), "the tap came up with IPv6 on"
 
 
 def test_agent_validate_never_falls_back_to_the_host_namespace(tmp_path):
@@ -501,3 +502,79 @@ def test_an_unanswering_libvirt_never_frees_a_host_namespace_tap(host):
     host.fail["virsh list"] = (1, "error: failed to connect to the hypervisor")
     runtime()
     assert ["ip", "link", "del", "dev", f"wvt{sid[:12]}"] not in host.cmds
+
+
+def test_a_lock_probe_never_creates_and_reclaims_a_dead_owners_file(host):
+    import os
+    os.makedirs(ni.LOCK_DIR, exist_ok=True)
+    assert ni.NetnsVmRuntime._take_lock("9" * 16) is None and not os.path.exists(os.path.join(ni.LOCK_DIR, "9" * 16 + ".lock"))
+    stale = os.path.join(ni.LOCK_DIR, "8" * 16 + ".lock")
+    open(stale, "w").close()   # a crashed owner's file: no flock on it
+    assert ni.NetnsVmRuntime._held_sids() == [] and not os.path.exists(stale)
+    fd = _hold("7" * 16)
+    assert ni.NetnsVmRuntime._held_sids() == ["7" * 16]
+    os.close(fd)
+
+
+def test_an_owner_whose_file_was_reclaimed_under_it_relocks_the_new_one(host, monkeypatch):
+    """An owner that opened its file just before a sweep unlinked it must not keep a lock nobody else can see."""
+    import os
+    sid = "6" * 16
+    path = os.path.join(ni.LOCK_DIR, sid + ".lock")
+    real_flock, done = ni.fcntl.flock, []
+
+    def flock(fd, op):
+        if not done:   # between the owner's open and its flock, a sweep reclaims the (unlocked) file
+            done.append(1)
+            os.unlink(path)
+        return real_flock(fd, op)
+    monkeypatch.setattr(ni.fcntl, "flock", flock)
+    fd = ni.NetnsVmRuntime._take_lock(sid, create=True)
+    assert fd is not None and os.fstat(fd).st_ino == os.stat(path).st_ino
+    os.close(fd)
+
+
+def test_the_tap_sweep_lists_taps_before_reading_the_owners(host, monkeypatch):
+    order = []
+    real = ni.NetnsVmRuntime._held_sids
+    monkeypatch.setattr(ni.NetnsVmRuntime, "_held_sids", staticmethod(lambda: order.append("held") or real()))
+    real_run = host.run
+
+    def run(argv, timeout=60, **k):
+        if list(argv)[-2:] == ["type", "tun"]:
+            order.append("taps")
+        return real_run(argv, timeout, **k)
+    monkeypatch.setattr(ni, "_run", run)
+    host.host_taps = "40: wvt" + "5" * 12 + ": <BROADCAST>\n"
+    runtime()
+    assert order.index("taps") < order.index("held"), order
+
+
+def _gate(gr, monkeypatch, tmp_path, verdicts):
+    import types
+    import winval_blastbox.vm_pool as vp
+    benign, revoked = tmp_path / "b.exe", tmp_path / "r.exe"
+    benign.write_bytes(b"MZ")
+    revoked.write_bytes(b"MZ")
+    cand = tmp_path / "c.qcow2"
+    cand.write_bytes(b"q")
+    monkeypatch.setattr(gr, "BENIGN", str(benign))
+    monkeypatch.setattr(gr, "REVOKED", str(revoked))
+    slot = types.SimpleNamespace(endpoint=("192.168.122.10", 8765), netns="wvn-" + "a" * 16)
+    rt = types.SimpleNamespace(spawn_ready=lambda timeout_s: slot, reap=lambda s: None)
+    monkeypatch.setattr(vp, "build_runtime", lambda spec, **k: rt)
+    monkeypatch.setattr(vp, "agent_validate", lambda ep, sample, **k: verdicts["r" if sample.endswith("r.exe") else "b"])
+    return gr.validate_golden(str(cand))
+
+
+VALID_ONLINE = {"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}
+
+
+@pytest.mark.parametrize("rev, passes", [
+    ({"status": "Revoked", "chain": {"revoked": True, "revocation_checked": "offline"}}, True),
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),   # inconclusive offline: no gate
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}, False),   # CHECKED and not revoked: a regression
+    ({"status": "UntrustedRoot", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),
+])
+def test_the_revoked_half_of_the_gate_offline(gr, monkeypatch, tmp_path, rev, passes):
+    assert _gate(gr, monkeypatch, tmp_path, {"b": VALID_ONLINE, "r": rev}) is passes

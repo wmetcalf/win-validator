@@ -235,5 +235,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now winval-golden-rotate
 ```
 
 Set `GOLDEN_REVOKED_SAMPLE` to a known-revoked file so the gate also catches a disallowed-list /
-revocation regression, not just a dead worker.
+revocation regression, not just a dead worker. Workers (the gate's included) have no egress, so only a revocation the
+golden itself knows (the disallowed list, a cached CRL) can be checked: a sample whose revocation needs a live CRL/OCSP fetch
+comes back `Valid` with revocation unchecked, and the gate logs that half as INCONCLUSIVE rather than failing the candidate.
+Pick a sample on the disallowed list (or in the golden's warm CRL cache) for a check that bites.
 
