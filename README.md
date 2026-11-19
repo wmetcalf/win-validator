@@ -142,9 +142,9 @@ refused by name at start (`AUTHENTICODE_EXIT` must be unset or `none`).
 
 **Consequence: no live revocation.** WinVerifyTrust/X509Chain cannot fetch AIA/CRL/OCSP/RFC3161 URLs, so
 revocation is answered from the golden's baked CRL/OCSP cache or not at all — the engine reports a `Valid`
-whose revocation was not checked as `ValidRevocationUnchecked`, never as `Valid` — in its revocation-aware `status`;
-the raw myatg verdict it also carries still says `Valid`, so a consumer must read `status` (Loadout's mapper does from
-its 2026-11 engine-contract release on). Controlled egress
+whose revocation was not checked as `ValidRevocationUnchecked`, never as `Valid` — in its revocation-aware status
+field (named per door: see `winval_blastbox/README.md`); the raw myatg verdict it also carries still says `Valid`, so a
+consumer must read the revocation-aware field (Loadout's mapper does from its 2026-11 engine-contract release on). Controlled egress
 (an anonymizing, web-only path) is a follow-up that must not need host firewall rules.
 
 ## Repo layout

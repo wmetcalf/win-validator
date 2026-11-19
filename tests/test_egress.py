@@ -46,7 +46,10 @@ def test_every_host_firewall_exit_is_refused_by_name(refuse, value):
                                   "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL",
                                   "AUTHENTICODE_LIBVIRT_NETWORK"])
 def test_a_rooter_era_knob_is_refused_not_ignored(refuse, knob):
-    assert knob in refuse({"AUTHENTICODE_EXIT": "none", knob: "x"})
+    said = refuse({"AUTHENTICODE_EXIT": "none", knob: "x"})
+    assert knob in said
+    if knob == "AUTHENTICODE_LIBVIRT_NETWORK":   # the remedy, not only the refusal: the golden admits that network's address
+        assert "AUTHENTICODE_AGENT_CALLER" in said
 
 
 def test_block_internal_only_ever_restricted_so_it_is_ignored(refuse):

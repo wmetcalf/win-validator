@@ -93,6 +93,9 @@ class Host:
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     monkeypatch.setattr(ni, "LOCK_DIR", str(tmp_path / "locks"))
+    param = tmp_path / "ipv6-disable"
+    param.write_text("0\n")   # hermetic: IPv6 present, whatever the runner's kernel says
+    monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(param))
     h = Host()
     monkeypatch.setattr(libvirt_vm, "_run", h.run)
     monkeypatch.setattr(ni, "_run", h.run)
@@ -696,9 +699,22 @@ def test_the_gate_sends_exactly_what_the_engine_sends(gr, monkeypatch, tmp_path,
     assert not any("SECRET" in str(p) for p in verdicts["_sent"])
 
 
-def test_a_kernel_without_ipv6_spawns_without_the_sysctl(host, monkeypatch, tmp_path):
-    monkeypatch.setattr(ni, "IPV6_SYSCTL_DIR", str(tmp_path / "absent"))
-    host.fail["ip netns exec"] = (1, "sysctl: cannot stat /proc/sys/net/ipv6/conf/x/disable_ipv6")
-    host.fail.clear()
+def test_a_kernel_booted_with_ipv6_disabled_spawns_without_the_sysctl(host, monkeypatch, tmp_path):
+    param = tmp_path / "disable"
+    param.write_text("1\n")
+    monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(param))
     slot = runtime().spawn()
+    tap = f"wvt{slot.slot_id[:12]}"
     assert not any("disable_ipv6" in " ".join(c) for c in host.cmds) and slot.netns
+    assert ["ip", "-n", slot.netns, "addr", "replace", "192.168.122.1/24", "dev", tap] in host.cmds   # the rest still ran
+    assert ["ip", "-n", slot.netns, "link", "set", "dev", tap, "up"] in host.cmds
+
+
+@pytest.mark.parametrize("param", ["0\n", None])   # IPv6 enabled, or a module not loaded yet: it can still come up
+def test_ipv6_that_could_come_up_is_always_turned_off(host, monkeypatch, tmp_path, param):
+    p = tmp_path / "disable"
+    if param is not None:
+        p.write_text(param)
+    monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(p))
+    runtime().spawn()
+    assert any("disable_ipv6=1" in " ".join(c) for c in host.cmds)

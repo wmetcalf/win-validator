@@ -85,6 +85,10 @@ class TestTheManagersKnobs:
         verdict = run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_EXIT=exit_driver))
         assert verdict.startswith("refuse:") and "AUTHENTICODE_EXIT=none" in verdict and "iptables" in verdict
 
+    def test_libvirt_network_is_refused_with_the_agent_caller_remedy(self, tmp_path):
+        v = run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_LIBVIRT_NETWORK="mynet"))
+        assert "AUTHENTICODE_LIBVIRT_NETWORK" in v and "AUTHENTICODE_AGENT_CALLER" in v
+
     def test_a_rooter_era_knob_is_refused(self, tmp_path):
         env = write_env(tmp_path, AUTHENTICODE_EXIT="none", AUTHENTICODE_EGRESS_PORTS="53,80,443")
         assert "AUTHENTICODE_EGRESS_PORTS" in run_upgrade_gate("egress", env)
