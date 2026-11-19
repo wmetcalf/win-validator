@@ -144,8 +144,8 @@ if sys.argv[1] == "egress":
             if int(a) & 0xff in (0, 255): raise ValueError("network or broadcast address of its /24")   # netns_isolation.host_addr
         except ValueError: print("malformed: AUTHENTICODE_AGENT_CALLER is not one IPv4 address (the host side of every worker's private namespace); the pool-manager refuses that posture at start"); sys.exit(0)
     import shutil
-    missing = [t for t in ("ip", "dnsmasq") if not shutil.which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]   # pool_manager.HOST_TOOLS
-    if missing: print(f"refuse: {', '.join(missing)} not found: namespace isolation needs iproute2 (ip) and dnsmasq on the host; the pool-manager refuses to start without them"); sys.exit(0)
+    missing = [t for t in ("ip", "dnsmasq", "setpriv") if not shutil.which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]   # pool_manager.HOST_TOOLS
+    if missing: print(f"refuse: {', '.join(missing)} not found: namespace isolation needs iproute2 (ip), dnsmasq and setpriv on the host; the pool-manager refuses to start without them"); sys.exit(0)
     def golden_guard():   # vm_pool.golden_base and the unit's pre-start, mirrored: space and tab trimmed at the ends, any other byte outside
         # printable ASCII refused — read where the manager builds its spec, after the smoke and warm-dir guards
         gb = (env.get("AUTHENTICODE_GOLDEN_BASE") or "").strip(" \t") or "/dev/shm/golden-base.qcow2"

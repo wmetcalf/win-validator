@@ -106,7 +106,9 @@ def _clear_ready() -> None:
         logger.warning("stale readiness marker %s not removed (%s)", READY_FILE, exc)
 
 
-HOST_TOOLS = ("ip", "dnsmasq")   # what namespace isolation runs on the host (iproute2 for the namespace and tap, dnsmasq for the guest's DHCP)
+HOST_TOOLS = ("ip", "dnsmasq", "setpriv")   # what namespace isolation runs on the host (iproute2 for the namespace and tap, dnsmasq for the
+# guest's DHCP, setpriv to start it unprivileged)
+_which = shutil.which   # one seam: a test host without dnsmasq judges the env, not itself
 
 
 def _refuse_open_egress(workers: int | None = None) -> None:
@@ -121,9 +123,9 @@ def _refuse_open_egress(workers: int | None = None) -> None:
         validate_egress_posture()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    missing = [t for t in HOST_TOOLS if not shutil.which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]
+    missing = [t for t in HOST_TOOLS if not _which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]
     if missing:
-        raise SystemExit(f"{', '.join(missing)} not found: namespace isolation needs iproute2 (ip) and dnsmasq on the host")
+        raise SystemExit(f"{', '.join(missing)} not found: namespace isolation needs iproute2 (ip), dnsmasq and setpriv (util-linux) on the host")
 
 
 def _rel_parts(p: Path, what: str, root: Path = JOB_ROOT) -> tuple:

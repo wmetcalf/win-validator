@@ -124,7 +124,8 @@ corrupted image is rejected and the current golden is kept.
 Every VM worker's NIC is a tap device in its **own network namespace** (`wvn-<slot>`, see
 `winval_blastbox/netns_isolation.py`). The namespace holds `lo`, the tap, the host side of the tap
 (`AUTHENTICODE_AGENT_CALLER`, default `192.168.122.1` — the one address the golden's agent-port firewall
-rule admits) and a dnsmasq answering the guest's DHCP (no DNS), and **nothing else: no uplink, no route**.
+rule admits) and a dnsmasq answering the guest's DHCP (no DNS; run as nobody with `CAP_NET_RAW` only and
+no_new_privs), and **nothing else: no uplink, no route**.
 So, by construction rather than by rule:
 
 - the guest cannot reach the host — none of the host's addresses exist in its namespace (the ingress on

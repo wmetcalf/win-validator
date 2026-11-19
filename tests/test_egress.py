@@ -26,12 +26,6 @@ def refuse(monkeypatch):
     return call
 
 
-@pytest.fixture(autouse=True)
-def host_tools(monkeypatch):
-    import winval_blastbox.pool_manager as pool_manager
-    monkeypatch.setattr(pool_manager.shutil, "which", lambda name, path=None: f"/usr/sbin/{name}")
-
-
 def test_an_unset_exit_is_no_egress_and_proceeds(refuse):
     assert refuse({}) == "proceeds"
 
@@ -64,7 +58,7 @@ def test_a_malformed_host_address_is_refused(refuse):
 
 def test_missing_host_tools_are_named(refuse, monkeypatch):
     import winval_blastbox.pool_manager as pool_manager
-    monkeypatch.setattr(pool_manager.shutil, "which", lambda name, path=None: None if name == "dnsmasq" else "/usr/sbin/ip")
+    monkeypatch.setattr(pool_manager, "_which", lambda name, path=None: None if name == "dnsmasq" else f"/usr/sbin/{name}")
     said = refuse({})
     assert "dnsmasq" in said and "not found" in said
 

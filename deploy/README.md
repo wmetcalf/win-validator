@@ -146,7 +146,7 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `AUTHENTICODE_FAKENET_ADDR`, `AUTHENTICODE_GATEWAY`/`_LEG` and `AUTHENTICODE_IP_POOL` are refused by name — by
   `upgrade.sh --restart` before the move, by the rotation preflight before a promotion, and by the pool-manager at start.
   `AUTHENTICODE_BLOCK_INTERNAL` is ignored (a namespace already blocks everything it blocked). The unit no longer loads
-  `br_netfilter` or sets `net.bridge.bridge-nf-call-iptables`. The host needs `ip` (iproute2) and `dnsmasq`.
+  `br_netfilter` or sets `net.bridge.bridge-nf-call-iptables`. The host needs `ip` (iproute2), `dnsmasq` and `setpriv` (util-linux).
   `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap: it must be the address the
   golden's agent-port firewall rule admits (golden_build bakes the libvirt `default` network's host address, `192.168.122.1`
   on a stock host).

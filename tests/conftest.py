@@ -41,6 +41,13 @@ def clean_env(monkeypatch):
     monkeypatch.setenv("WINVAL_ENV_FILE", "/nonexistent")
 
 
+@pytest.fixture(autouse=True)
+def host_tools(monkeypatch):
+    """The namespace-isolation host tools present, so a runner without dnsmasq judges the knobs, not itself."""
+    import winval_blastbox.pool_manager as pool_manager
+    monkeypatch.setattr(pool_manager, "_which", lambda name, path=None: f"/usr/sbin/{name}")
+
+
 @pytest.fixture
 def gr(monkeypatch):
     """golden_rotate with its module globals restored after the test.
@@ -230,7 +237,7 @@ def run_upgrade_gate(mode: str, env_file, extra_env=None):
     # the host tools namespace isolation needs (ip, dnsmasq): stubs first on PATH, so a CI runner without dnsmasq judges the env file, not itself
     tools = Path(env_file).parent / "host-tools"
     tools.mkdir(exist_ok=True)
-    for name in ("ip", "dnsmasq"):
+    for name in ("ip", "dnsmasq", "setpriv"):
         stub = tools / name
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(0o755)
