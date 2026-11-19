@@ -833,7 +833,9 @@ def validate_golden(qcow2: str) -> bool:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False
             logger.info("gate: %s -> %s (want %s)", Path(sample).name, got, want)
-            if want == "Revoked" and got == "Valid" and verdict_revocation(verdict) == "unchecked":
+            chain = verdict.get("chain") if isinstance(verdict.get("chain"), dict) else {}
+            if want == "Revoked" and got == "Valid" and verdict_revocation(verdict) == "unchecked" and chain.get("revocation_checked") == "unknown":
+                # ONLY "unknown" (responders unreachable): "none" is checking switched OFF in the candidate, a regression that fails
                 # the gate worker has no egress (a private network namespace, as every worker): a revocation the golden's cache
                 # does not hold cannot be fetched, so this sample proves nothing either way — said by name, never a pass in disguise
                 logger.warning("gate: %s: revocation could not be checked (no egress, not in the golden's CRL cache): the "

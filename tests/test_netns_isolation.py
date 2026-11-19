@@ -575,6 +575,7 @@ VALID_ONLINE = {"status": "Valid", "chain": {"revoked": False, "revocation_check
     ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),   # inconclusive offline: no gate
     ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}, False),   # CHECKED and not revoked: a regression
     ({"status": "UntrustedRoot", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}, False),   # checking switched OFF: a regression
 ])
 def test_the_revoked_half_of_the_gate_offline(gr, monkeypatch, tmp_path, rev, passes):
     assert _gate(gr, monkeypatch, tmp_path, {"b": VALID_ONLINE, "r": rev}) is passes
