@@ -716,5 +716,17 @@ def test_ipv6_that_could_come_up_is_always_turned_off(host, monkeypatch, tmp_pat
     if param is not None:
         p.write_text(param)
     monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(p))
+    monkeypatch.setattr(ni, "IPV6_SYSCTL_DIR", str(tmp_path))   # IPv6 sysctls present: hermetic
     runtime().spawn()
     assert any("disable_ipv6=1" in " ".join(c) for c in host.cmds)
+
+
+@pytest.mark.parametrize("modinfo_rc, skips", [(1, True), (0, False)])   # CONFIG_IPV6=n vs a module not loaded yet
+def test_a_kernel_without_ipv6_support_skips_but_a_loadable_module_does_not(host, monkeypatch, tmp_path, modinfo_rc, skips):
+    monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(tmp_path / "no-param"))
+    monkeypatch.setattr(ni, "IPV6_SYSCTL_DIR", str(tmp_path / "no-sysctls"))
+    host.fail["modinfo"] = (modinfo_rc, "") if modinfo_rc else (0, "")
+    if not modinfo_rc:
+        host.fail.pop("modinfo")
+    runtime().spawn()
+    assert any("disable_ipv6=1" in " ".join(c) for c in host.cmds) is not skips

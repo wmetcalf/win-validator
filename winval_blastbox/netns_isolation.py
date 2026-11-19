@@ -53,6 +53,7 @@ LOCK_DIR = "/run/winval/netns"   # <sid>.lock, flock'ed by the process that owns
 # sweep of ANOTHER process (the rotation gate beside the live pool, a restart) never touches a namespace or tap whose owner is alive
 DEFAULT_HOST_ADDR = "192.168.122.1"
 IPV6_DISABLE_PARAM = "/sys/module/ipv6/parameters/disable"   # "1" when the kernel was booted with ipv6.disable=1
+IPV6_SYSCTL_DIR = "/proc/sys/net/ipv6"   # absent when IPv6 is not (yet) in the kernel
 
 
 def _ipv6_disabled_by_kernel() -> bool:
@@ -62,7 +63,12 @@ def _ipv6_disabled_by_kernel() -> bool:
         with open(IPV6_DISABLE_PARAM) as fh:
             return fh.read().strip() == "1"
     except OSError:
-        return False
+        pass
+    if os.path.isdir(IPV6_SYSCTL_DIR):
+        return False   # IPv6 is live
+    # no parameter and no IPv6 sysctls: a kernel without IPv6 (CONFIG_IPV6=n) unless an ipv6 module exists to load later — a
+    # module that could come up fails closed (the spawn raises; load it, or boot with ipv6.disable=1)
+    return _run(["modinfo", "-n", "ipv6"]).returncode != 0
 GUEST_HOST_OFFSET = 10     # the first guest address is network + 10; one address per live worker
 _INTERFACE_RE = re.compile(r"<interface type='network'>.*?</interface>", re.S)
 _HEX = re.compile(r"[0-9a-f]{16}")
