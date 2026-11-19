@@ -572,10 +572,43 @@ VALID_ONLINE = {"status": "Valid", "chain": {"revoked": False, "revocation_check
 
 @pytest.mark.parametrize("rev, passes", [
     ({"status": "Revoked", "chain": {"revoked": True, "revocation_checked": "offline"}}, True),
-    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),   # inconclusive offline: no gate
-    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}, False),   # CHECKED and not revoked: a regression
+    ({"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),   # on the Disallowed list
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),   # lost entry / uncheckable: fails
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "online"}}, False),
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}, False),
+    ({"status": "Valid"}, False),
     ({"status": "UntrustedRoot", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),
-    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}, False),   # checking switched OFF: a regression
 ])
 def test_the_revoked_half_of_the_gate_offline(gr, monkeypatch, tmp_path, rev, passes):
     assert _gate(gr, monkeypatch, tmp_path, {"b": VALID_ONLINE, "r": rev}) is passes
+
+
+def test_an_unusable_lock_entry_never_aborts_the_runtime_or_leaks_a_lock(host):
+    import os
+    os.makedirs(ni.LOCK_DIR, exist_ok=True)
+    os.mkdir(os.path.join(ni.LOCK_DIR, "c" * 16 + ".lock"))           # a directory where a lock file belongs
+    os.symlink("/etc/passwd", os.path.join(ni.LOCK_DIR, "d" * 16 + ".lock"))
+    host.netns_list = f"wvn-{'c' * 16}\nwvn-{'d' * 16}\n"
+    host.domstate[f"bbvm-{'c' * 16}"] = host.domstate[f"bbvm-{'d' * 16}"] = (1, "", "error: failed to get domain")
+    runtime()   # constructs
+    assert not any(c[:3] == ["ip", "netns", "del"] for c in host.cmds)
+
+
+def test_a_stat_failure_after_the_flock_releases_the_lock(host, monkeypatch):
+    import fcntl
+    import os
+    real = os.stat
+    monkeypatch.setattr(ni.os, "stat", lambda p, **k: (_ for _ in ()).throw(PermissionError(13, "denied")) if str(p).endswith(".lock") else real(p, **k))
+    with pytest.raises(PermissionError):
+        ni.NetnsVmRuntime._take_lock("e" * 16, create=True)
+    fd = os.open(os.path.join(ni.LOCK_DIR, "e" * 16 + ".lock"), os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # free: nothing leaked it
+    os.close(fd)
+
+
+def test_a_loose_lock_directory_is_tightened(host):
+    import os
+    os.makedirs(ni.LOCK_DIR, mode=0o777, exist_ok=True)
+    os.chmod(ni.LOCK_DIR, 0o1777)
+    ni.NetnsVmRuntime._lock_dir()
+    assert os.stat(ni.LOCK_DIR).st_mode & 0o7777 == 0o700

@@ -198,7 +198,7 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         is retried. An owner may wait ``wait_s`` for a sweep's momentary probe of its own fresh sid to pass."""
         path = NetnsVmRuntime._lock_path(sid)
         if create:
-            os.makedirs(LOCK_DIR, mode=0o700, exist_ok=True)
+            NetnsVmRuntime._lock_dir()
         deadline = time.monotonic() + wait_s
         while True:
             try:
@@ -217,11 +217,26 @@ class NetnsVmRuntime(LibvirtVmRuntime):
                 same = os.fstat(fd).st_ino == os.stat(path, follow_symlinks=False).st_ino
             except FileNotFoundError:
                 same = False
+            except BaseException:
+                os.close(fd)   # never leak a HELD lock: it would read as a live owner for this process's whole life
+                raise
             if same:
                 return fd
             os.close(fd)   # unlinked under us: the next open creates (owner) or finds nothing (probe)
             if not create:
                 return None
+
+    @staticmethod
+    def _lock_dir() -> None:
+        """LOCK_DIR exists, is a real directory, owned by this uid and 0700: makedirs leaves an existing directory's owner
+        and mode as they are, and a writable lock directory is one where anyone can plant or hide an owner."""
+        os.makedirs(LOCK_DIR, mode=0o700, exist_ok=True)
+        st = os.lstat(LOCK_DIR)
+        import stat as _stat
+        if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+            raise RuntimeError(f"{LOCK_DIR} is not a directory owned by this uid: refusing to keep worker ownership locks there")
+        if _stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(LOCK_DIR, 0o700)
 
     @staticmethod
     def _drop_lock(sid: str, fd: int | None) -> None:
@@ -247,9 +262,14 @@ class NetnsVmRuntime(LibvirtVmRuntime):
             sid = n[:-5] if n.endswith(".lock") else ""
             if not _HEX.fullmatch(sid):
                 continue
-            fd = NetnsVmRuntime._take_lock(sid)
+            try:
+                fd = NetnsVmRuntime._take_lock(sid)
+            except OSError as exc:   # not a lock file (a directory, a symlink): treated as held, never touched, never fatal
+                logger.warning("lock entry %s unusable (%s): its worker id is left alone", n, exc)
+                held.append(sid)
+                continue
             if fd is None:
-                if os.path.exists(NetnsVmRuntime._lock_path(sid)):
+                if os.path.lexists(NetnsVmRuntime._lock_path(sid)):
                     held.append(sid)
             else:
                 NetnsVmRuntime._drop_lock(sid, fd)
@@ -386,8 +406,14 @@ class NetnsVmRuntime(LibvirtVmRuntime):
             if not name.startswith(NETNS_PREFIX) or not _HEX.fullmatch(name[len(NETNS_PREFIX):]):
                 continue
             sid = name[len(NETNS_PREFIX):]
-            lock = self._take_lock(sid, create=True)   # held for the whole removal (created if absent: an owner's file exists before its namespace): the owner flocks BEFORE `netns add`, so a namespace whose
-            if lock is None:              # lock this process can take has no live owner, and none can appear while it is held
+            try:
+                lock = self._take_lock(sid, create=True)
+            except OSError as exc:
+                logger.warning("netns %s: its lock entry is unusable (%s); left in place", name, exc)
+                continue
+            # held for the whole removal (created if absent: an owner's file exists before its namespace). The owner flocks
+            # BEFORE `netns add`, so a namespace whose lock this process can take has no live owner, and none can appear meanwhile
+            if lock is None:
                 continue   # a live process (the pool beside a rotation gate, or the gate beside the pool) owns it
             try:
                 if not self._domain_absent(sid):
