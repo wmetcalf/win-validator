@@ -7,10 +7,11 @@ schema = "blastbox-engine-contract/1"
 [engine]
 name = "authenticode"
 formats = ["*"]
-# The VM's exit driver (AUTHENTICODE_EXIT, checked in vm_pool.py against blastbox's
-# libvirt_egress._SUPPORTED_EXITS). WinVerifyTrust/X509Chain fetch AIA/CRL/OCSP/TSA URLs, so a
-# real deployment needs egress; `none` is the explicit opt-out.
-network = ["none", "drop", "direct", "openvpn", "wireguard", "tor", "inetsim"]
+# The VM's network: a private network namespace per worker with no uplink (winval_blastbox/netns_isolation.py),
+# no host firewall rule. AUTHENTICODE_EXIT must be unset or `none`; the host-firewall exits were removed.
+# WinVerifyTrust/X509Chain cannot fetch AIA/CRL/OCSP/TSA URLs, so revocation comes from the golden's cache or is
+# reported unchecked (ValidRevocationUnchecked).
+network = ["none"]
 # detonate() always returns "ok"; a pool/VM/transport failure raises and the harness seals
 # engine_error; precheck() refuses a per-job parameter the agent does not know, or any per-job value
 # while the operator has set AUTHENTICODE_LOCK_PARAMS (rejected, no VM).

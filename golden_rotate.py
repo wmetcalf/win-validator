@@ -553,10 +553,9 @@ def _rotation_preflight(estimate_bytes: int | None, candidate_built: bool, keep:
         # PRODUCTION spec it will start with (the pinned IP pool the gate drops among it) is judged before anything is published
         from winval_blastbox.vm_pool import authenticode_spec, pool_size, validate_egress_posture
         from winval_blastbox.pool_manager import _refuse_open_egress
-        _refuse_open_egress(pool_size(), sysctl="loadable")   # the manager's OWN start refusals (design changes #7/#8: an unset exit, open
-        # sibling traffic under several workers); the restart after the promotion would otherwise refuse and the pool would be down until the
-        # knobs were fixed. The sysctl half is judged as the restart will find it: the unit's ExecStartPre applies it, so only a host that
-        # cannot load br_netfilter at all is refused here
+        _refuse_open_egress(pool_size())   # the manager's OWN start refusals (the network posture: AUTHENTICODE_EXIT none, no rooter-era
+        # egress knob, the namespace tools present); the restart after the promotion would otherwise refuse and the pool would be down
+        # until the knobs were fixed
         # then the pool's own start-time knob guards (WarmVmPool.__init__ refuses each by name), in the manager's order — its
         # start runs _refuse_open_egress first, these later: with two knobs wrong the same one is named here and there
         from winval_blastbox.vm_pool import smoke_expect
@@ -788,15 +787,15 @@ def build_candidate(src: str | None = None) -> str:
 
 
 def _gate_spec(qcow2: str):
-    """The PRODUCTION spec (egress policy, exit routing, agent port) with the candidate as its image: the gate
-    must judge the candidate under the network posture the workers will run with, and with the same clock sync
-    at ready (a golden without qemu-ga gets its clock ONLY from that hook — and both verdicts are clock-bound).
-    The pinned IP pool is dropped: the live pool holds those addresses, so the gate learns its own by DHCP."""
+    """The PRODUCTION spec (agent port, network posture) with the candidate as its image: the gate must judge the
+    candidate under the network posture the workers will run with — a private network namespace, no egress
+    (vm_pool.build_runtime) — and with the same clock sync at ready (a golden without qemu-ga gets its clock ONLY
+    from that hook — and both verdicts are clock-bound)."""
     import dataclasses
     from winval_blastbox.vm_pool import authenticode_spec, validate_egress_posture
     from blastbox.host.runtime.vm_compose import VmImageSpec
     spec = dataclasses.replace(authenticode_spec(), name="goldgate", image=VmImageSpec(golden=qcow2), worker_ip_pool="", warm_size=1)
-    validate_egress_posture(spec)   # the rooter's spawn-time refusals (an unsupported exit, inetsim without a sink, gateway xor leg), before any build
+    validate_egress_posture(spec)   # the posture's refusals (a rooter-era exit or knob), before any build
     return spec
 
 
@@ -804,7 +803,7 @@ def validate_golden(qcow2: str) -> bool:
     """Boot a throwaway worker off ``qcow2`` and assert the validation gate: a benign signed sample
     is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
-    from winval_blastbox.vm_pool import agent_validate, _sync_clock
+    from winval_blastbox.vm_pool import agent_validate, build_runtime, slot_netns, _sync_clock
     c = Path(qcow2)
     if c.is_symlink() or not c.is_file():   # a mistyped path was 'did not boot a healthy worker' — the verdict a corrupt golden gives — after a 240 s wait
         logger.error("GATE FAIL: candidate %s is not a regular file (no such file, or a symlink/directory); nothing was booted", qcow2)
@@ -816,7 +815,7 @@ def validate_golden(qcow2: str) -> bool:
         logger.error("GATE FAIL: GOLDEN_REVOKED_SAMPLE=%r is not a file: the gate cannot run; nothing was booted", REVOKED)
         return False
     try:   # the spec too: a knob blastbox refuses is a GATE FAIL by name, never a traceback (the preflight refuses it earlier still)
-        rt = _gate_spec(qcow2).runtime(on_ready=_sync_clock)
+        rt = build_runtime(_gate_spec(qcow2), on_ready=_sync_clock)
         slot = rt.spawn_ready(timeout_s=240)
     except Exception as exc:
         logger.error("GATE FAIL: candidate %s did not boot a healthy worker: %s", qcow2, exc)
@@ -827,7 +826,7 @@ def validate_golden(qcow2: str) -> bool:
             checks.append((REVOKED, "Revoked"))
         for sample, want in checks:
             try:
-                got = agent_validate(slot.endpoint, sample).get("status")
+                got = agent_validate(slot.endpoint, sample, netns=slot_netns(slot)).get("status")
             except Exception as exc:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False

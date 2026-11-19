@@ -74,48 +74,32 @@ class TestTheManagersKnobs:
     """Judged in the order the pool-manager itself judges them, so the gate names the
     same knob the service would name."""
 
-    def test_an_unset_exit_driver_is_refused_with_the_opt_out_named(self, tmp_path):
-        verdict = run_upgrade_gate("egress", write_env(tmp_path))
-        assert verdict.startswith("unset:")
-        assert "AUTHENTICODE_EXIT=none" in verdict
+    def test_an_unset_exit_driver_is_no_egress_and_accepted(self, tmp_path):
+        assert run_upgrade_gate("egress", write_env(tmp_path)) == "ok"
 
     def test_no_egress_policy_on_purpose_is_accepted(self, tmp_path):
         assert run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_EXIT="none")) == "ok"
 
-    def test_siblings_reachable_on_one_bridge_are_refused(self, tmp_path):
-        env = write_env(tmp_path, AUTHENTICODE_EXIT="direct", AUTHENTICODE_POOL_SIZE="2")
+    @pytest.mark.parametrize("exit_driver", ["direct", "drop", "tor", "openvpn"])
+    def test_a_host_firewall_exit_is_refused_with_the_remedy_named(self, tmp_path, exit_driver):
+        verdict = run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_EXIT=exit_driver))
+        assert verdict.startswith("refuse:") and "AUTHENTICODE_EXIT=none" in verdict and "iptables" in verdict
+
+    def test_a_rooter_era_knob_is_refused(self, tmp_path):
+        env = write_env(tmp_path, AUTHENTICODE_EXIT="none", AUTHENTICODE_EGRESS_PORTS="53,80,443")
+        assert "AUTHENTICODE_EGRESS_PORTS" in run_upgrade_gate("egress", env)
+
+    def test_block_internal_is_ignored(self, tmp_path):
+        assert run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_BLOCK_INTERNAL="1")) == "ok"
+
+    def test_a_malformed_namespace_address_is_refused(self, tmp_path):
+        assert "AUTHENTICODE_AGENT_CALLER" in run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_AGENT_CALLER="Any"))
+
+    def test_the_exit_is_judged_before_the_golden_base(self, tmp_path):
+        """Both are wrong; the manager refuses the exit first, so the gate names it first."""
+        env = write_env(tmp_path, AUTHENTICODE_EXIT="direct", AUTHENTICODE_GOLDEN_BASE="/dev/shm/g\u00a0b.qcow2")
         verdict = run_upgrade_gate("egress", env)
-        assert "AUTHENTICODE_BLOCK_INTERNAL" in verdict
-
-    def test_an_allowlist_admitting_the_agent_port_is_refused(self, tmp_path):
-        env = write_env(
-            tmp_path,
-            AUTHENTICODE_EXIT="direct",
-            AUTHENTICODE_POOL_SIZE="2",
-            AUTHENTICODE_EGRESS_PORTS="53,80,443,8765",
-        )
-        assert "EGRESS_PORTS" in run_upgrade_gate("egress", env)
-
-    def test_a_typo_in_the_boolean_is_refused_not_read_as_off(self, tmp_path):
-        env = write_env(
-            tmp_path,
-            AUTHENTICODE_EXIT="direct",
-            AUTHENTICODE_POOL_SIZE="2",
-            AUTHENTICODE_BLOCK_INTERNAL="treu",
-        )
-        assert "BLOCK_INTERNAL" in run_upgrade_gate("egress", env)
-
-    def test_the_boolean_is_judged_before_the_golden_base(self, tmp_path):
-        """Both are wrong; the spec parses the boolean first, so the gate names it first."""
-        env = write_env(
-            tmp_path,
-            AUTHENTICODE_EXIT="direct",
-            AUTHENTICODE_POOL_SIZE="2",
-            AUTHENTICODE_BLOCK_INTERNAL="treu",
-            AUTHENTICODE_GOLDEN_BASE="/dev/shm/g b.qcow2",
-        )
-        verdict = run_upgrade_gate("egress", env)
-        assert "BLOCK_INTERNAL" in verdict and "GOLDEN_BASE" not in verdict
+        assert "AUTHENTICODE_EXIT" in verdict and "GOLDEN_BASE" not in verdict
 
 
 def case_block():

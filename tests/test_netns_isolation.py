@@ -1,0 +1,321 @@
+"""Every VM worker lives in its own network namespace, and nothing touches the host firewall.
+
+The runtime is blastbox's LibvirtVmRuntime with the network-specific steps replaced; these tests
+drive the REAL runtime with every host command recorded instead of run, and assert on what it
+would have run: the namespace and tap around each domain, the move into the namespace after the
+start, the move home around a revert, the teardown after the guest is gone -- and that no command
+ever reaches iptables, nftables, ebtables, a kernel module, a host sysctl or a libvirt network.
+"""
+from __future__ import annotations
+
+import http.server
+import socket
+import subprocess
+import threading
+import urllib.error
+
+import pytest
+
+import blastbox.host.runtime.libvirt_vm as libvirt_vm
+import winval_blastbox.netns_isolation as ni
+
+FIREWALL = ("iptables", "ip6tables", "iptables-save", "iptables-restore", "nft", "ebtables", "modprobe", "insmod")
+
+
+class Host:
+    """Records every command; answers the few whose output the runtime reads."""
+
+    def __init__(self):
+        self.cmds: list[list[str]] = []
+        self.defined_xml: list[str] = []
+        self.fail: dict[str, tuple[int, str]] = {}   # first word(s) -> (rc, stderr)
+        self.netns_list = ""
+        self.domstate: dict[str, tuple[int, str, str]] = {}
+        self.dhcp: list = []
+
+    def run(self, argv, timeout=60, **_):
+        argv = list(argv)
+        if argv and argv[0] == "sudo":
+            argv = argv[1:]
+        self.cmds.append(argv)
+        if argv[:1] == ["virsh"] and "define" in argv:
+            with open(argv[-1]) as fh:
+                self.defined_xml.append(fh.read())
+        key = " ".join(a for a in argv if not a.startswith("-c") and a != "qemu:///system")
+        for prefix, (rc, err) in self.fail.items():
+            if key.startswith(prefix):
+                return subprocess.CompletedProcess(argv, rc, "", err)
+        if argv[:1] == ["test"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")   # no overlay of that name yet
+        if argv[:3] == ["ip", "netns", "list"]:
+            return subprocess.CompletedProcess(argv, 0, self.netns_list, "")
+        if argv[:2] == ["virsh", "domstate"]:
+            rc, out, err = self.domstate.get(argv[2], (0, "running\n", ""))
+            return subprocess.CompletedProcess(argv, rc, out, err)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def spawn_dhcp(self, argv):
+        argv = list(argv)
+        if argv[0] == "sudo":
+            argv = argv[1:]
+        self.cmds.append(argv)
+
+        class P:
+            terminated = False
+
+            def terminate(self):
+                P.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+        p = P()
+        self.dhcp.append(p)
+        return p
+
+    def index(self, pred) -> int:
+        for i, c in enumerate(self.cmds):
+            if pred(c):
+                return i
+        raise AssertionError(f"no such command in {self.cmds}")
+
+
+@pytest.fixture
+def host(monkeypatch):
+    h = Host()
+    monkeypatch.setattr(libvirt_vm, "_run", h.run)
+    monkeypatch.setattr(ni, "_run", h.run)
+    monkeypatch.setattr(ni, "_spawn_dhcp", h.spawn_dhcp)
+    return h
+
+
+def runtime(**over):
+    cfg = libvirt_vm.LibvirtVmConfig(golden_base="/dev/shm/golden.qcow2", agent_port=8765, nwfilter="", **over)
+    return ni.NetnsVmRuntime(cfg)
+
+
+def test_spawn_builds_the_namespace_around_the_domain(host):
+    rt = runtime()
+    slot = rt.spawn()
+    sid = slot.slot_id
+    ns, tap = f"wvn-{sid}", f"wvt{sid[:12]}"
+    assert slot.netns == ns and slot.ip == "192.168.122.10"
+    add = host.index(lambda c: c == ["ip", "netns", "add", ns])
+    tuntap = host.index(lambda c: c == ["ip", "tuntap", "add", "dev", tap, "mode", "tap", "vnet_hdr"])
+    start = host.index(lambda c: c[:1] == ["virsh"] and "start" in c)
+    move = host.index(lambda c: c == ["ip", "link", "set", "dev", tap, "netns", ns])
+    addr = host.index(lambda c: c == ["ip", "-n", ns, "addr", "replace", "192.168.122.1/24", "dev", tap])
+    up = host.index(lambda c: c == ["ip", "-n", ns, "link", "set", "dev", tap, "up"])
+    dhcp = host.index(lambda c: c[:5] == ["ip", "netns", "exec", ns, "dnsmasq"])
+    assert add < tuntap < start < move < addr < up < dhcp
+    dns = host.cmds[dhcp]
+    assert "--port=0" in dns and f"--interface={tap}" in dns
+    assert "--dhcp-range=192.168.122.10,192.168.122.10,255.255.255.0,infinite" in dns
+
+
+def test_the_domain_nic_is_the_private_tap_never_a_libvirt_network(host):
+    rt = runtime()
+    slot = rt.spawn()
+    (xml,) = host.defined_xml
+    assert f"<interface type='ethernet'><target dev='wvt{slot.slot_id[:12]}' managed='no'/>" in xml
+    assert "type='network'" not in xml and "<filterref" not in xml and "<source network" not in xml
+
+
+def test_no_command_ever_touches_the_host_firewall_or_a_libvirt_network(host):
+    rt = runtime()
+    a, b = rt.spawn(), rt.spawn()
+    rt._virsh("snapshot-revert", a.domain, "clean")
+    rt.reap(a)
+    rt.reap(b)
+    for c in host.cmds:
+        assert c[0] not in FIREWALL, c
+        assert not any(w in FIREWALL for w in c), c
+        if "sysctl" in c:   # only inside a worker namespace, never the host's
+            assert c[:3] == ["ip", "netns", "exec"] and c[3].startswith("wvn-"), c
+        if c[:1] == ["virsh"]:
+            assert not any(w.startswith(("net-", "nwfilter")) for w in c), c
+
+
+def test_two_workers_get_two_namespaces_and_two_addresses(host):
+    rt = runtime()
+    a, b = rt.spawn(), rt.spawn()
+    assert a.netns != b.netns and a.ip != b.ip
+    rt.reap(a)
+    c = rt.spawn()
+    assert c.ip == "192.168.122.10"   # a reaped worker's address is free again
+
+
+def test_the_host_address_follows_the_agent_caller_knob(host, monkeypatch):
+    monkeypatch.setenv("AUTHENTICODE_AGENT_CALLER", "10.9.8.1")
+    slot = runtime().spawn()
+    assert slot.ip == "10.9.8.10"
+    assert ["ip", "-n", slot.netns, "addr", "replace", "10.9.8.1/24", "dev", f"wvt{slot.slot_id[:12]}"] in host.cmds
+
+
+@pytest.mark.parametrize("rc", [0, 1])
+def test_a_revert_takes_the_tap_home_and_back_whatever_it_returns(host, rc):
+    rt = runtime()
+    slot = rt.spawn()
+    ns, tap = slot.netns, f"wvt{slot.slot_id[:12]}"
+    host.cmds.clear()
+    if rc:
+        host.fail["virsh snapshot-revert"] = (1, "error: Failed to revert snapshot")
+    assert rt._virsh("snapshot-revert", slot.domain, "clean").returncode == rc
+    home = host.index(lambda c: c == ["ip", "-n", ns, "link", "set", "dev", tap, "netns", "1"])
+    revert = host.index(lambda c: c[:1] == ["virsh"] and "snapshot-revert" in c)
+    back = host.index(lambda c: c == ["ip", "link", "set", "dev", tap, "netns", ns])
+    readdr = host.index(lambda c: c[:5] == ["ip", "-n", ns, "addr", "replace"])
+    assert home < revert < back < readdr
+
+
+def test_reap_tears_the_namespace_down_after_the_guest_is_gone(host):
+    rt = runtime()
+    slot = rt.spawn()
+    host.cmds.clear()
+    rt.reap(slot)
+    destroy = host.index(lambda c: c[:1] == ["virsh"] and "destroy" in c)
+    nsdel = host.index(lambda c: c == ["ip", "netns", "del", slot.netns])
+    assert destroy < nsdel
+    assert host.dhcp[0].terminated
+
+
+def test_a_failed_destroy_leaves_the_namespace_containing_the_guest(host):
+    rt = runtime()
+    slot = rt.spawn()
+    host.cmds.clear()
+    host.fail["virsh destroy"] = (1, "error: internal error: something broke")
+    with pytest.raises(RuntimeError):
+        rt.reap(slot)
+    assert ["ip", "netns", "del", slot.netns] not in host.cmds
+
+
+def test_a_failed_start_removes_what_it_built(host):
+    rt = runtime()
+    host.fail["virsh start"] = (1, "error: failed")
+    with pytest.raises(RuntimeError):
+        rt.spawn()
+    ns = next(c[3] for c in host.cmds if c[:3] == ["ip", "netns", "add"])
+    assert ["ip", "netns", "del", ns] in host.cmds
+    assert rt._by_sid == {}
+
+
+def test_a_failed_move_into_the_namespace_reaps_the_worker(host):
+    rt = runtime()
+    host.fail["ip link set dev wvt"] = (2, "RTNETLINK answers: Invalid argument")
+    with pytest.raises(RuntimeError):
+        rt.spawn()
+    assert any(c[:1] == ["virsh"] and "destroy" in c for c in host.cmds[-12:])
+    assert rt._by_sid == {}
+
+
+def test_the_agent_probe_runs_inside_the_slots_namespace_only(host, monkeypatch):
+    seen = []
+
+    def fake_connect(ns, addr, timeout):
+        seen.append((ns, addr))
+        return socket.socket()
+    monkeypatch.setattr(ni, "netns_connect", fake_connect)
+    rt = runtime()
+    slot = rt.spawn()
+    assert rt._port_up(slot.ip) is True
+    assert seen == [(slot.netns, (slot.ip, 8765))]
+    assert rt._port_up("192.168.122.99") is False and len(seen) == 1   # an address no worker holds is never probed
+
+
+@pytest.mark.parametrize("over", [{"worker_ip_pool": "192.168.122.200-192.168.122.210"}])
+def test_host_side_egress_configs_are_refused(host, over):
+    with pytest.raises(ValueError):
+        runtime(**over)
+
+
+def test_an_egress_policy_is_refused(host):
+    from blastbox.host.runtime.libvirt_egress import VmEgressPolicy
+    with pytest.raises(ValueError, match="iptables"):
+        runtime(egress_policy=VmEgressPolicy(exit_driver="direct"))
+
+
+def test_orphaned_namespaces_of_absent_domains_are_removed_others_left(host):
+    gone, live = "a" * 16, "b" * 16
+    host.netns_list = f"wvn-{gone}\nwvn-{live} (id: 3)\nsomeone-elses\nwvn-notahexsid\n"
+    host.domstate[f"bbvm-{gone}"] = (1, "", "error: failed to get domain 'bbvm-aaaa'")
+    host.domstate[f"bbvm-{live}"] = (0, "running\n", "")
+    runtime()
+    assert ["ip", "netns", "del", f"wvn-{gone}"] in host.cmds
+    assert ["ip", "netns", "del", f"wvn-{live}"] not in host.cmds
+    assert not any(c[:3] == ["ip", "netns", "del"] and c[3] in ("someone-elses", "wvn-notahexsid") for c in host.cmds)
+
+
+def test_an_unanswering_libvirt_is_not_read_as_an_absent_domain(host):
+    sid = "c" * 16
+    host.netns_list = f"wvn-{sid}\n"
+    host.domstate[f"bbvm-{sid}"] = (1, "", "error: failed to connect to the hypervisor")
+    runtime()
+    assert ["ip", "netns", "del", f"wvn-{sid}"] not in host.cmds
+
+
+def test_the_xml_swap_fails_closed_when_blastbox_changes_shape(host, monkeypatch):
+    rt = runtime()
+    monkeypatch.setattr(libvirt_vm.LibvirtVmRuntime, "_domain_xml", lambda self, *a, **k: "<domain><devices></devices></domain>")
+    with pytest.raises(RuntimeError, match="libvirt network"):
+        rt.spawn()
+
+
+def test_netns_socket_refuses_a_name_that_is_not_a_workers():
+    for bad in ("", "../../proc/1/ns/net", "wvn-XYZ", "cni-1234"):
+        with pytest.raises(ValueError):
+            ni.netns_socket(bad)
+
+
+class _Agent(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers["Content-Length"]))
+        code = 500 if "fail" in self.path else 200
+        body = b'{"status": "Valid"}'
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def agent(monkeypatch):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Agent)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    used = []
+
+    def fake_connect(ns, addr, timeout):   # the namespace is the test host's own: what matters is that the agent call goes through here
+        used.append(ns)
+        return socket.create_connection(addr, timeout)
+    monkeypatch.setattr(ni, "netns_connect", fake_connect)
+    yield srv.server_address, used
+    srv.shutdown()
+
+
+def test_the_agent_call_goes_through_the_namespace_and_keeps_urllibs_errors(agent, tmp_path):
+    from winval_blastbox.vm_pool import agent_validate, fault_of
+    (addr, used) = agent
+    sample = tmp_path / "s.exe"
+    sample.write_bytes(b"MZ" * 100)
+    assert agent_validate(addr, str(sample), netns="wvn-" + "d" * 16) == {"status": "Valid"}
+    assert used == ["wvn-" + "d" * 16]
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        agent_validate(addr, str(tmp_path / "s.exe"), netns="wvn-" + "d" * 16, params={"rev": "fail"})
+    assert fault_of(exc.value) == "job"
+
+
+def test_a_refused_agent_in_the_namespace_is_a_worker_fault(monkeypatch, tmp_path):
+    from winval_blastbox.vm_pool import agent_validate, fault_of
+
+    def refused(ns, addr, timeout):
+        raise ConnectionRefusedError(111, "Connection refused")
+    monkeypatch.setattr(ni, "netns_connect", refused)
+    sample = tmp_path / "s.exe"
+    sample.write_bytes(b"MZ")
+    with pytest.raises(urllib.error.URLError) as exc:
+        agent_validate(("192.168.122.10", 8765), str(sample), netns="wvn-" + "e" * 16)
+    assert fault_of(exc.value) == "worker"

@@ -1,6 +1,6 @@
 # win-validator INGRESS image — the unprivileged, client-facing tier.
 # Holds NO privilege: it only needs the JobStore (Postgres/Redis) + the shared job_root volume.
-# No libvirt, no iptables, no docker socket, no worker-network access. Runs read-only as non-root.
+# No libvirt, no host privilege, no docker socket, no worker-network access. Runs read-only as non-root.
 FROM python:3.12-slim
 
 # JobStore (released blastbox — the JobStore is stable core, the libvirt primitive is host-only) +

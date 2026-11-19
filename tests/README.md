@@ -47,8 +47,9 @@ and the env-file half of the upgrade gate.
 Not reached at all: `golden_build.py`, `winval_blastbox/ingress.py`,
 `winval_blastbox/orchestrator.py`, `winval_blastbox/body_cap.py`, and every line of
 `deploy/compose-env.sh`. Barely reached: `winval_blastbox/pool_manager.py`, where only
-the egress refusal runs — the claim loop, the job sweep and the kernel-module probe do
-not. Of `golden_rotate.py` roughly two functions in five are ever entered; the promotion
+the network-posture refusal runs — the claim loop and the job sweep do
+not. `winval_blastbox/netns_isolation.py` runs for real with every host command recorded
+instead of executed (no namespace is created, no socket enters one). Of `golden_rotate.py` roughly two functions in five are ever entered; the promotion
 itself, the build, the gate boot and the pool restart are not among them, because each
 needs libvirt, qemu or systemd.
 

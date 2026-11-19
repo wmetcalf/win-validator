@@ -227,6 +227,14 @@ def run_upgrade_gate(mode: str, env_file, extra_env=None):
     end = next(i for i, line in enumerate(script) if i > start and line == "}")
     body = "\n".join(script[start : end + 1])
     full = {k: v for k, v in os.environ.items() if not k.startswith(_KNOB_PREFIXES)}
+    # the host tools namespace isolation needs (ip, dnsmasq): stubs first on PATH, so a CI runner without dnsmasq judges the env file, not itself
+    tools = Path(env_file).parent / "host-tools"
+    tools.mkdir(exist_ok=True)
+    for name in ("ip", "dnsmasq"):
+        stub = tools / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    full["PATH"] = f"{tools}:{full.get('PATH', '/usr/bin:/bin')}"
     full.update(extra_env or {})
     proc = subprocess.run(
         ["/bin/sh", "-c", f"{body}\nenvfile_py {mode} '{env_file}'"],

@@ -1,11 +1,11 @@
 # win-validator deployment — the privilege split
 
-Two tiers, separated so the thing handling untrusted HTTP never holds `root`/libvirt/iptables:
+Two tiers, separated so the thing handling untrusted HTTP never holds `root`/libvirt:
 
 ```
    client ──HTTP──> [ ingress container ]                         [ host pool-manager ]
-                     unprivileged, read-only                       libvirt + iptables + the VM pool
-                     no libvirt / no socket                        (egress + tunnel kill-switch — once AUTHENTICODE_EXIT is set)
+                     unprivileged, read-only                       libvirt + the VM pool
+                     no libvirt / no socket                        (each worker in a private netns, no egress)
                           │                                                 ▲
                           │   Postgres JobStore (queue/meta/results)        │ claim_next()
                           └────────────  +  shared job_root dir  ───────────┘
@@ -22,7 +22,7 @@ is Postgres + that one directory.
 
 ```sh
 # the checkout at its canonical path, ROOT-OWNED: the pool-manager runs as root with libvirt and
-# iptables, so its interpreter and code must not live in a user-writable tree. The venv needs
+# network namespaces, so its interpreter and code must not live in a user-writable tree. The venv needs
 # --system-site-packages for the SYSTEM libvirt bindings (libvirt-python is not pip-installable
 # without libvirt-dev); prometheus_client is a blastbox import outside its base deps.
 sudo git clone https://github.com/wmetcalf/win-validator /opt/win-validator
@@ -117,7 +117,7 @@ non-root run, a dirty tree, a `compose.env` that cannot be derived (`compose-env
 argument that is not a branch on origin (tags are not supported), a target whose tree has no `deploy/compose-env.sh`,
 a detached HEAD on no origin branch (the checkout would orphan it), a local branch carrying commits that are not on
 origin (they fast-forward "successfully" and would otherwise build the untrusted-facing ingress and install root
-units from an unreviewed tree), and — with `--restart` — an egress posture this version's pool-manager refuses at
+units from an unreviewed tree), and — with `--restart` — a network posture this version's pool-manager refuses at
 start (a warning without) — and, in BOTH halves, a `winval.env` whose old `GOLDEN_BASE` names a path the weekly rotation would not
 promote to (both halves install the timer). It never mints a database password. The unit files are installed and reloaded in BOTH
 halves (installing a unit restarts nothing): the checked-out code depends on what its unit does at start, so a
@@ -140,15 +140,16 @@ The `--restart` step drops in-flight uploads and fails every RUNNING job as *orp
 (its sample removed; clients resubmit): drain first if that matters. The pool-manager's first start may wait up
 to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 
-- **The pool-manager refuses to start without `AUTHENTICODE_EXIT`** (design change #7): an env file that never named an
-  exit driver must gain one (`direct` is the minimum) or the explicit `AUTHENTICODE_EXIT=none`. `upgrade.sh --restart` refuses
-  BEFORE the tree moves when the line is missing; without `--restart` it warns. With more than one worker the start also needs
-  `AUTHENTICODE_BLOCK_INTERNAL=1` (or an `AUTHENTICODE_EGRESS_PORTS` that does not admit the agent port, or the `drop` exit), or the pool-manager refuses by name (design change #8);
-  `upgrade.sh --restart` refuses before the move for that too. The unit itself loads `br_netfilter` and sets
-  `net.bridge.bridge-nf-call-iptables=1` at every start; a host that cannot load the module is refused by name with the remedy — by
-  `upgrade.sh --restart` before the move and by the rotation preflight before a promotion (both probe with a `modprobe` dry run), and by
-  the pool-manager itself at start. The next golden bake scopes the agent-port firewall rule to the
-  pool-manager's address; a bake refuses if it cannot learn that address (`AUTHENTICODE_AGENT_CALLER` names it by hand).
+- **Workers are isolated by a private network namespace each, and have NO egress** (no host firewall rule: see the
+  top-level README). `AUTHENTICODE_EXIT` must be unset or `none`; the rooter-era exits (`direct`, `drop`, `openvpn`,
+  `wireguard`, `tor`, `inetsim`) and the knobs `AUTHENTICODE_EGRESS_PORTS`, `AUTHENTICODE_VPN_TABLE`/`_VPN_TUN`,
+  `AUTHENTICODE_FAKENET_ADDR`, `AUTHENTICODE_GATEWAY`/`_LEG` and `AUTHENTICODE_IP_POOL` are refused by name — by
+  `upgrade.sh --restart` before the move, by the rotation preflight before a promotion, and by the pool-manager at start.
+  `AUTHENTICODE_BLOCK_INTERNAL` is ignored (a namespace already blocks everything it blocked). The unit no longer loads
+  `br_netfilter` or sets `net.bridge.bridge-nf-call-iptables`. The host needs `ip` (iproute2) and `dnsmasq`.
+  `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap: it must be the address the
+  golden's agent-port firewall rule admits (golden_build bakes the libvirt `default` network's host address, `192.168.122.1`
+  on a stock host).
 - **The rotator's old `GOLDEN_BASE` name is refused**: the pool and the pool-manager unit boot from `AUTHENTICODE_GOLDEN_BASE`
   (default `/dev/shm/golden-base.qcow2`), and nothing else ever read the old name, so a rotation started with it promoted to a path no
   worker boots from. An env file whose `GOLDEN_BASE` names another path is refused by name by the rotation's preflight (the weekly
@@ -166,8 +167,7 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   root (its pre-step owns the lock and the RAM base).
 - **A preserved env file can refuse the pool-manager at start where it used to run**: `AUTHENTICODE_WARM_DIR` or
   `AUTHENTICODE_SMOKE_SAMPLE` set to a path that does not exist (the old example pointed at a home directory the
-  `/opt` move invalidates) fails the start by name; `AUTHENTICODE_EGRESS_PORTS` present but blank is now a CLOSED
-  allowlist; every `BLASTBOX_*` value must parse. Diff your env file against `deploy/winval.env.example`.
+  `/opt` move invalidates) fails the start by name; every `BLASTBOX_*` value must parse. Diff your env file against `deploy/winval.env.example`.
 - **`WINVAL_JOB_RETENTION_DAYS` (default 7)** sweeps terminal and rowless job directories under `WINVAL_JOB_ROOT`
   from the first start: an existing job root loses history older than that unless you raise it first.
 - Nothing else in the env file is reinterpreted; every new knob has a default.
@@ -177,26 +177,16 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 - **ingress** runs `read_only`, `cap_drop: ALL`, `no-new-privileges`, as uid 10001, with only the
   `job_root` volume + a tmpfs `/tmp` writable. It imports `winval_blastbox.ingress` only — the lazy
   package `__init__` keeps the libvirt/engine modules out of its import graph.
-- **pool-manager** runs on the host (systemd) because it drives `virsh` + `iptables`. It is never
+- **pool-manager** runs on the host (systemd) because it drives `virsh` and the workers' network namespaces. It is never
   bound to a client-facing socket; its inputs are the Postgres queue + the spooled files. Restart it
   to pick up a rebaked golden.
 - **Postgres** (not sqlite) is the cross-boundary store — a real broker beats a sqlite file shared
   over a container/host bind-mount. Redis also works as the shared store when BOTH tiers point at it — which the shipped compose does not: its ingress is wired to its own Postgres service, so with this compose the pool-manager's `BLASTBOX_DATABASE_URL` must be that Postgres.
-- **VPN/tor egress + the tunnel kill-switch** live with the pool-manager (host iptables), so a
-  worker still fails closed on a tunnel drop regardless of the ingress — once `AUTHENTICODE_EXIT`
-  names an exit driver. The pool-manager REFUSES to start with it unset; `AUTHENTICODE_EXIT=none` is the
-  explicit opt-out that gives workers the libvirt network's plain NAT on purpose. Set a driver before exposing the ingress.
-  Without an exit driver nothing governs a worker's traffic to the host either: the ingress publishes 8099 on
-  all interfaces with no authentication, so a worker can read `/jobs` or fill the spool (Postgres is bound to
-  127.0.0.1). With `AUTHENTICODE_EXIT` set, blastbox installs a per-worker INPUT chain on the host that drops
-  host-destined traffic except established, DHCP and gated DNS, and `AUTHENTICODE_BLOCK_INTERNAL=1` drops the
-  docker-published 8099 in FORWARD. Worker-to-worker traffic on the bridge is switched, not routed: it meets the
-  FORWARD rules only with `net.bridge.bridge-nf-call-iptables=1` on the host (`modprobe br_netfilter`), and is
-  dropped only by `AUTHENTICODE_BLOCK_INTERNAL=1`, a port allowlist that does not admit the agent port, or the `drop` exit (whose chain ends in DROP). With more
-  than one worker the pool-manager refuses to start unless both are in place (one of those three, AND the sysctl at 1). The golden's
-  own rule for the agent port admits the pool-manager's address alone (learned from the libvirt network at bake
-  time; `AUTHENTICODE_AGENT_CALLER` overrides it, `AUTHENTICODE_LIBVIRT_NETWORK` names another network) — a golden
-  baked before this version opens the port to any source until it is rebaked.
+- **Worker network = a private namespace, no egress.** Each worker's tap lives in its own network namespace with no
+  uplink and no route, so a worker cannot reach the host (the ingress publishes 8099 on all interfaces with no
+  authentication; Postgres is on 127.0.0.1), a sibling, or the internet — structurally, with no host firewall rule.
+  The pool-manager talks to the agent from inside the namespace. A `snapshot-revert` makes libvirt reopen the tap by
+  name in the host namespace, so the tap is moved home (down, unaddressed) for the revert and back after it.
 - **`/cert/{tbs}` on the ingress** searches the newest 2000 scans of its store and says so in the answer's
   `scanned` / `truncated` fields (the orchestrator's `/cert` has no such bound).
 
