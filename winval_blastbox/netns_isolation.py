@@ -120,6 +120,7 @@ class _NetnsHTTPConnection(HTTPConnection):
 
     def connect(self) -> None:
         self.sock = netns_connect(self.netns, (self.host, self.port), self.timeout)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)   # as http.client's own connect: no Nagle stall on the body tail
 
 
 def netns_opener(netns: str) -> urllib.request.OpenerDirector:

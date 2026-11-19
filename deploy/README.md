@@ -147,9 +147,13 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `upgrade.sh --restart` before the move, by the rotation preflight before a promotion, and by the pool-manager at start.
   `AUTHENTICODE_BLOCK_INTERNAL` is ignored (a namespace already blocks everything it blocked). The unit no longer loads
   `br_netfilter` or sets `net.bridge.bridge-nf-call-iptables`. The host needs `ip` (iproute2), `dnsmasq` and `setpriv` (util-linux).
-  `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap: it must be the address the
-  golden's agent-port firewall rule admits (golden_build bakes the libvirt `default` network's host address, `192.168.122.1`
-  on a stock host).
+  `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap and the address the golden's
+  agent-port firewall rule admits (golden_build reads it through the same function; `AUTHENTICODE_LIBVIRT_NETWORK` no longer
+  matters). A golden baked before this version admitted the libvirt network's host address: on a host whose `default` network
+  is not `192.168.122.0/24`, set `AUTHENTICODE_AGENT_CALLER` to that address or rebake.
+- **For THIS upgrade, run origin's `upgrade.sh` (the piped form above), not the deployed copy**: the gate is the copy being run,
+  and the deployed one predates the namespace posture — it would pass `AUTHENTICODE_EXIT=direct`, which the new pool-manager
+  refuses at start. Set `AUTHENTICODE_EXIT=none` (and drop the rooter-era knobs) in `winval.env` first.
 - **The rotator's old `GOLDEN_BASE` name is refused**: the pool and the pool-manager unit boot from `AUTHENTICODE_GOLDEN_BASE`
   (default `/dev/shm/golden-base.qcow2`), and nothing else ever read the old name, so a rotation started with it promoted to a path no
   worker boots from. An env file whose `GOLDEN_BASE` names another path is refused by name by the rotation's preflight (the weekly

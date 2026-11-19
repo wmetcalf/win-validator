@@ -112,7 +112,8 @@ rotate()           back up current golden (keep last N) --> promote candidate --
 ```
 
 > **The hourly/daily/weekly/monthly ladder is a backup rotation, not "validate as-of T."** Workers
-> sync real time and do live CRL/OCSP on restore, so they always validate against *now*; the only
+> sync real time on restore, so validity windows are judged against *now* (revocation comes from the
+> golden's cache — workers have no egress, see below); the only
 > thing an old snapshot freezes is trust-store state, which is a **liability if stale** (you want the
 > *freshest* disallowed list). So old goldens are rollback targets for a bad re-bake — nothing more.
 

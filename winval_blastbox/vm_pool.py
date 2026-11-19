@@ -143,7 +143,9 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
     with open(path, "rb") as fh:
         req = urllib.request.Request(
             url, data=fh, method="POST", headers={"Content-Type": "application/octet-stream", "Content-Length": str(size)})
-        opener = netns_opener(netns) if netns else urllib.request.build_opener()
+        if not netns:   # never the host namespace: there, the guest's address may be some other VM on libvirt's default network
+            raise ValueError("agent_validate needs the worker's network namespace (slot.netns): no host-namespace fallback")
+        opener = netns_opener(netns)
         with opener.open(req, timeout=timeout) as r:
             body = r.read(AGENT_RESPONSE_MAX + 1)
     if len(body) > AGENT_RESPONSE_MAX:

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 import sys
 import time
@@ -117,23 +116,14 @@ STEPS: list[tuple[str, str]] = [
 
 
 def agent_caller() -> str:
-    """The one address the golden's agent-port firewall rule admits: the host's address on the libvirt network the
-    workers share (AUTHENTICODE_AGENT_CALLER overrides it; a bake refuses rather than open the port to any source when
-    neither is known). A rebake applies a change, like the port itself."""
-    explicit = (os.environ.get("AUTHENTICODE_AGENT_CALLER") or "").strip()
-    if explicit:
-        if not re.fullmatch(r"(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}", explicit):   # one IPv4 literal: 'Any', a CIDR or a trailing comment would be spliced into the rule verbatim (and 'Any' bakes the open rule this exists to end)
-            raise SystemExit(f"AUTHENTICODE_AGENT_CALLER={explicit!r} is not one IPv4 address; the agent-port rule admits exactly the pool-manager's address")
-        return explicit
-    net = os.environ.get("AUTHENTICODE_LIBVIRT_NETWORK", "default")
-    r = gr._virsh("net-dumpxml", net)
-    m = re.search(r"<ip [^>]*address=['\"]([0-9.]+)['\"]", r.stdout or "") if r.returncode == 0 else None
-    if not m:
-        raise SystemExit(f"cannot learn the host's address on the libvirt network {net!r} (virsh net-dumpxml rc {r.returncode}); the agent-port "
-                         f"firewall rule is scoped to the pool-manager's address and never opened to any source — set AUTHENTICODE_AGENT_CALLER "
-                         f"to the host's bridge address (or AUTHENTICODE_LIBVIRT_NETWORK to the workers' network) and rebake")
-    return m.group(1)
-
+    """The one address the golden's agent-port firewall rule admits: the host side of every worker's private network
+    namespace, read by the SAME function the pool's runtime uses (netns_isolation.host_addr: AUTHENTICODE_AGENT_CALLER, default
+    192.168.122.1), so the golden and the workers can never disagree. A rebake applies a change."""
+    from winval_blastbox.netns_isolation import host_addr
+    try:
+        return str(host_addr().ip)
+    except ValueError as exc:
+        raise SystemExit(f"{exc}; the agent-port rule admits exactly the pool-manager's address") from exc
 
 def build(base: str = BASE_QCOW2) -> str:
     """Boot ``base`` as an overlay, stage files, run the STEPS in order, flatten -> candidate qcow2."""

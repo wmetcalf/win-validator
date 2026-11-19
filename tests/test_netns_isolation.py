@@ -434,3 +434,62 @@ def test_ipv6_left_on_fails_the_spawn_closed(host):
     host.fail["ip netns exec"] = (1, "sysctl: permission denied")
     with pytest.raises(RuntimeError):
         runtime().spawn()
+
+
+def test_agent_validate_never_falls_back_to_the_host_namespace(tmp_path):
+    from winval_blastbox.vm_pool import agent_validate
+    sample = tmp_path / "s.exe"
+    sample.write_bytes(b"MZ")
+    with pytest.raises(ValueError, match="namespace"):
+        agent_validate(("192.168.122.10", 8765), str(sample))
+
+
+def test_every_production_agent_call_carries_the_slots_namespace(monkeypatch, tmp_path):
+    """validate, the smoke and the CRL warm all go through the slot's namespace (dropping netns= from any is caught here)."""
+    import types
+    import winval_blastbox.vm_pool as vp
+    seen = []
+    monkeypatch.setattr(vp, "agent_validate", lambda endpoint, path, timeout=60.0, params=None, netns=None: seen.append(netns) or {"status": "Valid"})
+    slot = types.SimpleNamespace(endpoint=("192.168.122.10", 8765), netns="wvn-" + "a" * 16, ip="192.168.122.10")
+    sample = tmp_path / "s.exe"
+    sample.write_bytes(b"MZ")
+    monkeypatch.setenv("AUTHENTICODE_SMOKE_SAMPLE", str(sample))
+    monkeypatch.setenv("AUTHENTICODE_WARM_DIR", str(tmp_path))
+    vp._smoke(slot)
+    vp._warm_crl(slot)
+
+    class Pool:
+        def claim(self, timeout_s):
+            return slot
+
+        def release(self, s, **kw):
+            pass
+    pool = vp.WarmVmPool.__new__(vp.WarmVmPool)
+    pool._pool, pool._claim_timeout_s = Pool(), 1
+    pool.validate(str(sample))
+    assert seen and all(ns == slot.netns for ns in seen), seen
+
+
+def test_the_clock_fallback_ssh_runs_inside_the_namespace(monkeypatch):
+    import types
+    import winval_blastbox.vm_pool as vp
+    argv = []
+    monkeypatch.setattr(vp.subprocess, "run", lambda a, **k: argv.append(a))
+    vp._sync_clock(types.SimpleNamespace(netns="wvn-" + "a" * 16, ip="192.168.122.10"))
+    assert argv[0][:4] == ["ip", "netns", "exec", "wvn-" + "a" * 16]
+
+
+def test_the_golden_admits_exactly_the_address_the_workers_call_from(monkeypatch):
+    import golden_build
+    assert golden_build.agent_caller() == str(ni.host_addr().ip) == "192.168.122.1"
+    monkeypatch.setenv("AUTHENTICODE_AGENT_CALLER", "10.20.30.1")
+    assert golden_build.agent_caller() == str(ni.host_addr().ip) == "10.20.30.1"
+
+
+def test_the_namespace_connection_disables_nagle(agent):
+    (addr, _) = agent
+    conn = ni._NetnsHTTPConnection(*addr, timeout=5)
+    conn.netns = "wvn-" + "d" * 16
+    conn.connect()
+    assert conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+    conn.close()
