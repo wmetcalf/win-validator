@@ -374,7 +374,13 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         r = self._ip("-o", "link", "show", "type", "tun", check=False)
         held = self._held_sids()   # AFTER listing the taps: an owner flocks before it creates its tap, so every tap listed above
         # that has a live owner is held by now (the reverse order let an owner flock and create its tap between the two reads)
-        domains = (self._virsh("list", "--all", "--name").stdout or "") if r.stdout else ""
+        if not r.stdout:
+            return
+        dl = self._virsh("list", "--all", "--name")
+        if dl.returncode != 0:   # libvirt did not answer: a tap's domain is unknown, not absent (as for the namespaces above)
+            logger.warning("orphan tap sweep skipped: virsh list failed (rc %s)", dl.returncode)
+            return
+        domains = dl.stdout or ""   # a substring test below: a 12-hex prefix finds its 16-hex domain name
         for line in (r.stdout or "").splitlines():
             m = re.match(r"\d+:\s+(" + re.escape(TAP_PREFIX) + r"[0-9a-f]{12})[:@]", line)
             if not m:

@@ -43,7 +43,8 @@ def test_every_host_firewall_exit_is_refused_by_name(refuse, value):
 
 
 @pytest.mark.parametrize("knob", ["AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN",
-                                  "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL"])
+                                  "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL",
+                                  "AUTHENTICODE_LIBVIRT_NETWORK"])
 def test_a_rooter_era_knob_is_refused_not_ignored(refuse, knob):
     assert knob in refuse({"AUTHENTICODE_EXIT": "none", knob: "x"})
 

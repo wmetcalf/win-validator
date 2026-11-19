@@ -133,7 +133,7 @@ if sys.argv[1] == "egress":
     ex = (env.get("AUTHENTICODE_EXIT") or "").strip()   # stripped, as the manager strips it: a quoted blank is unset, which is none
     if ex and ex.lower() != "none":
         print(f"refuse: AUTHENTICODE_EXIT={ex[:40]!r} names a host-side egress exit; those were removed (they installed iptables chains on the host) — workers are isolated in a private network namespace with no egress: set AUTHENTICODE_EXIT=none or unset it"); sys.exit(0)
-    OBSOLETE = ("AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN", "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL")   # vm_pool.OBSOLETE_EGRESS_KNOBS, inlined: this runs before the checkout
+    OBSOLETE = ("AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN", "AUTHENTICODE_FAKENET_ADDR", "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL", "AUTHENTICODE_LIBVIRT_NETWORK")   # vm_pool.OBSOLETE_EGRESS_KNOBS, inlined: this runs before the checkout
     stale = [k for k in OBSOLETE if (env.get(k) or "").strip()]
     if stale: print(f"refuse: {', '.join(stale)} configured host-firewall egress or a shared libvirt network, both removed: remove the knob(s); the pool-manager refuses that posture at start"); sys.exit(0)
     caller = (env.get("AUTHENTICODE_AGENT_CALLER") or "").strip()

@@ -161,7 +161,9 @@ def agent_validate(endpoint: tuple[str, int], path: str, timeout: float = 60.0,
 # a value that asks for egress is refused by name rather than silently ignored.
 EGRESS_EXITS_REMOVED = ("drop", "direct", "openvpn", "wireguard", "tor", "inetsim")
 OBSOLETE_EGRESS_KNOBS = ("AUTHENTICODE_EGRESS_PORTS", "AUTHENTICODE_VPN_TABLE", "AUTHENTICODE_VPN_TUN", "AUTHENTICODE_FAKENET_ADDR",
-                         "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL")   # each asked for egress or a shared network;
+                         "AUTHENTICODE_GATEWAY", "AUTHENTICODE_LEG", "AUTHENTICODE_IP_POOL",
+                         "AUTHENTICODE_LIBVIRT_NETWORK")   # the golden's agent rule used to admit that network's host address;
+# the workers now call from AUTHENTICODE_AGENT_CALLER, so a set LIBVIRT_NETWORK means an existing golden may admit another address   # each asked for egress or a shared network;
 # AUTHENTICODE_BLOCK_INTERNAL only ever RESTRICTED a worker, and a namespace already blocks everything it blocked: it is ignored
 
 
@@ -184,7 +186,8 @@ def validate_egress_posture(spec: VmWorkerSpec | None = None) -> None:
     stale = [k for k in OBSOLETE_EGRESS_KNOBS if (os.environ.get(k) or "").strip()]
     if stale:
         raise ValueError(f"{', '.join(stale)} configured host-firewall egress or a shared libvirt network, both removed: workers are isolated "
-                         "in a private network namespace with no egress. Remove the knob(s) from winval.env")
+                         "in a private network namespace with no egress. Remove the knob(s) from winval.env (for AUTHENTICODE_LIBVIRT_NETWORK: "
+                         "set AUTHENTICODE_AGENT_CALLER to the host address on that network, the one your golden's agent rule admits)")
     if spec is not None and (spec.egress is not None or spec.routing is not None or spec.worker_ip_pool):
         raise ValueError("the worker spec carries host-side egress (an egress policy, exit routing or an IP pool): not available under namespace isolation")
     host_addr()

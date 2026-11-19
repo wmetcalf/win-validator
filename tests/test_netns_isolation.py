@@ -493,3 +493,11 @@ def test_the_namespace_connection_disables_nagle(agent):
     conn.connect()
     assert conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
     conn.close()
+
+
+def test_an_unanswering_libvirt_never_frees_a_host_namespace_tap(host):
+    sid = "4" * 16
+    host.host_taps = f"40: wvt{sid[:12]}: <BROADCAST> mtu 1500\n"
+    host.fail["virsh list"] = (1, "error: failed to connect to the hypervisor")
+    runtime()
+    assert ["ip", "link", "del", "dev", f"wvt{sid[:12]}"] not in host.cmds

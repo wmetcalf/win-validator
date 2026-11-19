@@ -148,8 +148,8 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `AUTHENTICODE_BLOCK_INTERNAL` is ignored (a namespace already blocks everything it blocked). The unit no longer loads
   `br_netfilter` or sets `net.bridge.bridge-nf-call-iptables`. The host needs `ip` (iproute2), `dnsmasq` and `setpriv` (util-linux).
   `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap and the address the golden's
-  agent-port firewall rule admits (golden_build reads it through the same function; `AUTHENTICODE_LIBVIRT_NETWORK` no longer
-  matters). A golden baked before this version admitted the libvirt network's host address: on a host whose `default` network
+  agent-port firewall rule admits (golden_build reads it through the same function; `AUTHENTICODE_LIBVIRT_NETWORK` is refused by
+  name — replace it with `AUTHENTICODE_AGENT_CALLER` set to that network's host address). A golden baked before this version admitted the libvirt network's host address: on a host whose `default` network
   is not `192.168.122.0/24`, set `AUTHENTICODE_AGENT_CALLER` to that address or rebake.
 - **For THIS upgrade, run origin's `upgrade.sh` (the piped form above), not the deployed copy**: the gate is the copy being run,
   and the deployed one predates the namespace posture — it would pass `AUTHENTICODE_EXIT=direct`, which the new pool-manager
