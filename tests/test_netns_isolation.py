@@ -563,7 +563,8 @@ def _gate(gr, monkeypatch, tmp_path, verdicts):
     slot = types.SimpleNamespace(endpoint=("192.168.122.10", 8765), netns="wvn-" + "a" * 16)
     rt = types.SimpleNamespace(spawn_ready=lambda timeout_s: slot, reap=lambda s: None)
     monkeypatch.setattr(vp, "build_runtime", lambda spec, **k: rt)
-    monkeypatch.setattr(vp, "agent_validate", lambda ep, sample, **k: verdicts["r" if sample.endswith("r.exe") else "b"])
+    sent = verdicts.setdefault("_sent", [])
+    monkeypatch.setattr(vp, "agent_validate", lambda ep, sample, **k: sent.append(k.get("params")) or verdicts["r" if sample.endswith("r.exe") else "b"])
     return gr.validate_golden(str(cand))
 
 
@@ -639,3 +640,23 @@ def test_a_symlinked_lock_directory_is_refused(host, tmp_path, monkeypatch):
     monkeypatch.setattr(ni, "LOCK_DIR", str(link))
     with pytest.raises(RuntimeError, match="not a directory owned"):
         ni.NetnsVmRuntime._take_lock("b" * 16, create=True)
+
+
+@pytest.mark.parametrize("benign, passes", [
+    ({"status": "Valid"}, False),                                                          # no chain: revocation unjudgeable
+    ({"status": "Valid", "chain": {"revoked": False}}, False),                             # field missing
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "off"}}, False),
+    ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "unknown"}}, True),
+])
+def test_the_gate_judges_only_verdicts_whose_revocation_it_can_see(gr, monkeypatch, tmp_path, benign, passes):
+    rev = {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "unknown"}}
+    assert _gate(gr, monkeypatch, tmp_path, {"b": benign, "r": rev}) is passes
+
+
+def test_the_gate_sends_the_knobs_production_sends_and_honours_rev_none_by_choice(gr, monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTHENTICODE_REV", "none")
+    off = {"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}
+    rev = {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "none"}}
+    verdicts = {"b": off, "r": rev}
+    assert _gate(gr, monkeypatch, tmp_path, verdicts) is True
+    assert verdicts["_sent"] and all(p == {"rev": "none"} for p in verdicts["_sent"])
