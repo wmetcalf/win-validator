@@ -694,3 +694,11 @@ def test_the_gate_sends_exactly_what_the_engine_sends(gr, monkeypatch, tmp_path,
     want = request_params(effective_knobs()) or None
     assert verdicts["_sent"] and all(p == want for p in verdicts["_sent"])
     assert not any("SECRET" in str(p) for p in verdicts["_sent"])
+
+
+def test_a_kernel_without_ipv6_spawns_without_the_sysctl(host, monkeypatch, tmp_path):
+    monkeypatch.setattr(ni, "IPV6_SYSCTL_DIR", str(tmp_path / "absent"))
+    host.fail["ip netns exec"] = (1, "sysctl: cannot stat /proc/sys/net/ipv6/conf/x/disable_ipv6")
+    host.fail.clear()
+    slot = runtime().spawn()
+    assert not any("disable_ipv6" in " ".join(c) for c in host.cmds) and slot.netns

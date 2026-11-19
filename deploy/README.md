@@ -150,7 +150,8 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `AUTHENTICODE_AGENT_CALLER` (default `192.168.122.1`) is the host side of every worker's tap and the address the golden's
   agent-port firewall rule admits (golden_build reads it through the same function; `AUTHENTICODE_LIBVIRT_NETWORK` is refused by
   name — replace it with `AUTHENTICODE_AGENT_CALLER` set to that network's host address). A golden baked before this version admitted the libvirt network's host address: on a host whose `default` network
-  is not `192.168.122.0/24`, set `AUTHENTICODE_AGENT_CALLER` to that address or rebake.
+  is not `192.168.122.0/24`, set `AUTHENTICODE_AGENT_CALLER` to that address, or run a FULL bake (`golden_build.py
+  build-and-promote`): the weekly golden-based re-bake keeps the old agent rule.
 - **For THIS upgrade, run origin's `upgrade.sh` (the piped form above), not the deployed copy**: the gate is the copy being run,
   and the deployed one predates the namespace posture — it would pass `AUTHENTICODE_EXIT=direct`, which the new pool-manager
   refuses at start. Set `AUTHENTICODE_EXIT=none` (and drop the rooter-era knobs) in `winval.env` first.
@@ -200,8 +201,8 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
 ## Rolling golden (freshness re-bake + rollback backups)
 
 `golden_rotate.py` keeps the golden FRESH and keeps the last N as rollback backups. It is NOT a
-temporal-trust ladder (workers sync real time + do live CRL on restore, so they always validate
-against *now*); the point is fail-safe rebakes:
+temporal-trust ladder (workers sync real time on restore, so validity windows are judged against *now*;
+revocation comes from the golden's cache — workers have no egress); the point is fail-safe rebakes:
 
 ```
 build_candidate()  private copy of the promoted golden --overlay clone--> refresh trust state (myatg --refresh: disallowed

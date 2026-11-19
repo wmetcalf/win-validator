@@ -52,6 +52,7 @@ NETNS_DIR = "/run/netns"   # where `ip netns add` binds the namespace (iproute2'
 LOCK_DIR = "/run/winval/netns"   # <sid>.lock, flock'ed by the process that owns the worker for the worker's whole life: the orphan
 # sweep of ANOTHER process (the rotation gate beside the live pool, a restart) never touches a namespace or tap whose owner is alive
 DEFAULT_HOST_ADDR = "192.168.122.1"
+IPV6_SYSCTL_DIR = "/proc/sys/net/ipv6"   # absent when the kernel was booted with ipv6.disable=1
 GUEST_HOST_OFFSET = 10     # the first guest address is network + 10; one address per live worker
 _INTERFACE_RE = re.compile(r"<interface type='network'>.*?</interface>", re.S)
 _HEX = re.compile(r"[0-9a-f]{16}")
@@ -314,7 +315,10 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         self._ip("link", "set", "dev", tap, "netns", ns)
         self._ip("-n", ns, "link", "set", "dev", "lo", "up")
         # no IPv6 on the tap: the guest would otherwise reach the namespace's link-local address (nothing listens; less surface)
-        r = _run((["sudo"] if self.cfg.sudo else []) + ["ip", "netns", "exec", ns, "sysctl", "-q", "-w", f"net.ipv6.conf.{tap}.disable_ipv6=1"])
+        if not os.path.isdir(IPV6_SYSCTL_DIR):   # a kernel booted with ipv6.disable=1: no namespace has IPv6, nothing to turn off
+            r = subprocess.CompletedProcess([], 0, "", "")
+        else:
+            r = _run((["sudo"] if self.cfg.sudo else []) + ["ip", "netns", "exec", ns, "sysctl", "-q", "-w", f"net.ipv6.conf.{tap}.disable_ipv6=1"])
         if r.returncode != 0:   # fail closed: the guest would otherwise share link-local IPv6 with the namespace
             raise RuntimeError(f"{ns}: IPv6 not disabled on {tap} (rc {r.returncode}): {(r.stderr or '').strip()[:200]}")
         self._ip("-n", ns, "addr", "replace", str(self._host), "dev", tap)
