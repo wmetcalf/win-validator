@@ -660,3 +660,36 @@ def test_the_gate_sends_the_knobs_production_sends_and_honours_rev_none_by_choic
     verdicts = {"b": off, "r": rev}
     assert _gate(gr, monkeypatch, tmp_path, verdicts) is True
     assert verdicts["_sent"] and all(p == {"rev": "none"} for p in verdicts["_sent"])
+
+
+def test_a_wrong_status_is_named_before_the_chain_shape(gr, monkeypatch, tmp_path, caplog):
+    rev = {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "unknown"}}
+    assert _gate(gr, monkeypatch, tmp_path, {"b": {"status": "NotSigned", "chain": None}, "r": rev}) is False
+    assert "gave 'NotSigned', expected 'Valid'" in caplog.text
+
+
+@pytest.mark.parametrize("rev_env, rc, passes", [
+    ("none", "online", False), ("offline", "online", False),      # the agent ignored ?rev=
+    ("offline", "unknown", True), ("offline", "offline", True), ("none", "none", True), ("online", "none", False),
+])
+def test_the_gate_checks_the_agent_applied_the_rev_it_sent(gr, monkeypatch, tmp_path, rev_env, rc, passes):
+    monkeypatch.setenv("AUTHENTICODE_REV", rev_env)
+    b = {"status": "Valid", "chain": {"revoked": False, "revocation_checked": rc}}
+    r = {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": rc}}
+    assert _gate(gr, monkeypatch, tmp_path, {"b": b, "r": r}) is passes
+
+
+@pytest.mark.parametrize("env", [
+    {"AUTHENTICODE_REV": "onlien"}, {"AUTHENTICODE_REV": '"online\nBLASTBOX_DATABASE_URL=postgresql://u:SECRET@h/db'},
+    {"AUTHENTICODE_SCRIPTS": "ps"}, {"AUTHENTICODE_SCRIPTS": "PS", "AUTHENTICODE_REV": "offline"},
+])
+def test_the_gate_sends_exactly_what_the_engine_sends(gr, monkeypatch, tmp_path, env):
+    from winval_blastbox.engine import effective_knobs, request_params
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    ok = {"status": "Valid", "chain": {"revoked": False, "revocation_checked": "offline"}}
+    verdicts = {"b": ok, "r": {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "offline"}}}
+    _gate(gr, monkeypatch, tmp_path, verdicts)
+    want = request_params(effective_knobs()) or None
+    assert verdicts["_sent"] and all(p == want for p in verdicts["_sent"])
+    assert not any("SECRET" in str(p) for p in verdicts["_sent"])

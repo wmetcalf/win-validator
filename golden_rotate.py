@@ -824,14 +824,12 @@ def validate_golden(qcow2: str) -> bool:
         checks = [(BENIGN, "Valid")]
         if REVOKED:
             checks.append((REVOKED, "Revoked"))
-        # judged with the knobs production sends (engine.detonate): AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS from this env
-        from winval_blastbox.engine import KNOB_VALUES, _KNOB_FALLBACK_VALUE, _KNOB_PARAM
-        gate_params = {}
-        for k in KNOB_VALUES:
-            v = (os.environ.get(k) or "").strip()
-            if v:
-                gate_params[_KNOB_PARAM[k]] = v if v in KNOB_VALUES[k].split("|") else _KNOB_FALLBACK_VALUE[k]
-        rev_off_by_choice = gate_params.get("rev") == "none"   # the operator turned revocation off for production on purpose
+        # judged with the knobs production sends (engine.detonate, the same function): AUTHENTICODE_REV / AUTHENTICODE_SCRIPTS
+        from winval_blastbox.engine import effective_knobs, request_params
+        gate_params = request_params(effective_knobs())
+        sent_rev = gate_params.get("rev", "online")   # myatg's own default when no ?rev= is sent
+        # what myatg reports per rev it actually applied: an answer outside this set means the agent ignored ?rev=
+        expected_rc = {"none": ("none",), "offline": ("offline", "unknown")}.get(sent_rev, ("online", "offline", "unknown"))
         for sample, want in checks:
             try:
                 verdict = agent_validate(slot.endpoint, sample, netns=slot_netns(slot), params=gate_params or None)
@@ -840,20 +838,20 @@ def validate_golden(qcow2: str) -> bool:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False
             logger.info("gate: %s -> %s (want %s)", Path(sample).name, got, want)
+            if want == "Revoked" and got in ("Revoked", "Distrusted"):
+                pass   # caught either way: myatg answers Distrusted for a signer on the Disallowed list (it overrides Revoked)
+            elif got != want:
+                logger.error("GATE FAIL: %s gave %r, expected %r", sample, got, want)
+                return False
             chain = verdict.get("chain")
-            if not isinstance(chain, dict):   # no chain evaluated (a script judged by the PS fallback): revocation unjudgeable
-                logger.error("GATE FAIL: %s produced no certificate chain: the gate cannot see revocation; use a signed PE", sample)
+            if not isinstance(chain, dict):   # no chain evaluated with the right status (a script judged by the PS fallback)
+                logger.error("GATE FAIL: %s gave %r but no certificate chain: the gate cannot see revocation on it", sample, got)
                 return False
             rc = chain.get("revocation_checked")
-            if rc not in ("online", "offline", "unknown") and not (rc == "none" and rev_off_by_choice):
-                # revocation switched OFF (or an unknown shape) though production checks it: workers would never report a
-                # revoked signer again, and a Disallowed-list sample (Distrusted either way) cannot show it
-                logger.error("GATE FAIL: %s was judged with revocation_checked %r (checking off or unknown)", sample, rc)
-                return False
-            if want == "Revoked" and got in ("Revoked", "Distrusted"):
-                continue   # caught either way: myatg answers Distrusted for a signer on the Disallowed list (it overrides Revoked)
-            if got != want:
-                logger.error("GATE FAIL: %s gave %r, expected %r", sample, got, want)
+            if rc not in expected_rc:
+                # the agent ignored the rev production sends, or switched revocation OFF though production checks it: workers
+                # would never report a revoked signer again, and a Disallowed-list sample (Distrusted either way) cannot show it
+                logger.error("GATE FAIL: %s was judged with revocation_checked %r, which rev=%s cannot produce", sample, rc, sent_rev)
                 return False
         logger.info("GATE PASS: candidate %s validated", qcow2)
         return True
