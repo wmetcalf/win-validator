@@ -223,7 +223,7 @@ class NetnsVmRuntime(LibvirtVmRuntime):
             if fd is None:
                 held.append(sid)
             else:
-                NetnsVmRuntime._drop_lock(sid, fd)
+                os.close(fd)   # never unlinked here: an owner may have just opened this path and not flock'ed it yet
         return held
 
     # ---- addressing -----------------------------------------------------------------------------
@@ -351,24 +351,29 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         """A previous life's namespaces and host-namespace taps: removed when no live process owns their worker id (the
         ownership lock, see LOCK_DIR) AND its domain is confirmed absent. A namespace whose domain still exists is left alone —
         its guest is contained in it, and destroying a domain is not this runtime's call."""
-        held = self._held_sids()
         r = self._ip("netns", "list", check=False)
         for line in (r.stdout or "").splitlines():
             name = line.split()[0] if line.split() else ""
             if not name.startswith(NETNS_PREFIX) or not _HEX.fullmatch(name[len(NETNS_PREFIX):]):
                 continue
             sid = name[len(NETNS_PREFIX):]
-            if sid in held:
+            lock = self._take_lock(sid)   # held for the whole removal: the owner flocks BEFORE `netns add`, so a namespace whose
+            if lock is None:              # lock this process can take has no live owner, and none can appear while it is held
                 continue   # a live process (the pool beside a rotation gate, or the gate beside the pool) owns it
-            if not self._domain_absent(sid):
-                logger.warning("netns %s: its domain bbvm-%s may still exist; left in place", name, sid)
-                continue
-            self._ip("-n", name, "link", "del", "dev", tap_name(sid), check=False)
-            self._ip("netns", "del", name, check=False)
-            logger.info("removed orphaned worker namespace %s", name)
+            try:
+                if not self._domain_absent(sid):
+                    logger.warning("netns %s: its domain bbvm-%s may still exist; left in place", name, sid)
+                    continue
+                self._ip("-n", name, "link", "del", "dev", tap_name(sid), check=False)
+                self._ip("netns", "del", name, check=False)
+                logger.info("removed orphaned worker namespace %s", name)
+            finally:
+                self._drop_lock(sid, lock)
         # a tap still in the host namespace (a death between `tuntap add` and the move, or inside a revert window): DOWN and
         # unaddressed, but persistent. Its name carries the first 12 hex of the id; removed when no live owner or domain matches
         r = self._ip("-o", "link", "show", "type", "tun", check=False)
+        held = self._held_sids()   # AFTER listing the taps: an owner flocks before it creates its tap, so every tap listed above
+        # that has a live owner is held by now (the reverse order let an owner flock and create its tap between the two reads)
         domains = (self._virsh("list", "--all", "--name").stdout or "") if r.stdout else ""
         for line in (r.stdout or "").splitlines():
             m = re.match(r"\d+:\s+(" + re.escape(TAP_PREFIX) + r"[0-9a-f]{12})[:@]", line)
