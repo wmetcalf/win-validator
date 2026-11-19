@@ -29,6 +29,7 @@ Lifecycle (driven by blastbox's LibvirtVmRuntime; only the network-specific step
 """
 from __future__ import annotations
 
+import fcntl
 import ipaddress
 import logging
 import os
@@ -47,6 +48,8 @@ logger = logging.getLogger("winval.netns")
 NETNS_PREFIX = "wvn-"      # ip netns name: wvn-<16 hex sid>
 TAP_PREFIX = "wvt"         # tap name: wvt<first 12 hex of the sid> = 15 chars, IFNAMSIZ-1
 NETNS_DIR = "/run/netns"   # where `ip netns add` binds the namespace (iproute2's fixed location)
+LOCK_DIR = "/run/winval/netns"   # <sid>.lock, flock'ed by the process that owns the worker for the worker's whole life: the orphan
+# sweep of ANOTHER process (the rotation gate beside the live pool, a restart) never touches a namespace or tap whose owner is alive
 DEFAULT_HOST_ADDR = "192.168.122.1"
 GUEST_HOST_OFFSET = 10     # the first guest address is network + 10; one address per live worker
 _INTERFACE_RE = re.compile(r"<interface type='network'>.*?</interface>", re.S)
@@ -64,7 +67,15 @@ def _run(argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
 
 
 def _spawn_dhcp(argv: list[str]) -> subprocess.Popen:
-    return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # its own session, so a stop can signal the whole group; `ip netns exec` and setpriv both exec, so the child IS dnsmasq
+    import tempfile
+    err = tempfile.TemporaryFile()   # a file, never a pipe: a pipe nobody drains would block dnsmasq once it fills
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+    p.errfile = err   # type: ignore[attr-defined]
+    return p
+
+
+DHCP_UID = 65534   # nobody/nogroup: dnsmasq runs unprivileged from its first instruction (see _start_dhcp)
 
 
 def netns_socket(netns: str, family: int = socket.AF_INET, type_: int = socket.SOCK_STREAM) -> socket.socket:
@@ -171,15 +182,62 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         self._by_domain: dict[str, str] = {}
         self._sweep_orphans()
 
+    # ---- ownership ------------------------------------------------------------------------------
+    @staticmethod
+    def _take_lock(sid: str) -> int | None:
+        """flock LOCK_DIR/<sid>.lock without blocking: the descriptor when this process now owns the sid, None when another
+        live process holds it. The lock dies with its holder, so a crashed owner's sid is free to sweep."""
+        os.makedirs(LOCK_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(LOCK_DIR, f"{sid}.lock"), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            os.close(fd)
+            return None
+
+    @staticmethod
+    def _drop_lock(sid: str, fd: int | None) -> None:
+        if fd is None:
+            return
+        try:
+            os.unlink(os.path.join(LOCK_DIR, f"{sid}.lock"))
+        except OSError:
+            pass
+        os.close(fd)
+
+    @staticmethod
+    def _held_sids() -> list[str]:
+        """sids whose lock a LIVE process holds (this one included)."""
+        try:
+            names = os.listdir(LOCK_DIR)
+        except OSError:
+            return []
+        held = []
+        for n in names:
+            sid = n[:-5] if n.endswith(".lock") else ""
+            if not _HEX.fullmatch(sid):
+                continue
+            fd = NetnsVmRuntime._take_lock(sid)
+            if fd is None:
+                held.append(sid)
+            else:
+                NetnsVmRuntime._drop_lock(sid, fd)
+        return held
+
     # ---- addressing -----------------------------------------------------------------------------
     def _alloc_guest(self, sid: str) -> str:
+        lock = self._take_lock(sid)
+        if lock is None:
+            raise RuntimeError(f"worker id {sid} is held by another live process")
         with self._lock:
             used = {v["guest"] for v in self._by_sid.values()}
             for off in self._guest_offsets:
                 ip = str(self._host.network.network_address + off)
                 if ip not in used:
-                    self._by_sid[sid] = {"netns": netns_name(sid), "tap": tap_name(sid), "guest": ip, "dhcp": None}
+                    self._by_sid[sid] = {"netns": netns_name(sid), "tap": tap_name(sid), "guest": ip, "dhcp": None, "lock": lock}
                     return ip
+        self._drop_lock(sid, lock)
         raise RuntimeError("no free guest address left in the worker /24")
 
     def netns_of(self, slot: VmSlot) -> str | None:
@@ -207,8 +265,8 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         self._ip("-n", ns, "link", "set", "dev", "lo", "up")
         # no IPv6 on the tap: the guest would otherwise reach the namespace's link-local address (nothing listens; less surface)
         r = _run((["sudo"] if self.cfg.sudo else []) + ["ip", "netns", "exec", ns, "sysctl", "-q", "-w", f"net.ipv6.conf.{tap}.disable_ipv6=1"])
-        if r.returncode != 0:
-            logger.warning("%s: IPv6 not disabled on %s inside %s (rc %s); the namespace still has no route out", rec["netns"], tap, ns, r.returncode)
+        if r.returncode != 0:   # fail closed: the guest would otherwise share link-local IPv6 with the namespace
+            raise RuntimeError(f"{ns}: IPv6 not disabled on {tap} (rc {r.returncode}): {(r.stderr or '').strip()[:200]}")
         self._ip("-n", ns, "addr", "replace", str(self._host), "dev", tap)
         self._ip("-n", ns, "link", "set", "dev", tap, "up")
 
@@ -217,14 +275,39 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         return self._ip("-n", rec["netns"], "link", "set", "dev", rec["tap"], "netns", "1", check=False).returncode == 0
 
     def _start_dhcp(self, rec: dict) -> None:
-        guest, tap = rec["guest"], rec["tap"]
-        argv = (["sudo"] if self.cfg.sudo else []) + [
-            "ip", "netns", "exec", rec["netns"], "dnsmasq", "--keep-in-foreground", "--conf-file=/dev/null", "--port=0",
-            "--leasefile-ro", "--bind-dynamic", f"--interface={tap}", "--except-interface=lo",
+        """dnsmasq is the ONE host process the guest can send packets to, so it holds as little as it can run with: started
+        through setpriv as nobody, no_new_privs, with CAP_NET_RAW alone in every set (its DHCP needs raw sockets; they reach
+        only the worker namespace's own interfaces). Never CAP_NET_ADMIN: started as root, dnsmasq keeps CAP_NET_ADMIN of
+        the init user namespace after dropping its uid — enough, from inside the worker namespace, to move the tap into the
+        host namespace. Binding the DHCP port without CAP_NET_BIND_SERVICE is allowed by
+        ip_unprivileged_port_start=0, a sysctl of the WORKER namespace only; replies are broadcast (no ARP injection without
+        CAP_NET_ADMIN). No pid file (the default is the host's /run/dnsmasq.pid, shared by every worker), no lease file.
+        Not prefixed with sudo: this process is root (netns_socket's setns needs it), and a sudo parent would not relay the stop."""
+        guest, tap, ns = rec["guest"], rec["tap"], rec["netns"]
+        r = _run(["ip", "netns", "exec", ns, "sysctl", "-q", "-w", "net.ipv4.ip_unprivileged_port_start=0"])
+        if r.returncode != 0:
+            raise RuntimeError(f"{ns}: ip_unprivileged_port_start not set (rc {r.returncode}): {(r.stderr or '').strip()[:200]}")
+        argv = [
+            "ip", "netns", "exec", ns,
+            "setpriv", f"--reuid={DHCP_UID}", f"--regid={DHCP_UID}", "--clear-groups", "--inh-caps=-all,+net_raw",
+            "--ambient-caps=-all,+net_raw", "--bounding-set=-all,+net_raw", "--no-new-privs",
+            "dnsmasq", "--keep-in-foreground", "--conf-file=/dev/null", "--port=0", "--pid-file=",
+            "--leasefile-ro", "--bind-dynamic", f"--interface={tap}", "--except-interface=lo", "--dhcp-broadcast",
             f"--dhcp-range={guest},{guest},255.255.255.0,infinite",
             "--dhcp-option=3", "--dhcp-option=6",   # no router, no DNS server: there is nothing to route to or resolve with
         ]
-        rec["dhcp"] = _spawn_dhcp(argv)
+        p = _spawn_dhcp(argv)
+        rec["dhcp"] = p
+        try:
+            p.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            return   # running
+        f = getattr(p, "errfile", None)
+        err = b""
+        if f is not None:
+            f.seek(0)
+            err = f.read(4096)
+        raise RuntimeError(f"{ns}: dnsmasq exited at start (rc {p.returncode}): {err.decode('utf-8', 'replace').strip()[:200]}")
 
     def _stop_dhcp(self, rec: dict) -> None:
         p = rec.get("dhcp")
@@ -237,6 +320,7 @@ class NetnsVmRuntime(LibvirtVmRuntime):
         except Exception:  # noqa: BLE001
             try:
                 p.kill()
+                p.wait(timeout=10)
             except Exception:  # noqa: BLE001
                 logger.warning("%s: dnsmasq could not be stopped", rec["netns"], exc_info=True)
 
@@ -255,25 +339,46 @@ class NetnsVmRuntime(LibvirtVmRuntime):
             for d, s in list(self._by_domain.items()):
                 if s == sid:
                     self._by_domain.pop(d, None)
+        self._drop_lock(sid, rec.get("lock"))
+
+    def _domain_absent(self, sid: str) -> bool:
+        st = self._virsh("domstate", f"bbvm-{sid}")
+        err = (st.stderr or "").lower()
+        return st.returncode != 0 and ("domain not found" in err or "failed to get domain" in err)   # an unanswering libvirt is unknown, not absent
 
     def _sweep_orphans(self) -> None:
-        """A previous life's namespaces whose domain no longer exists: removed (the tap inside goes with it). A namespace whose
-        domain still exists is left alone — its guest is contained in it, and destroying a domain is not this runtime's call."""
+        """A previous life's namespaces and host-namespace taps: removed when no live process owns their worker id (the
+        ownership lock, see LOCK_DIR) AND its domain is confirmed absent. A namespace whose domain still exists is left alone —
+        its guest is contained in it, and destroying a domain is not this runtime's call."""
+        held = self._held_sids()
         r = self._ip("netns", "list", check=False)
         for line in (r.stdout or "").splitlines():
             name = line.split()[0] if line.split() else ""
             if not name.startswith(NETNS_PREFIX) or not _HEX.fullmatch(name[len(NETNS_PREFIX):]):
                 continue
             sid = name[len(NETNS_PREFIX):]
-            st = self._virsh("domstate", f"bbvm-{sid}")
-            if st.returncode == 0:
-                logger.warning("netns %s: its domain bbvm-%s still exists; left in place", name, sid)
+            if sid in held:
+                continue   # a live process (the pool beside a rotation gate, or the gate beside the pool) owns it
+            if not self._domain_absent(sid):
+                logger.warning("netns %s: its domain bbvm-%s may still exist; left in place", name, sid)
                 continue
-            if "domain not found" not in (st.stderr or "").lower() and "failed to get domain" not in (st.stderr or "").lower():
-                continue   # libvirt did not answer: unknown, not absent
             self._ip("-n", name, "link", "del", "dev", tap_name(sid), check=False)
             self._ip("netns", "del", name, check=False)
             logger.info("removed orphaned worker namespace %s", name)
+        # a tap still in the host namespace (a death between `tuntap add` and the move, or inside a revert window): DOWN and
+        # unaddressed, but persistent. Its name carries the first 12 hex of the id; removed when no live owner or domain matches
+        r = self._ip("-o", "link", "show", "type", "tun", check=False)
+        domains = (self._virsh("list", "--all", "--name").stdout or "") if r.stdout else ""
+        for line in (r.stdout or "").splitlines():
+            m = re.match(r"\d+:\s+(" + re.escape(TAP_PREFIX) + r"[0-9a-f]{12})[:@]", line)
+            if not m:
+                continue
+            tap = m.group(1)
+            prefix = tap[len(TAP_PREFIX):]
+            if any(h.startswith(prefix) for h in held) or f"bbvm-{prefix}" in domains:
+                continue
+            self._ip("link", "del", "dev", tap, check=False)
+            logger.info("removed orphaned worker tap %s", tap)
 
     # ---- LibvirtVmRuntime overrides -------------------------------------------------------------
     def _assert_egress_is_governed(self) -> None:
@@ -357,6 +462,23 @@ class NetnsVmRuntime(LibvirtVmRuntime):
                 except Exception:  # noqa: BLE001 — the agent then never answers; recycle() raises and the pool reaps the slot
                     logger.warning("%s: tap not returned to its namespace after the revert", rec["netns"], exc_info=True)
 
+    def is_ready(self, slot: VmSlot) -> bool:
+        if slot.slot_id not in self._by_sid:
+            return False   # torn down (an inline reap of a failed finalize): its address may already be another worker's
+        return super().is_ready(slot)
+
+    def recycle(self, slot: VmSlot, ready_timeout_s: float = 60.0) -> None:
+        if slot.slot_id not in self._by_sid:
+            raise RuntimeError(f"{slot.domain}: its namespace is gone; cannot recycle")
+        super().recycle(slot, ready_timeout_s)
+
     def reap(self, slot: VmSlot) -> None:
-        super().reap(slot)   # raises (slot quarantined) when the guest may still run: the namespace then stays, containing it
+        try:
+            super().reap(slot)
+        except Exception:
+            # the base raises in two cases: destroy failed (the guest may still run — the namespace stays, containing it), or
+            # the guest is gone and a later cleanup step failed (the overlay rm): then nothing is left to contain
+            if self._domain_absent(slot.domain[len("bbvm-"):]):
+                self._teardown(slot.slot_id)
+            raise
         self._teardown(slot.slot_id)

@@ -92,8 +92,9 @@ class TestTheManagersKnobs:
     def test_block_internal_is_ignored(self, tmp_path):
         assert run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_BLOCK_INTERNAL="1")) == "ok"
 
-    def test_a_malformed_namespace_address_is_refused(self, tmp_path):
-        assert "AUTHENTICODE_AGENT_CALLER" in run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_AGENT_CALLER="Any"))
+    @pytest.mark.parametrize("caller", ["Any", "192.168.122.0", "10.0.0.255"])
+    def test_a_namespace_address_the_manager_refuses_is_refused(self, tmp_path, caller):
+        assert "AUTHENTICODE_AGENT_CALLER" in run_upgrade_gate("egress", write_env(tmp_path, AUTHENTICODE_AGENT_CALLER=caller))
 
     def test_the_exit_is_judged_before_the_golden_base(self, tmp_path):
         """Both are wrong; the manager refuses the exit first, so the gate names it first."""

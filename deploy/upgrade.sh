@@ -139,7 +139,9 @@ if sys.argv[1] == "egress":
     caller = (env.get("AUTHENTICODE_AGENT_CALLER") or "").strip()
     if caller:
         import ipaddress
-        try: ipaddress.IPv4Address(caller)
+        try:
+            a = ipaddress.IPv4Address(caller)
+            if int(a) & 0xff in (0, 255): raise ValueError("network or broadcast address of its /24")   # netns_isolation.host_addr
         except ValueError: print("malformed: AUTHENTICODE_AGENT_CALLER is not one IPv4 address (the host side of every worker's private namespace); the pool-manager refuses that posture at start"); sys.exit(0)
     import shutil
     missing = [t for t in ("ip", "dnsmasq") if not shutil.which(t, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")]   # pool_manager.HOST_TOOLS

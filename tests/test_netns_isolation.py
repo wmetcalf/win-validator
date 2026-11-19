@@ -30,6 +30,8 @@ class Host:
         self.defined_xml: list[str] = []
         self.fail: dict[str, tuple[int, str]] = {}   # first word(s) -> (rc, stderr)
         self.netns_list = ""
+        self.host_taps = ""
+        self.domains = ""
         self.domstate: dict[str, tuple[int, str, str]] = {}
         self.dhcp: list = []
 
@@ -49,6 +51,10 @@ class Host:
             return subprocess.CompletedProcess(argv, 1, "", "")   # no overlay of that name yet
         if argv[:3] == ["ip", "netns", "list"]:
             return subprocess.CompletedProcess(argv, 0, self.netns_list, "")
+        if argv[:3] == ["ip", "-o", "link"]:
+            return subprocess.CompletedProcess(argv, 0, self.host_taps, "")
+        if argv[:2] == ["virsh", "list"]:
+            return subprocess.CompletedProcess(argv, 0, self.domains, "")
         if argv[:2] == ["virsh", "domstate"]:
             rc, out, err = self.domstate.get(argv[2], (0, "running\n", ""))
             return subprocess.CompletedProcess(argv, rc, out, err)
@@ -66,7 +72,11 @@ class Host:
             def terminate(self):
                 P.terminated = True
 
+            returncode = None
+
             def wait(self, timeout=None):
+                if not P.terminated:
+                    raise subprocess.TimeoutExpired("dnsmasq", timeout)
                 return 0
 
             def kill(self):
@@ -83,7 +93,8 @@ class Host:
 
 
 @pytest.fixture
-def host(monkeypatch):
+def host(monkeypatch, tmp_path):
+    monkeypatch.setattr(ni, "LOCK_DIR", str(tmp_path / "locks"))
     h = Host()
     monkeypatch.setattr(libvirt_vm, "_run", h.run)
     monkeypatch.setattr(ni, "_run", h.run)
@@ -108,10 +119,17 @@ def test_spawn_builds_the_namespace_around_the_domain(host):
     move = host.index(lambda c: c == ["ip", "link", "set", "dev", tap, "netns", ns])
     addr = host.index(lambda c: c == ["ip", "-n", ns, "addr", "replace", "192.168.122.1/24", "dev", tap])
     up = host.index(lambda c: c == ["ip", "-n", ns, "link", "set", "dev", tap, "up"])
-    dhcp = host.index(lambda c: c[:5] == ["ip", "netns", "exec", ns, "dnsmasq"])
-    assert add < tuntap < start < move < addr < up < dhcp
+    port = host.index(lambda c: c == ["ip", "netns", "exec", ns, "sysctl", "-q", "-w", "net.ipv4.ip_unprivileged_port_start=0"])
+    dhcp = host.index(lambda c: c[:5] == ["ip", "netns", "exec", ns, "setpriv"])
+    assert add < tuntap < start < move < addr < up < port < dhcp
     dns = host.cmds[dhcp]
-    assert "--port=0" in dns and f"--interface={tap}" in dns
+    assert "--port=0" in dns and f"--interface={tap}" in dns and "--pid-file=" in dns
+    # unprivileged from its first instruction: the guest-facing process can never move the tap out of the namespace
+    pre = dns[: dns.index("dnsmasq")]
+    assert {"--reuid=65534", "--bounding-set=-all,+net_raw", "--inh-caps=-all,+net_raw", "--ambient-caps=-all,+net_raw",
+            "--no-new-privs"} <= set(pre)
+    assert not any("net_admin" in w for w in dns)
+    assert "sudo" not in dns
     assert "--dhcp-range=192.168.122.10,192.168.122.10,255.255.255.0,infinite" in dns
 
 
@@ -319,3 +337,100 @@ def test_a_refused_agent_in_the_namespace_is_a_worker_fault(monkeypatch, tmp_pat
     with pytest.raises(urllib.error.URLError) as exc:
         agent_validate(("192.168.122.10", 8765), str(sample), netns="wvn-" + "e" * 16)
     assert fault_of(exc.value) == "worker"
+
+
+def _hold(sid):
+    """Another live process owning a worker id: its own open + flock of the same lock file."""
+    import fcntl
+    import os
+    os.makedirs(ni.LOCK_DIR, exist_ok=True)
+    fd = os.open(os.path.join(ni.LOCK_DIR, f"{sid}.lock"), os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def test_the_sweep_never_takes_a_namespace_another_live_process_owns(host):
+    """The rotation gate builds its runtime while the pool runs: a pool worker mid-spawn has a namespace but no domain yet."""
+    sid = "f" * 16
+    fd = _hold(sid)
+    host.netns_list = f"wvn-{sid}\n"
+    host.domstate[f"bbvm-{sid}"] = (1, "", "error: failed to get domain")
+    runtime()
+    assert ["ip", "netns", "del", f"wvn-{sid}"] not in host.cmds
+    import os
+    os.close(fd)
+    runtime()   # the owner is gone: now it is an orphan
+    assert ["ip", "netns", "del", f"wvn-{sid}"] in host.cmds
+
+
+def test_a_gate_runtime_beside_a_spawning_pool_leaves_its_namespace(host):
+    pool = runtime()
+    slot = pool.spawn()
+    host.netns_list = f"{slot.netns}\n"
+    host.domstate[slot.domain] = (1, "", "error: failed to get domain")   # as between `netns add` and `virsh define`
+    runtime()
+    assert ["ip", "netns", "del", slot.netns] not in host.cmds
+
+
+def test_orphaned_host_namespace_taps_are_removed_owned_ones_left(host):
+    gone, owned, defined = "1" * 16, "2" * 16, "3" * 16
+    fd = _hold(owned)
+    host.host_taps = "".join(f"{i}: wvt{s[:12]}: <BROADCAST> mtu 1500\n" for i, s in enumerate((gone, owned, defined), 40)) + "50: tun0: <POINTOPOINT>\n"
+    host.domains = f"bbvm-{defined}\n"
+    runtime()
+    assert ["ip", "link", "del", "dev", f"wvt{gone[:12]}"] in host.cmds
+    assert ["ip", "link", "del", "dev", f"wvt{owned[:12]}"] not in host.cmds
+    assert ["ip", "link", "del", "dev", f"wvt{defined[:12]}"] not in host.cmds
+    assert ["ip", "link", "del", "dev", "tun0"] not in host.cmds
+    import os
+    os.close(fd)
+
+
+def test_a_reap_that_fails_after_the_guest_is_gone_still_tears_down(host):
+    rt = runtime()
+    slot = rt.spawn()
+    host.fail["rm -f"] = (1, "rm: cannot remove: Device or resource busy")
+    host.domstate[slot.domain] = (1, "", "error: failed to get domain")
+    with pytest.raises(RuntimeError):
+        rt.reap(slot)
+    assert ["ip", "netns", "del", slot.netns] in host.cmds
+    assert host.dhcp[0].terminated and rt._by_sid == {}
+
+
+def test_a_torn_down_slot_is_never_probed_in_anothers_namespace(host, monkeypatch):
+    seen = []
+    monkeypatch.setattr(ni, "netns_connect", lambda ns, addr, timeout: seen.append(ns) or socket.socket())
+    rt = runtime()
+    a = rt.spawn()
+    rt.reap(a)
+    b = rt.spawn()
+    assert b.ip == a.ip
+    assert rt.is_ready(a) is False and seen == []
+    with pytest.raises(RuntimeError):
+        rt.recycle(a)
+
+
+def test_a_dnsmasq_that_dies_at_start_fails_the_spawn(host, monkeypatch):
+    class Dead:
+        returncode = 2
+        stderr = None
+
+        def wait(self, timeout=None):
+            return 2
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+    monkeypatch.setattr(ni, "_spawn_dhcp", lambda argv: Dead())
+    rt = runtime()
+    with pytest.raises(RuntimeError, match="dnsmasq exited"):
+        rt.spawn()
+    assert rt._by_sid == {}
+
+
+def test_ipv6_left_on_fails_the_spawn_closed(host):
+    host.fail["ip netns exec"] = (1, "sysctl: permission denied")
+    with pytest.raises(RuntimeError):
+        runtime().spawn()
