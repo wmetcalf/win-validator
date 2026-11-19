@@ -721,12 +721,17 @@ def test_ipv6_that_could_come_up_is_always_turned_off(host, monkeypatch, tmp_pat
     assert any("disable_ipv6=1" in " ".join(c) for c in host.cmds)
 
 
-@pytest.mark.parametrize("modinfo_rc, skips", [(1, True), (0, False)])   # CONFIG_IPV6=n vs a module not loaded yet
-def test_a_kernel_without_ipv6_support_skips_but_a_loadable_module_does_not(host, monkeypatch, tmp_path, modinfo_rc, skips):
+@pytest.mark.parametrize("config, skips", [
+    ("# CONFIG_IPV6 is not set\n", True),   # built without IPv6: nothing can ever come up
+    ("CONFIG_IPV6=m\n", False),             # a module not loaded yet: fail closed
+    (None, False),                          # no config to read: fail closed
+])
+def test_only_a_kernel_built_without_ipv6_skips_the_sysctl(host, monkeypatch, tmp_path, config, skips):
+    import os
     monkeypatch.setattr(ni, "IPV6_DISABLE_PARAM", str(tmp_path / "no-param"))
     monkeypatch.setattr(ni, "IPV6_SYSCTL_DIR", str(tmp_path / "no-sysctls"))
-    host.fail["modinfo"] = (modinfo_rc, "") if modinfo_rc else (0, "")
-    if not modinfo_rc:
-        host.fail.pop("modinfo")
+    monkeypatch.setattr(ni, "KERNEL_CONFIG_DIR", str(tmp_path))
+    if config is not None:
+        (tmp_path / f"config-{os.uname().release}").write_text(config)
     runtime().spawn()
     assert any("disable_ipv6=1" in " ".join(c) for c in host.cmds) is not skips
