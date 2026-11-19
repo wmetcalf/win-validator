@@ -11,7 +11,7 @@ failure is surfaced — so a bad bake (the WU-wedge / corruption scenarios) neve
                      -> overlay clone -> refresh trust state -> flatten -> candidate.qcow2
                      Every GOLDEN_MAX_CHAIN cycles (or GOLDEN_REBAKE_FROM=master) the cycle is
                      instead golden_build's FULL bake from the packer master (it carries no agent).
-  validate_golden()  boot a worker off a qcow2 -> assert benign==Valid AND revoked==Revoked
+  validate_golden()  boot a worker off a qcow2 -> assert benign==Valid AND revoked in (Revoked, Distrusted), revocation on
   rotate()           backup current base (keep last N) -> promote candidate -> base -> record the
                      chain depth (beside the golden + the mirror off the images store) -> restart
                      the pool-manager so the promoted golden is in service
@@ -410,7 +410,7 @@ CONVERT_TIMEOUT_S = _env_int("GOLDEN_CONVERT_TIMEOUT_S", 3600, floor=60)   # the
 SSH_KEY = os.environ.get("AUTHENTICODE_SSH_KEY", "/etc/winval/win_golden")
 GRAVEYARD = os.environ.get("GOLDEN_GRAVEYARD", "C:\\certgraveyard\\cert_graveyard_database.csv")
 BENIGN = os.environ.get("GOLDEN_BENIGN_SAMPLE", "/var/lib/winval/samples/whoami.exe")
-REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status==Revoked when set
+REVOKED = os.environ.get("GOLDEN_REVOKED_SAMPLE", "")  # optional; checks status Revoked or Distrusted when set
 WARM_DIR = os.environ.get("GOLDEN_WARM_DIR", "")   # a GUEST directory (C:\...) of signed binaries for myatg --warm-cache; NOT AUTHENTICODE_WARM_DIR, which is a HOST corpus the pool posts to the agent        # optional in-guest dir of certs to re-warm
 
 _SSH = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
@@ -801,7 +801,7 @@ def _gate_spec(qcow2: str):
 
 def validate_golden(qcow2: str) -> bool:
     """Boot a throwaway worker off ``qcow2`` and assert the validation gate: a benign signed sample
-    is Valid AND (if configured) a known-revoked sample is Revoked. False if the worker won't boot,
+    is Valid AND (if configured) a known-revoked sample is Revoked or Distrusted, with revocation checking on. False if the worker won't boot,
     the agent won't answer, or any verdict is wrong — i.e. a broken/regressed golden is rejected."""
     from winval_blastbox.vm_pool import agent_validate, build_runtime, slot_netns, _sync_clock
     c = Path(qcow2)
@@ -826,11 +826,17 @@ def validate_golden(qcow2: str) -> bool:
             checks.append((REVOKED, "Revoked"))
         for sample, want in checks:
             try:
-                got = agent_validate(slot.endpoint, sample, netns=slot_netns(slot)).get("status")
+                verdict = agent_validate(slot.endpoint, sample, netns=slot_netns(slot))
+                got = verdict.get("status")
             except Exception as exc:
                 logger.error("GATE FAIL: agent_validate(%s) raised: %s", sample, exc)
                 return False
             logger.info("gate: %s -> %s (want %s)", Path(sample).name, got, want)
+            chain = verdict.get("chain") if isinstance(verdict.get("chain"), dict) else {}
+            if chain.get("revocation_checked") == "none":   # the agent's default switched revocation OFF: workers would never
+                # report a revoked signer again, and a Disallowed-list sample (Distrusted either way) cannot show it
+                logger.error("GATE FAIL: %s was judged with revocation checking switched off (revocation_checked 'none')", sample)
+                return False
             if want == "Revoked" and got in ("Revoked", "Distrusted"):
                 continue   # caught either way: myatg answers Distrusted for a signer on the Disallowed list (it overrides Revoked)
             if got != want:

@@ -578,6 +578,7 @@ VALID_ONLINE = {"status": "Valid", "chain": {"revoked": False, "revocation_check
     ({"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}, False),
     ({"status": "Valid"}, False),
     ({"status": "UntrustedRoot", "chain": {"revoked": False, "revocation_checked": "unknown"}}, False),
+    ({"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "none"}}, False),   # Disallowed sample, revocation OFF
 ])
 def test_the_revoked_half_of_the_gate_offline(gr, monkeypatch, tmp_path, rev, passes):
     assert _gate(gr, monkeypatch, tmp_path, {"b": VALID_ONLINE, "r": rev}) is passes
@@ -612,3 +613,29 @@ def test_a_loose_lock_directory_is_tightened(host):
     os.chmod(ni.LOCK_DIR, 0o1777)
     ni.NetnsVmRuntime._lock_dir()
     assert os.stat(ni.LOCK_DIR).st_mode & 0o7777 == 0o700
+
+
+def test_a_benign_judged_with_revocation_off_fails_the_gate(gr, monkeypatch, tmp_path):
+    rev = {"status": "Distrusted", "chain": {"revoked": False, "revocation_checked": "unknown"}}
+    off = {"status": "Valid", "chain": {"revoked": False, "revocation_checked": "none"}}
+    assert _gate(gr, monkeypatch, tmp_path, {"b": off, "r": rev}) is False
+
+
+def test_taking_a_lock_tightens_and_vets_the_lock_directory(host):
+    import os
+    os.makedirs(ni.LOCK_DIR, exist_ok=True)
+    os.chmod(ni.LOCK_DIR, 0o1777)
+    fd = ni.NetnsVmRuntime._take_lock("b" * 16, create=True)
+    os.close(fd)
+    assert os.stat(ni.LOCK_DIR).st_mode & 0o7777 == 0o700
+
+
+def test_a_symlinked_lock_directory_is_refused(host, tmp_path, monkeypatch):
+    import os
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link = tmp_path / "linked"
+    os.symlink(real, link)
+    monkeypatch.setattr(ni, "LOCK_DIR", str(link))
+    with pytest.raises(RuntimeError, match="not a directory owned"):
+        ni.NetnsVmRuntime._take_lock("b" * 16, create=True)

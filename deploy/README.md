@@ -174,6 +174,9 @@ to 30 min behind a rotation's lock, then re-copy the RAM base (below).
   `/opt` move invalidates) fails the start by name; every `BLASTBOX_*` value must parse. Diff your env file against `deploy/winval.env.example`.
 - **`WINVAL_JOB_RETENTION_DAYS` (default 7)** sweeps terminal and rowless job directories under `WINVAL_JOB_ROOT`
   from the first start: an existing job root loses history older than that unless you raise it first.
+- **`GOLDEN_REVOKED_SAMPLE` must be judgeable OFFLINE**: the gate's worker has no egress now, so a CRL/OCSP-revoked
+  sample that passed before (fetched live) answers `Valid` and fails every rotation after the full rebake. Swap it for a
+  signer on the Disallowed list (answers `Distrusted`) before the first rotation, or unset it.
 - Nothing else in the env file is reinterpreted; every new knob has a default.
 
 ## Why each piece is shaped this way
@@ -206,7 +209,7 @@ build_candidate()  private copy of the promoted golden --overlay clone--> refres
                    EVERY GOLDEN_MAX_CHAIN cycles (and always with GOLDEN_REBAKE_FROM=master) the cycle is instead the FULL
                    golden_build bake from the packer master: it stages and COMPILES the agent from MYATG_SRC (/opt/myatg —
                    whatever that checkout holds ships to every worker), installs the task and ACLs, refreshes, gates, promotes
-validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked==Revoked
+validate_golden()  boot a worker off the candidate --> gate: benign==Valid AND revoked in Revoked|Distrusted
 rotate()           backup current golden (keep last N) --> promote candidate --> restart pool-manager
                    (EVERY pool-manager start, this one included, fails each authenticode row still RUNNING
                    as "orphaned by a pool-manager restart" and deletes its spooled sample: a validation in

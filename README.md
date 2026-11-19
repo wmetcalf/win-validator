@@ -107,7 +107,7 @@ build_candidate()  private copy of the PROMOTED golden --overlay--> myatg.exe --
                    full golden_build bake from the packer master — the Disallowed store is add-only, so the
                    chain of goldens is reset from the pristine image; see deploy/README.md)
 validate_golden()  boot a throwaway worker off the candidate
-                   GATE:  benign binary == Valid  AND  known-revoked == Revoked
+                   GATE:  benign binary == Valid  AND  known-revoked in Revoked|Distrusted
 rotate()           back up current golden (keep last N) --> promote candidate --> restart pool-manager
 ```
 
